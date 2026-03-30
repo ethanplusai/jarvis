@@ -5,8 +5,13 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/ws": {
-        target: "ws://localhost:8340",
+        target: "https://localhost:8340",
         ws: true,
+        secure: false,
+      },
+      "/api": {
+        target: "https://localhost:8340",
+        secure: false,
       },
     },
   },
