@@ -1259,10 +1259,28 @@ _ctx_cache = {
 }
 
 
+_MACOS_BRIDGE_URL = os.getenv("MACOS_BRIDGE_URL", "").rstrip("/")
+
+
+def _call_bridge(path: str) -> dict | None:
+    """Call the macOS bridge (if configured) and return JSON. Returns None on failure."""
+    if not _MACOS_BRIDGE_URL:
+        return None
+    try:
+        import urllib.request as _req
+        import json as _json
+        with _req.urlopen(f"{_MACOS_BRIDGE_URL}{path}", timeout=3) as r:
+            return _json.loads(r.read())
+    except Exception:
+        return None
+
+
 def _refresh_context_sync():
     """Run in a SEPARATE THREAD — refreshes screen/calendar/mail context.
 
     This runs completely off the async event loop so it never blocks responses.
+    If MACOS_BRIDGE_URL is set (Docker mode), fetches data from the macOS bridge.
+    Otherwise, calls AppleScript directly (native macOS mode).
     """
     import threading
 
@@ -1316,6 +1334,30 @@ return windowList
             except Exception as e:
                 log.debug(f"Context thread error: {e}")
 
+            # Calendar — via bridge (Docker) or direct AppleScript (native)
+            try:
+                bridge_cal = _call_bridge("/calendar/today")
+                if bridge_cal and bridge_cal.get("formatted"):
+                    _ctx_cache["calendar"] = bridge_cal["formatted"]
+                else:
+                    from calendar_access import get_todays_events, format_events_for_context
+                    events = get_todays_events()
+                    _ctx_cache["calendar"] = format_events_for_context(events) or "No events today."
+            except Exception:
+                pass
+
+            # Mail — via bridge or direct
+            try:
+                bridge_mail = _call_bridge("/mail/unread")
+                if bridge_mail and bridge_mail.get("formatted"):
+                    _ctx_cache["mail"] = bridge_mail["formatted"]
+                else:
+                    from mail_access import get_unread_count, format_unread_summary, get_unread_messages
+                    msgs = get_unread_messages(limit=5)
+                    _ctx_cache["mail"] = format_unread_summary(msgs) or "No unread mail."
+            except Exception:
+                pass
+
             # Weather — refresh every loop (30s is fine, API is fast)
             try:
                 import urllib.request, json as _json
@@ -1323,7 +1365,7 @@ return windowList
                 with urllib.request.urlopen(url, timeout=3) as resp:
                     d = _json.loads(resp.read()).get("current", {})
                     temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
+                    _ctx_cache["weather"] = f"Current weather: {temp}°F"
             except Exception:
                 pass
 
@@ -2456,7 +2498,18 @@ async def api_test_fish(body: KeyTest):
 async def api_settings_status():
     import shutil as _shutil
     _, env_dict = _read_env()
+
+    # Claude Code CLI — check if `claude` binary is on PATH
     claude_installed = _shutil.which("claude") is not None
+
+    # Antigravity — means the Anthropic API key is set and valid
+    anthropic_key = env_dict.get("ANTHROPIC_API_KEY", "").strip()
+    antigravity_ok = bool(anthropic_key and anthropic_key != "your-anthropic-api-key-here")
+
+    # Terminal — check if osascript (AppleScript) is available (macOS only)
+    terminal_ok = _shutil.which("osascript") is not None
+
+    # macOS integrations
     calendar_ok = mail_ok = notes_ok = False
     try: await get_todays_events(); calendar_ok = True
     except Exception: pass
@@ -2464,13 +2517,17 @@ async def api_settings_status():
     except Exception: pass
     try: await get_recent_notes(count=1); notes_ok = True
     except Exception: pass
+
     memory_count = task_count = 0
     try: memory_count = len(get_important_memories(limit=9999))
     except Exception: pass
     try: task_count = len(get_open_tasks())
     except Exception: pass
+
     return {
         "claude_code_installed": claude_installed,
+        "antigravity_accessible": antigravity_ok,
+        "terminal_accessible": terminal_ok,
         "calendar_accessible": calendar_ok,
         "mail_accessible": mail_ok,
         "notes_accessible": notes_ok,
@@ -2479,7 +2536,7 @@ async def api_settings_status():
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
+            "anthropic": antigravity_ok,
             "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
@@ -2508,11 +2565,12 @@ async def api_save_preferences(body: PreferencesUpdate):
 
 @app.post("/api/restart")
 async def api_restart():
-    """Restart the JARVIS server."""
-    log.info("Restart requested — shutting down in 2 seconds")
+    """Restart the JARVIS server process."""
+    log.info("Restart requested — re-execing in 2 seconds")
     async def _restart():
         await asyncio.sleep(2)
-        cmd = [sys.executable, __file__, "--port", "8340", "--host", "0.0.0.0"]
+        # Re-exec this process with the same arguments, preserving host/port
+        cmd = [sys.executable] + sys.argv
         os.execv(sys.executable, cmd)
     asyncio.create_task(_restart())
     return {"status": "restarting"}

@@ -11,6 +11,8 @@
 
 interface StatusResponse {
   claude_code_installed: boolean;
+  antigravity_accessible: boolean;
+  terminal_accessible: boolean;
   calendar_accessible: boolean;
   mail_accessible: boolean;
   notes_accessible: boolean;
@@ -117,7 +119,9 @@ function buildPanelHTML(): string {
         <section class="settings-section" id="section-status">
           <h3>Connection Status</h3>
           <div class="status-grid">
+            <div class="status-row"><span class="status-dot" id="status-antigravity"></span><span>Antigravity</span></div>
             <div class="status-row"><span class="status-dot" id="status-claude-cli"></span><span>Claude Code CLI</span></div>
+            <div class="status-row"><span class="status-dot" id="status-terminal"></span><span>Terminal</span></div>
             <div class="status-row"><span class="status-dot" id="status-calendar"></span><span>Apple Calendar</span></div>
             <div class="status-row"><span class="status-dot" id="status-mail"></span><span>Apple Mail</span></div>
             <div class="status-row"><span class="status-dot" id="status-notes"></span><span>Apple Notes</span></div>
@@ -205,7 +209,9 @@ async function loadStatus() {
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
 
+    setDotStatus("status-antigravity", status.antigravity_accessible ? "green" : "red");
     setDotStatus("status-claude-cli", status.claude_code_installed ? "green" : "red");
+    setDotStatus("status-terminal", status.terminal_accessible ? "green" : "yellow");
     setDotStatus("status-calendar", status.calendar_accessible ? "green" : "red");
     setDotStatus("status-mail", status.mail_accessible ? "green" : "red");
     setDotStatus("status-notes", status.notes_accessible ? "green" : "red");

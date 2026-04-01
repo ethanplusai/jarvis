@@ -35,11 +35,22 @@ export function createVoiceInput(
   let shouldListen = false;
   let paused = false;
 
+  // Wake word patterns — strip these from the start of transcripts
+  // If nothing remains after stripping, the user just activated JARVIS (don't send)
+  const WAKE_WORD_RE = /^(hey\s+jarvis|ok\s+jarvis|hey\s+travis|jarvis|travis)\s*/i;
+
   recognition.onresult = (event: any) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
       if (event.results[i].isFinal) {
-        const text = event.results[i][0].transcript.trim();
-        if (text) onTranscript(text);
+        const rawText = event.results[i][0].transcript.trim();
+        // Strip wake word from the start
+        const text = rawText.replace(WAKE_WORD_RE, "").trim();
+        // Only send if there's actual content after stripping the wake word
+        if (text) {
+          onTranscript(text);
+        }
+        // If only wake word was said (e.g. "Hey Jarvis" alone), silently ignore —
+        // the orb is already in listening state so the user just sees it respond visually
       }
     }
   };

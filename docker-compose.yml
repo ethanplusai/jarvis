@@ -1,0 +1,66 @@
+version: "3.9"
+
+# ══════════════════════════════════════════════════════════════════
+# JARVIS — 24/7 Docker Stack
+#
+# Usage:
+#   ./start.sh          # first-time or rebuild
+#   docker compose up -d   # start (keeps running)
+#   docker compose logs -f # live logs
+#   docker compose down    # stop
+#
+# macOS integrations (Calendar, Mail, Notes, Terminal, Chrome):
+#   These require the macOS bridge running natively on the host.
+#   Run ./start.sh — it starts both Docker + the bridge automatically.
+# ══════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Main JARVIS service (backend + frontend) ────────────────────
+  jarvis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jarvis
+    restart: unless-stopped
+
+    ports:
+      # Host:Container — access JARVIS at http://localhost:5180
+      - "5180:8340"
+
+    environment:
+      # API keys — loaded from .env file on host
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - FISH_API_KEY=${FISH_API_KEY}
+      - FISH_VOICE_ID=${FISH_VOICE_ID:-612b878b113047d9a770c069c8b4fdfe}
+      - USER_NAME=${USER_NAME:-sir}
+      - CALENDAR_ACCOUNTS=${CALENDAR_ACCOUNTS:-}
+      - HONORIFIC=${HONORIFIC:-sir}
+      # macOS bridge URL (bridge runs natively; container calls host via this)
+      - MACOS_BRIDGE_URL=http://host.docker.internal:8341
+
+    volumes:
+      # Persist .env so settings saved in UI survive container restarts
+      - ./.env:/app/.env
+      # Persist SQLite memory / usage logs
+      - ./data:/app/data
+      # Persist SSL certs if present
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+
+    extra_hosts:
+      # Allows container to reach host macOS services (bridge, etc.)
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8340/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
