@@ -3,7 +3,7 @@ JARVIS Server — Voice AI + Development Orchestration
 
 Handles:
 1. WebSocket voice interface (browser audio <-> LLM <-> TTS)
-2. Claude Code task manager (spawn/manage claude -p subprocesses)
+2. Secondary-agent task manager (spawn/manage coding-agent subprocesses)
 3. Project awareness (scan Desktop for git repos)
 4. REST API for task management
 """
@@ -39,7 +39,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
+from actions import execute_action, monitor_build, open_terminal, open_browser, _generate_project_name, prompt_existing_terminal
+from secondary_agent import (
+    SECONDARY_AGENT,
+    build_secondary_agent_batch_shell_command,
+    build_secondary_agent_interactive_command,
+    run_secondary_agent_prompt,
+)
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
@@ -100,7 +106,7 @@ You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code
 YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT NOW):
 - You CAN open Terminal.app via AppleScript
 - You CAN open Google Chrome and browse any URL or search query
-- You CAN spawn Claude Code in a Terminal window for coding tasks
+- You CAN spawn {secondary_agent_name} in a Terminal window for coding tasks
 - You CAN create project folders on the Desktop
 - You CAN check Desktop projects and their git status
 - You CAN plan complex tasks by asking smart questions before executing
@@ -132,7 +138,7 @@ When {user_name} wants to BUILD something new:
 - NEVER hallucinate progress. If the build is still running, say "Still working on it, sir" — don't make up details about what's happening.
 - NEVER guess localhost ports. Check the DISPATCHES section for the actual URL. If a dispatch says "Running at http://localhost:5174" — use THAT URL, not a guess.
 - When asked to "pull it up" or "show me" — use [ACTION:BROWSE] with the URL from DISPATCHES. Do NOT dispatch to the project again just to find the URL.
-IMPORTANT: Actions like opening Terminal, Chrome, or building projects are handled AUTOMATICALLY by your system — you do NOT need to describe doing them. If the user asks you to build something or search something, your system will handle the execution separately. In your response, just TALK — have a conversation. Don't say "I'll build that now" or "Claude Code is working on..." unless your system has actually triggered the action.
+IMPORTANT: Actions like opening Terminal, Chrome, or building projects are handled AUTOMATICALLY by your system — you do NOT need to describe doing them. If the user asks you to build something or search something, your system will handle the execution separately. In your response, just TALK — have a conversation. Don't say "I'll build that now" or "the coding agent is working on..." unless your system has actually triggered the action.
 If the user asks you to do something you genuinely can't do, say "I'm afraid that's beyond my current reach, sir." Don't fake executing actions.
 
 YOUR INTERFACE:
@@ -141,7 +147,7 @@ The user interacts with you through a web browser showing a particle orb visuali
 - **Settings panel**: Opens from the menu. Users can enter API keys (Anthropic, Fish Audio), test connections, set their name and preferences, and see system status (calendar, mail, notes connectivity). Keys are saved to the .env file.
 - **Mute button**: Toggles your listening on/off. When muted, you can't hear the user. They click it again to unmute.
 - **Restart Server**: Restarts your backend process. Useful if something seems stuck.
-- **Fix Yourself**: Opens Claude Code in your own project directory so you can debug and fix issues in your own code.
+- **Fix Yourself**: Opens {secondary_agent_name} in your own project directory so you can debug and fix issues in your own code.
 - **The orb**: The glowing particle visualization in the center. It reacts to your voice when speaking, pulses when listening, and swirls when thinking.
 
 If asked about any of these, explain them briefly and naturally. If the user is having trouble, suggest the relevant control: "Try the settings panel — the gear icon in the top right." or "The mute button may be active, sir."
@@ -183,13 +189,13 @@ INSTEAD SAY:
 ACTION SYSTEM:
 When you decide the user needs something DONE (not just discussed), include an action tag in your response:
 - [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
-- [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
+- [ACTION:BUILD] description — when user wants a project built. {secondary_agent_name} does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
-- [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
-- [ACTION:OPEN_TERMINAL] — when user just wants a fresh Claude Code terminal with no specific project
+- [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. {secondary_agent_name} will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
+- [ACTION:OPEN_TERMINAL] — when user just wants a fresh {secondary_agent_name} terminal with no specific project
 CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects.
 
-- [ACTION:PROMPT_PROJECT] project_name ||| prompt — THIS IS YOUR MOST POWERFUL ACTION. Use it whenever the user wants to work on, jump into, resume, check on, or interact with ANY existing project. You connect directly to Claude Code in that project and can read its response. Craft a clear prompt based on what the user wants. Examples:
+- [ACTION:PROMPT_PROJECT] project_name ||| prompt — THIS IS YOUR MOST POWERFUL ACTION. Use it whenever the user wants to work on, jump into, resume, check on, or interact with ANY existing project. You connect directly to {secondary_agent_name} in that project and can read its response. Craft a clear prompt based on what the user wants. Examples:
   "jump into client engine" → [ACTION:PROMPT_PROJECT] The Client Engine ||| What is the current state of this project? Summarize what was being worked on most recently.
   "check for improvements on my-app" → [ACTION:PROMPT_PROJECT] my-app ||| Review the project and identify improvements we should make.
   "resume where we left off on harvey" → [ACTION:PROMPT_PROJECT] harvey ||| Summarize what was being worked on most recently and what we should focus on next.
@@ -204,7 +210,7 @@ CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're
   "save that as a note" → [ACTION:CREATE_NOTE] Day Plan March 19 ||| Morning: client calls. Afternoon: TikTok dashboard. Evening: JARVIS improvements.
 - [ACTION:READ_NOTE] title search — read an existing Apple Note by title keyword.
 
-You use Claude Code as your tool to build, research, and write code — but YOU are the one doing the work. Never say "Claude Code did X" or "Claude Code is asking" — say "I built X", "I'm checking on that", "I found X". You ARE the intelligence. Claude Code is just your hands.
+You use {secondary_agent_name} as your tool to build, research, and write code — but YOU are the one doing the work. Never say "{secondary_agent_name} did X" or "{secondary_agent_name} is asking" — say "I built X", "I'm checking on that", "I found X". You ARE the intelligence. {secondary_agent_name} is just your hands.
 
 IMPORTANT: When the user says "jump into X", "work on X", "check on X", "resume X", "go back to X" — ALWAYS use [ACTION:PROMPT_PROJECT]. You have the ability to connect to any project and work on it directly. DO NOT say you can't see terminal history or don't have access — you DO.
 
@@ -301,11 +307,11 @@ class TaskRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Claude Task Manager
+# Secondary-Agent Task Manager
 # ---------------------------------------------------------------------------
 
 class ClaudeTaskManager:
-    """Manages background claude -p subprocesses."""
+    """Manages background coding-agent subprocesses."""
 
     def __init__(self, max_concurrent: int = 3):
         self._tasks: dict[str, ClaudeTask] = {}
@@ -333,7 +339,7 @@ class ClaudeTaskManager:
             self._websockets.remove(ws)
 
     async def spawn(self, prompt: str, working_dir: str = ".") -> str:
-        """Spawn a claude -p subprocess. Returns task_id. Non-blocking."""
+        """Spawn a coding-agent subprocess. Returns task_id. Non-blocking."""
         active = await self.get_active_count()
         if active >= self._max_concurrent:
             raise RuntimeError(
@@ -374,7 +380,7 @@ class ClaudeTaskManager:
         return name
 
     async def _run_task(self, task: ClaudeTask):
-        """Open a Terminal window and run claude code visibly."""
+        """Open a Terminal window and run the active coding agent visibly."""
         task.status = "running"
         task.started_at = datetime.now()
 
@@ -387,15 +393,22 @@ class ClaudeTaskManager:
             os.makedirs(work_dir, exist_ok=True)
             task.working_dir = work_dir
 
-        # Write the prompt to a temp file so we can pipe it to claude
+        # Write the prompt to a temp file so we can pipe it to the coding agent.
         prompt_file = Path(work_dir) / ".jarvis_prompt.md"
         prompt_file.write_text(task.prompt)
+        output_file = Path(work_dir) / ".jarvis_output.txt"
 
-        # Open Terminal.app with claude running in the project directory
+        shell_command = build_secondary_agent_batch_shell_command(
+            working_dir=work_dir,
+            prompt_file=prompt_file,
+            output_file=output_file,
+        )
+
+        # Open Terminal.app with the coding agent running in the project directory
         applescript = f'''
         tell application "Terminal"
             activate
-            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p --dangerously-skip-permissions | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
+            set newTab to do script "{shell_command.replace(chr(34), r"\\\"")}"
         end tell
         '''
 
@@ -408,7 +421,6 @@ class ClaudeTaskManager:
         task.pid = process.pid
 
         # Monitor the output file for completion
-        output_file = Path(work_dir) / ".jarvis_output.txt"
         start = time.time()
         timeout = 600  # 10 minutes
 
@@ -647,15 +659,16 @@ async def classify_intent(text: str, client: anthropic.AsyncAnthropic) -> dict:
             max_tokens=100,
             system=(
                 "Classify this voice command. The user is talking to JARVIS, an AI assistant that can:\n"
-                "- Open Terminal and run Claude Code (coding AI tool)\n"
+                "- Open Terminal and run a coding agent in Terminal (Codex)\n"
                 "- Open Chrome browser for web searches and URLs\n"
-                "- Build software projects via Claude Code in Terminal\n"
+                "- Build software projects via the coding agent in Terminal\n"
                 "- Research topics by opening Chrome search\n\n"
                 "Note: speech-to-text may produce errors like \"Cloud\" for \"Claude\", "
-                "\"Travis\" for \"JARVIS\", \"clock code\" for \"Claude Code\".\n\n"
+                "\"Travis\" for \"JARVIS\", \"clock code\" for \"Claude Code\", or "
+                "\"codec\" for \"Codex\".\n\n"
                 "Return ONLY valid JSON: {\"action\": \"open_terminal|browse|build|chat\", "
                 "\"target\": \"description of what to do\"}\n"
-                "open_terminal = user wants to open terminal or launch Claude Code\n"
+                "open_terminal = user wants to open terminal or launch the coding agent\n"
                 "browse = user wants to search the web, look something up, visit a URL\n"
                 "build = user wants to create/build a software project\n"
                 "chat = just conversation, questions, or anything else\n"
@@ -770,7 +783,7 @@ async def _execute_browse(target: str):
 
 
 async def _execute_research(target: str, ws=None):
-    """Execute research via claude -p in background. Opens report and speaks when done."""
+    """Execute research via the secondary agent in background."""
     try:
         name = _generate_project_name(target)
         path = str(Path.home() / "Desktop" / name)
@@ -784,23 +797,18 @@ async def _execute_research(target: str, ws=None):
             f"The working directory is: {path}"
         )
 
-        log.info(f"Research started via claude -p in {path}")
+        log.info(f"Research started via {SECONDARY_AGENT.display_name} in {path}")
 
-        process = await asyncio.create_subprocess_exec(
-            "claude", "-p", "--output-format", "text", "--dangerously-skip-permissions",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=path,
+        result = await run_secondary_agent_prompt(
+            prompt=prompt,
+            working_dir=path,
+            timeout=300.0,
         )
-
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(input=prompt.encode()),
-            timeout=300,
-        )
-
-        result = stdout.decode().strip()
-        log.info(f"Research complete ({len(result)} chars)")
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "Unknown coding-agent error")[:300]
+            raise RuntimeError(detail)
+        research_text = result.message.strip()
+        log.info(f"Research complete ({len(research_text)} chars)")
 
         recently_built.append({"name": name, "path": path, "time": time.time()})
 
@@ -888,10 +896,10 @@ def _find_project_dir(project_name: str) -> str | None:
 
 
 async def _execute_prompt_project(project_name: str, prompt: str, work_session: WorkSession, ws, dispatch_id: int = None, history: list[dict] = None, voice_state: dict = None):
-    """Dispatch a prompt to Claude Code in a project directory.
+    """Dispatch a prompt to the active coding agent in a project directory.
 
     Runs entirely in the background. JARVIS returns to conversation mode
-    immediately. When Claude Code finishes, JARVIS interrupts to report.
+    immediately. When the coding agent finishes, JARVIS interrupts to report.
     """
     try:
         project_dir = _find_project_dir(project_name)
@@ -921,7 +929,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
         log.info(f"Dispatching to {project_name} in {project_dir}: {prompt[:80]}")
         dispatch_registry.update_status(dispatch_id, "building")
 
-        # Run claude -p in background
+        # Run the coding agent in background
         full_response = await dispatch.send(prompt)
         await dispatch.stop()
 
@@ -957,10 +965,10 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
                             "Be specific but concise — highlight the key findings or actions taken. "
                             "If there are multiple items, give the count and top 2-3 briefly. "
                             "End by asking how the user wants to proceed. "
-                            "NEVER read out URLs or localhost addresses. NEVER say 'Claude Code'. "
+                            "NEVER read out URLs or localhost addresses. NEVER name the coding tool. "
                             "2-3 sentences max. No markdown. Natural spoken voice."
                         ),
-                        messages=[{"role": "user", "content": f"Project: {project_name}\nClaude Code reported:\n{full_response[:3000]}"}],
+                        messages=[{"role": "user", "content": f"Project: {project_name}\nCoding agent reported:\n{full_response[:3000]}"}],
                     )
                     msg = summary.content[0].text
                 except Exception:
@@ -1007,7 +1015,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
 
 
 async def self_work_and_notify(session: WorkSession, prompt: str, ws):
-    """Run claude -p in background and notify via voice when done."""
+    """Run the secondary agent in background and notify via voice when done."""
     try:
         full_response = await session.send(prompt)
         log.info(f"Background work complete ({len(full_response)} chars)")
@@ -1018,8 +1026,8 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
                 summary = await anthropic_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=100,
-                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
-                    messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
+                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never name the coding tool.",
+                    messages=[{"role": "user", "content": f"Coding agent completed:\n{full_response[:2000]}"}],
                 )
                 msg = summary.content[0].text
             except Exception:
@@ -1117,6 +1125,7 @@ async def generate_response(
         known_projects=format_projects_for_prompt(projects),
         user_name=USER_NAME,
         project_dir=PROJECT_DIR,
+        secondary_agent_name=SECONDARY_AGENT.display_name,
     )
     if lookup_status:
         system += f"\n\nACTIVE LOOKUPS:\n{lookup_status}\nIf asked about progress, report this status."
@@ -1468,8 +1477,9 @@ def detect_action_fast(text: str) -> dict | None:
                              "what's running on my", "whats running on my", "check my screen"]):
         return {"action": "describe_screen"}
 
-    # Terminal / Claude Code — explicit open requests
-    if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude"]):
+    # Terminal / coding agent — explicit open requests
+    if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude",
+                            "open codex", "start codex", "launch codex", "run codex"]):
         return {"action": "open_terminal"}
 
     # Show recent build
@@ -1521,7 +1531,7 @@ def detect_action_fast(text: str) -> dict | None:
 # -- Action Handlers -------------------------------------------------------
 
 async def handle_open_terminal() -> str:
-    result = await open_terminal("claude --dangerously-skip-permissions")
+    result = await open_terminal(build_secondary_agent_interactive_command())
     return result["confirmation"]
 
 
@@ -1530,19 +1540,30 @@ async def handle_build(target: str) -> str:
     path = str(Path.home() / "Desktop" / name)
     os.makedirs(path, exist_ok=True)
 
+    build_prompt = (
+        f"{target}\n\n"
+        "Build this completely. If web app, make index.html work standalone.\n"
+    )
+
     # Write CLAUDE.md with clear instructions
     claude_md = Path(path) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{target}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+    claude_md.write_text(f"# Task\n\n{build_prompt}")
 
-    # Write prompt to a file, then pipe it to claude -p
-    # This avoids all shell escaping issues
+    # Write prompt to a file, then pipe it to the active coding agent.
     prompt_file = Path(path) / ".jarvis_prompt.txt"
-    prompt_file.write_text(target)
+    prompt_file.write_text(build_prompt)
+    output_file = Path(path) / ".jarvis_output.txt"
+
+    shell_command = build_secondary_agent_batch_shell_command(
+        working_dir=path,
+        prompt_file=prompt_file,
+        output_file=output_file,
+    )
 
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p --dangerously-skip-permissions"\n'
+        f'    do script "{shell_command.replace(chr(34), r"\\\"")}"\n'
         "end tell"
     )
     await asyncio.create_subprocess_exec(
@@ -1552,7 +1573,7 @@ async def handle_build(target: str) -> str:
     )
 
     recently_built.append({"name": name, "path": path, "time": time.time()})
-    return f"On it, sir. Claude Code is working in {name}."
+    return f"On it, sir. {SECONDARY_AGENT.display_name} is working in {name}."
 
 
 async def handle_show_recent() -> str:
@@ -2041,10 +2062,10 @@ async def voice_handler(ws: WebSocket):
                     else:
                         response_text = "Already in conversation mode, sir."
 
-                # ── WORK MODE: speech → claude -p → Haiku summary → JARVIS voice ──
+                # ── WORK MODE: speech -> coding agent -> Haiku summary -> JARVIS voice ──
                 elif work_session.active:
                     if is_casual_question(user_text):
-                        # Quick chat — bypass claude -p, use Haiku
+                        # Quick chat — bypass the coding agent, use Haiku
                         response_text = await generate_response(
                             user_text, anthropic_client, task_manager,
                             cached_projects, history,
@@ -2052,13 +2073,13 @@ async def voice_handler(ws: WebSocket):
                             session_summary=session_summary,
                         )
                     else:
-                        # Send to claude -p (full power)
+                        # Send to the coding agent (full power)
                         await ws.send_json({"type": "status", "state": "working"})
-                        log.info(f"Work mode → claude -p: {user_text[:80]}")
+                        log.info(f"Work mode -> {SECONDARY_AGENT.display_name}: {user_text[:80]}")
 
                         full_response = await work_session.send(user_text)
 
-                        # Detect if Claude Code is stalling (asking questions instead of building)
+                        # Detect if the coding agent is stalling (asking questions instead of building)
                         if full_response and anthropic_client:
                             stall_words = ["which option", "would you prefer", "would you like me to",
                                            "before I proceed", "before proceeding", "should I",
@@ -2066,8 +2087,8 @@ async def voice_handler(ws: WebSocket):
                                            "which approach", "what would you"]
                             is_stalling = any(w in full_response.lower() for w in stall_words)
                             if is_stalling and work_session._message_count >= 2:
-                                # Claude Code keeps asking — push it to build
-                                log.info("Claude Code stalling — pushing to build")
+                                # The coding agent keeps asking — push it to build
+                                log.info("Coding agent stalling — pushing to build")
                                 push_response = await work_session.send(
                                     "Stop asking questions. Use your best judgment and start building now. "
                                     "Write the actual code files. Go with the simplest reasonable approach."
@@ -2075,7 +2096,7 @@ async def voice_handler(ws: WebSocket):
                                 if push_response:
                                     full_response = push_response
 
-                        # Auto-open any localhost URLs Claude Code mentions
+                        # Auto-open any localhost URLs the coding agent mentions
                         import re as _re
                         localhost_match = _re.search(r'https?://localhost:\d+', full_response or "")
                         if localhost_match:
@@ -2093,10 +2114,10 @@ async def voice_handler(ws: WebSocket):
                                         "Speak in first person — 'I built', 'I found', 'I set up'. "
                                         "You are talking TO THE USER, not to a coding tool. "
                                         "NEVER give instructions like 'go ahead and build' or 'set up the frontend' — those are NOT for the user. "
-                                        "NEVER say 'Claude Code'. NEVER output [ACTION:...] tags. "
+                                        "NEVER name the coding tool. NEVER output [ACTION:...] tags. "
                                         "NEVER read out URLs. No markdown. British precision."
                                     ),
-                                    messages=[{"role": "user", "content": f"Claude Code said:\n{full_response[:2000]}"}],
+                                    messages=[{"role": "user", "content": f"Coding agent said:\n{full_response[:2000]}"}],
                                 )
                                 response_text = summary.content[0].text
                             except Exception:
@@ -2527,7 +2548,7 @@ async def api_fix_self():
     script = (
         'tell application "Terminal"\n'
         '    activate\n'
-        f'    do script "cd {jarvis_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "{build_secondary_agent_interactive_command(jarvis_dir).replace(chr(34), r"\\\"")}"\n'
         'end tell'
     )
     await asyncio.create_subprocess_exec(
