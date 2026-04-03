@@ -16,11 +16,22 @@ import "./style.css";
 // ---------------------------------------------------------------------------
 
 type State = "idle" | "listening" | "thinking" | "speaking";
+type DebugLogEntry = {
+  ts: string;
+  logger: string;
+  level: string;
+  message: string;
+};
+
 let currentState: State = "idle";
 let isMuted = false;
+let debugMode = window.localStorage.getItem("jarvis_debug_mode") === "1";
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
+const debugPanelEl = document.getElementById("debug-panel")!;
+const debugLogEl = document.getElementById("debug-log")!;
+const debugConnectionEl = document.getElementById("debug-connection")!;
 
 function showError(msg: string) {
   errorEl.textContent = msg;
@@ -73,6 +84,78 @@ function transition(newState: State) {
     case "speaking":
       voiceInput.pause();
       break;
+  }
+}
+
+function setDebugConnection(connected: boolean) {
+  debugConnectionEl.textContent = connected ? "Live stream connected" : "Waiting for connection...";
+}
+
+function ensureDebugPlaceholder() {
+  if (debugLogEl.childElementCount === 0) {
+    const empty = document.createElement("div");
+    empty.className = "debug-log-empty";
+    empty.textContent = "Live background log will appear here.";
+    debugLogEl.appendChild(empty);
+  }
+}
+
+function clearDebugLog() {
+  debugLogEl.innerHTML = "";
+  ensureDebugPlaceholder();
+}
+
+function appendDebugEntry(entry: DebugLogEntry) {
+  const nearBottom =
+    debugLogEl.scrollHeight - debugLogEl.scrollTop - debugLogEl.clientHeight < 40;
+
+  const empty = debugLogEl.querySelector(".debug-log-empty");
+  if (empty) empty.remove();
+
+  const row = document.createElement("div");
+  row.className = "debug-log-entry";
+
+  const timeEl = document.createElement("span");
+  timeEl.className = "debug-log-time";
+  timeEl.textContent = entry.ts;
+
+  const levelEl = document.createElement("span");
+  levelEl.className = `debug-log-level level-${entry.level.toLowerCase()}`;
+  levelEl.textContent = entry.level;
+
+  const loggerEl = document.createElement("span");
+  loggerEl.className = "debug-log-logger";
+  loggerEl.textContent = entry.logger;
+  loggerEl.title = entry.logger;
+
+  const messageEl = document.createElement("span");
+  messageEl.className = "debug-log-message";
+  messageEl.textContent = entry.message;
+
+  row.append(timeEl, levelEl, loggerEl, messageEl);
+  debugLogEl.appendChild(row);
+
+  while (debugLogEl.childElementCount > 250) {
+    debugLogEl.removeChild(debugLogEl.firstElementChild!);
+  }
+
+  if (nearBottom) {
+    debugLogEl.scrollTop = debugLogEl.scrollHeight;
+  }
+}
+
+function applyDebugMode() {
+  debugPanelEl.classList.toggle("open", debugMode);
+  btnDebugToggle.textContent = debugMode ? "Hide Debug Mode" : "Debug Mode";
+  window.localStorage.setItem("jarvis_debug_mode", debugMode ? "1" : "0");
+
+  if (!debugMode) {
+    socket.send({ type: "debug_logs", enabled: false });
+    return;
+  }
+
+  if (socket.isConnected()) {
+    socket.send({ type: "debug_logs", enabled: true });
   }
 }
 
@@ -141,7 +224,26 @@ socket.onMessage((msg) => {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {
     console.log("[task]", "complete:", msg.task_id, msg.status, msg.summary);
+  } else if (type === "debug_log_snapshot") {
+    clearDebugLog();
+    const entries = (msg.entries as DebugLogEntry[]) || [];
+    for (const entry of entries) appendDebugEntry(entry);
+    ensureDebugPlaceholder();
+  } else if (type === "debug_log") {
+    const entry = msg.entry as DebugLogEntry | undefined;
+    if (entry) appendDebugEntry(entry);
   }
+});
+
+socket.onOpen(() => {
+  setDebugConnection(true);
+  if (debugMode) {
+    socket.send({ type: "debug_logs", enabled: true });
+  }
+});
+
+socket.onConnectionChange((connected) => {
+  setDebugConnection(connected);
 });
 
 // ---------------------------------------------------------------------------
@@ -175,6 +277,9 @@ ensureAudioContext();
 const btnMute = document.getElementById("btn-mute")!;
 const btnMenu = document.getElementById("btn-menu")!;
 const menuDropdown = document.getElementById("menu-dropdown")!;
+const btnDebugToggle = document.getElementById("btn-debug-toggle")!;
+const btnDebugClear = document.getElementById("btn-debug-clear")!;
+const btnDebugClose = document.getElementById("btn-debug-close")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
 
@@ -194,6 +299,22 @@ btnMute.addEventListener("click", (e) => {
 btnMenu.addEventListener("click", (e) => {
   e.stopPropagation();
   menuDropdown.style.display = menuDropdown.style.display === "none" ? "block" : "none";
+});
+
+btnDebugToggle.addEventListener("click", (e) => {
+  e.stopPropagation();
+  menuDropdown.style.display = "none";
+  debugMode = !debugMode;
+  applyDebugMode();
+});
+
+btnDebugClear.addEventListener("click", () => {
+  clearDebugLog();
+});
+
+btnDebugClose.addEventListener("click", () => {
+  debugMode = false;
+  applyDebugMode();
 });
 
 document.addEventListener("click", () => {
@@ -233,3 +354,6 @@ btnSettings.addEventListener("click", (e) => {
 setTimeout(() => {
   checkFirstTimeSetup();
 }, 2000);
+
+ensureDebugPlaceholder();
+applyDebugMode();

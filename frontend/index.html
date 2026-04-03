@@ -27,6 +27,7 @@
 
     <!-- Dropdown menu -->
     <div id="menu-dropdown" style="display:none">
+      <button id="btn-debug-toggle">Debug Mode</button>
       <button id="btn-settings">Settings</button>
       <button id="btn-restart">Restart Server</button>
       <button id="btn-fix-self">Fix Yourself</button>
@@ -35,6 +36,22 @@
     <div id="status-text"></div>
     <div id="jarvis-label">JARVIS</div>
     <div id="error-text"></div>
+
+    <section id="debug-panel" aria-live="polite">
+      <div id="debug-header">
+        <div>
+          <div id="debug-title">Debug Mode</div>
+          <div id="debug-connection">Disconnected</div>
+        </div>
+        <div id="debug-actions">
+          <button id="btn-debug-clear">Clear</button>
+          <button id="btn-debug-close" aria-label="Close debug panel">&times;</button>
+        </div>
+      </div>
+      <div id="debug-log">
+        <div class="debug-log-empty">Live background log will appear here.</div>
+      </div>
+    </section>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
