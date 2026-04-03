@@ -14,12 +14,26 @@ from pathlib import Path
 
 log = logging.getLogger("jarvis.calendar")
 
+
+def _parse_calendar_accounts(raw: str) -> list[str]:
+    """Parse CALENDAR_ACCOUNTS, treating empty / auto as auto-discover."""
+    if not raw or not raw.strip():
+        return []
+    accounts = []
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if value.lower() == "auto":
+            continue
+        accounts.append(value)
+    return accounts
+
+
 # Calendars to scan — set CALENDAR_ACCOUNTS env var to a comma-separated list,
 # or leave empty to auto-discover ALL calendars from Apple Calendar.
 _calendar_accounts_env = os.getenv("CALENDAR_ACCOUNTS", "")
-USER_CALENDARS: list[str] = [
-    a.strip() for a in _calendar_accounts_env.split(",") if a.strip()
-] if _calendar_accounts_env.strip() else []
+USER_CALENDARS: list[str] = _parse_calendar_accounts(_calendar_accounts_env)
 
 _auto_discovered = False
 
@@ -179,6 +193,19 @@ async def refresh_cache():
     _cache_time = _time.time()
     elapsed = _time.time() - start
     log.info(f"Calendar cache refreshed: {len(all_events)} events today ({elapsed:.1f}s)")
+
+
+def configure_calendar_accounts(raw: str) -> None:
+    """Apply updated calendar account settings without a server restart."""
+    global USER_CALENDARS, _auto_discovered, _event_cache, _cache_time
+    USER_CALENDARS = _parse_calendar_accounts(raw)
+    _auto_discovered = False
+    _event_cache = []
+    _cache_time = 0.0
+    if USER_CALENDARS:
+        log.info(f"Calendar accounts configured explicitly: {USER_CALENDARS}")
+    else:
+        log.info("Calendar accounts set to auto-discover")
 
 
 async def get_todays_events() -> list[dict]:

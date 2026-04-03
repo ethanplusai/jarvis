@@ -15,6 +15,8 @@ import logging
 import os
 import sys
 import time
+import threading
+from collections import deque
 from pathlib import Path
 
 # Load .env file if present
@@ -42,7 +44,15 @@ from pydantic import BaseModel
 from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
-from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
+from calendar_access import (
+    get_todays_events,
+    get_upcoming_events,
+    get_next_event,
+    format_events_for_context,
+    format_schedule_summary,
+    refresh_cache as refresh_calendar_cache,
+    configure_calendar_accounts,
+)
 from mail_access import get_unread_count, get_unread_messages, get_recent_messages, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
 from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
@@ -56,6 +66,79 @@ from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("jarvis")
 
+
+class DebugLogStream:
+    """Keeps a recent log buffer and pushes live log entries to subscribed sockets."""
+
+    def __init__(self, max_entries: int = 300):
+        self._entries = deque(maxlen=max_entries)
+        self._subscribers: set[WebSocket] = set()
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        self._loop = loop
+
+    def publish(self, record: logging.LogRecord):
+        entry = {
+            "ts": datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3],
+            "logger": record.name,
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        with self._lock:
+            self._entries.append(entry)
+
+        if not self._subscribers:
+            return
+
+        loop = self._loop
+        if not loop or loop.is_closed():
+            return
+
+        try:
+            loop.call_soon_threadsafe(self._schedule_broadcast, {"type": "debug_log", "entry": entry})
+        except RuntimeError:
+            pass
+
+    def _schedule_broadcast(self, message: dict):
+        asyncio.create_task(self._broadcast(message))
+
+    async def _broadcast(self, message: dict):
+        dead = []
+        for ws in list(self._subscribers):
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._subscribers.discard(ws)
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self._entries)
+
+    async def subscribe(self, ws: WebSocket):
+        self._subscribers.add(ws)
+        await ws.send_json({"type": "debug_log_snapshot", "entries": self.snapshot()})
+
+    def unsubscribe(self, ws: WebSocket):
+        self._subscribers.discard(ws)
+
+
+class _DebugLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord):
+        try:
+            debug_log_stream.publish(record)
+        except Exception:
+            pass
+
+
+debug_log_stream = DebugLogStream()
+_debug_log_handler = _DebugLogHandler(level=logging.INFO)
+if not any(isinstance(handler, _DebugLogHandler) for handler in logging.getLogger().handlers):
+    logging.getLogger().addHandler(_debug_log_handler)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -68,6 +151,14 @@ USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DESKTOP_PATH = Path.home() / "Desktop"
+REPO_ROOT = Path(PROJECT_DIR).resolve()
+PROJECT_SCAN_ROOTS = [
+    DESKTOP_PATH,
+    Path.home() / "VS_Code",
+    Path.home() / "Code",
+    Path.home() / "Projects",
+    Path.home() / "Developer",
+]
 
 JARVIS_SYSTEM_PROMPT = """\
 You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_name}'s AI assistant, modeled precisely after Tony Stark's AI from the MCU films.
@@ -239,29 +330,113 @@ KNOWN PROJECTS:
 
 
 # ---------------------------------------------------------------------------
-# Weather (wttr.in)
+# Weather
 # ---------------------------------------------------------------------------
 
 _cached_weather: Optional[str] = None
 _weather_fetched: bool = False
+_cached_weather_location: Optional[dict] = None
+_weather_location_fetched_at: float = 0.0
+_WEATHER_LOCATION_TTL_SECONDS = 60 * 15
+
+
+def _format_location_label(city: str, region: str, country: str) -> str:
+    parts = [part.strip() for part in (city, region) if part and part.strip()]
+    if parts:
+        return ", ".join(parts[:2])
+    return (country or "your area").strip() or "your area"
+
+
+def _get_weather_location() -> Optional[dict]:
+    """Resolve the user's current weather location, with env overrides."""
+    global _cached_weather_location, _weather_location_fetched_at
+
+    lat_raw = os.getenv("WEATHER_LATITUDE", "").strip()
+    lon_raw = os.getenv("WEATHER_LONGITUDE", "").strip()
+    label_override = os.getenv("WEATHER_LOCATION_LABEL", "").strip()
+    if lat_raw and lon_raw:
+        try:
+            return {
+                "latitude": float(lat_raw),
+                "longitude": float(lon_raw),
+                "label": label_override or "your area",
+            }
+        except ValueError:
+            log.warning("Invalid WEATHER_LATITUDE / WEATHER_LONGITUDE in environment")
+
+    if (
+        _cached_weather_location is not None
+        and (time.time() - _weather_location_fetched_at) < _WEATHER_LOCATION_TTL_SECONDS
+    ):
+        return _cached_weather_location
+
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            "https://ipwho.is/?fields=success,city,region,country,latitude,longitude",
+            timeout=3,
+        ) as resp:
+            data = json.loads(resp.read().decode())
+
+        if data.get("success") is True:
+            location = {
+                "latitude": float(data["latitude"]),
+                "longitude": float(data["longitude"]),
+                "label": label_override or _format_location_label(
+                    str(data.get("city", "")),
+                    str(data.get("region", "")),
+                    str(data.get("country", "")),
+                ),
+            }
+            _cached_weather_location = location
+            _weather_location_fetched_at = time.time()
+            return location
+    except Exception as e:
+        log.debug(f"Weather location lookup failed: {e}")
+
+    return _cached_weather_location
+
+
+def _fetch_weather_sync() -> str:
+    """Fetch current weather in Celsius for the resolved location."""
+    location = _get_weather_location()
+    if not location:
+        return "Weather data unavailable."
+
+    try:
+        import urllib.request
+
+        lat = location["latitude"]
+        lon = location["longitude"]
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&current=temperature_2m"
+            "&temperature_unit=celsius"
+        )
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            current = json.loads(resp.read().decode()).get("current", {})
+        temp = current.get("temperature_2m")
+        if temp is None:
+            return "Weather data unavailable."
+
+        temp_num = float(temp)
+        temp_text = f"{temp_num:.1f}".rstrip("0").rstrip(".")
+        return f"Current weather in {location['label']}: {temp_text}°C"
+    except Exception as e:
+        log.warning(f"Weather fetch failed: {e}")
+        return "Weather data unavailable."
 
 
 async def fetch_weather() -> str:
-    """Fetch current weather from wttr.in. Cached for the session."""
+    """Fetch current weather from the resolved location. Cached for the session."""
     global _cached_weather, _weather_fetched
     if _weather_fetched:
         return _cached_weather or "Weather data unavailable."
     _weather_fetched = True
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            resp = await http.get("https://wttr.in/?format=%l:+%C,+%t", headers={"User-Agent": "curl"})
-            if resp.status_code == 200:
-                _cached_weather = resp.text.strip()
-                return _cached_weather
-    except Exception as e:
-        log.warning(f"Weather fetch failed: {e}")
-    _cached_weather = None
-    return "Weather data unavailable."
+    _cached_weather = _fetch_weather_sync()
+    return _cached_weather
 
 
 # ---------------------------------------------------------------------------
@@ -564,42 +739,91 @@ class ClaudeTaskManager:
 # ---------------------------------------------------------------------------
 
 async def scan_projects() -> list[dict]:
-    """Quick scan of ~/Desktop for git repos (depth 1)."""
-    projects = []
-    desktop = DESKTOP_PATH
+    """Quick scan of common local project roots for git repos."""
+    return _collect_local_projects()
 
-    if not desktop.exists():
-        return projects
+
+def _git_head_file(repo_dir: Path) -> Path | None:
+    """Resolve the HEAD file for a repo, including worktree-style .git files."""
+    git_path = repo_dir / ".git"
+    if git_path.is_dir():
+        return git_path / "HEAD"
+    if git_path.is_file():
+        try:
+            raw = git_path.read_text().strip()
+            if raw.startswith("gitdir:"):
+                git_dir = raw.split(":", 1)[1].strip()
+                resolved = Path(git_dir)
+                if not resolved.is_absolute():
+                    resolved = (repo_dir / git_dir).resolve()
+                return resolved / "HEAD"
+        except Exception:
+            return None
+    return None
+
+
+def _read_git_branch(repo_dir: Path) -> str:
+    head_file = _git_head_file(repo_dir)
+    if not head_file or not head_file.exists():
+        return "unknown"
 
     try:
-        for entry in sorted(desktop.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            git_dir = entry / ".git"
-            if git_dir.exists():
-                branch = "unknown"
-                head_file = git_dir / "HEAD"
-                try:
-                    head_content = head_file.read_text().strip()
-                    if head_content.startswith("ref: refs/heads/"):
-                        branch = head_content.replace("ref: refs/heads/", "")
-                except Exception:
-                    pass
+        head_content = head_file.read_text().strip()
+    except Exception:
+        return "unknown"
 
-                projects.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "branch": branch,
-                })
-    except PermissionError:
-        pass
+    if head_content.startswith("ref: refs/heads/"):
+        return head_content.replace("ref: refs/heads/", "")
+
+    return "detached"
+
+
+def _append_project_record(projects: list[dict], seen_paths: set[str], entry: Path):
+    """Add a repo to the project list if it looks like a top-level project."""
+    try:
+        resolved = entry.resolve()
+    except Exception:
+        resolved = entry
+
+    if not resolved.is_dir() or resolved.name.startswith("."):
+        return
+    if not (resolved / ".git").exists():
+        return
+
+    path = str(resolved)
+    if path in seen_paths:
+        return
+
+    seen_paths.add(path)
+    projects.append({
+        "name": resolved.name,
+        "path": path,
+        "branch": _read_git_branch(resolved),
+    })
+
+
+def _collect_local_projects() -> list[dict]:
+    """Scan common local project roots plus the current repo."""
+    projects: list[dict] = []
+    seen_paths: set[str] = set()
+
+    _append_project_record(projects, seen_paths, REPO_ROOT)
+
+    for root in PROJECT_SCAN_ROOTS:
+        if not root.exists():
+            continue
+        try:
+            for entry in sorted(root.iterdir()):
+                _append_project_record(projects, seen_paths, entry)
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            continue
 
     return projects
 
 
 def format_projects_for_prompt(projects: list[dict]) -> str:
     if not projects:
-        return "No projects found on Desktop."
+        return "No local projects found."
     lines = []
     for p in projects:
         lines.append(f"- {p['name']} ({p['branch']}) @ {p['path']}")
@@ -876,14 +1100,47 @@ async def _execute_open_terminal():
 
 
 def _find_project_dir(project_name: str) -> str | None:
-    """Find a project directory by name from cached projects or Desktop."""
-    for p in cached_projects:
-        if project_name.lower() in p.get("name", "").lower():
-            return p.get("path")
-    desktop = Path.home() / "Desktop"
-    for d in desktop.iterdir():
-        if d.is_dir() and project_name.lower() in d.name.lower():
-            return str(d)
+    """Find a project directory by name from scanned projects or recent dispatches."""
+    target = project_name.strip().lower()
+    if not target:
+        return None
+
+    def _match_project(projects: list[dict]) -> str | None:
+        exact_matches: list[str] = []
+        fuzzy_matches: list[str] = []
+
+        for project in projects:
+            path = project.get("path")
+            if not path or not Path(path).exists():
+                continue
+
+            name = project.get("name", "").strip().lower()
+            basename = Path(path).name.lower()
+
+            if target in {name, basename}:
+                exact_matches.append(path)
+                continue
+
+            if target in name or target in basename or name in target or basename in target:
+                fuzzy_matches.append(path)
+
+        if exact_matches:
+            return exact_matches[0]
+        if fuzzy_matches:
+            return fuzzy_matches[0]
+        return None
+
+    scanned_projects = [*cached_projects, *_scan_projects_sync()]
+    matched = _match_project(scanned_projects)
+    if matched:
+        return matched
+
+    dispatch = dispatch_registry.get_by_name(project_name)
+    if dispatch:
+        path = dispatch.get("project_path")
+        if path and Path(path).exists():
+            return path
+
     return None
 
 
@@ -1318,12 +1575,7 @@ return windowList
 
             # Weather — refresh every loop (30s is fine, API is fast)
             try:
-                import urllib.request, json as _json
-                url = "https://api.open-meteo.com/v1/forecast?latitude=27.77&longitude=-82.64&current=temperature_2m,weathercode&temperature_unit=fahrenheit"
-                with urllib.request.urlopen(url, timeout=3) as resp:
-                    d = _json.loads(resp.read()).get("current", {})
-                    temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
+                _ctx_cache["weather"] = _fetch_weather_sync()
             except Exception:
                 pass
 
@@ -1337,6 +1589,7 @@ return windowList
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global anthropic_client, cached_projects
+    debug_log_stream.set_loop(asyncio.get_running_loop())
     if ANTHROPIC_API_KEY:
         anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     else:
@@ -1437,16 +1690,8 @@ async def api_list_projects():
 # -- Fast Action Detection (no LLM call) -----------------------------------
 
 def _scan_projects_sync() -> list[dict]:
-    """Synchronous Desktop scan — runs in executor."""
-    projects = []
-    desktop = Path.home() / "Desktop"
-    try:
-        for entry in desktop.iterdir():
-            if entry.is_dir() and not entry.name.startswith("."):
-                projects.append({"name": entry.name, "path": str(entry), "branch": ""})
-    except Exception:
-        pass
-    return projects
+    """Synchronous local project scan — runs in executor."""
+    return _collect_local_projects()
 
 
 def detect_action_fast(text: str) -> dict | None:
@@ -1464,7 +1709,9 @@ def detect_action_fast(text: str) -> dict | None:
 
     # Screen requests — checked BEFORE project matching to prevent misrouting
     if any(p in t for p in ["look at my screen", "what's on my screen", "whats on my screen",
-                             "what am i looking at", "what do you see", "see my screen",
+                             "what is on my screen", "what's on the screen", "what is on the screen",
+                             "whats on the screen", "tell me what's on my screen",
+                             "tell me what is on my screen", "what am i looking at", "what do you see", "see my screen",
                              "what's running on my", "whats running on my", "check my screen"]):
         return {"action": "describe_screen"}
 
@@ -1477,7 +1724,9 @@ def detect_action_fast(text: str) -> dict | None:
         return {"action": "show_recent"}
 
     # Screen awareness — explicit look/see requests
-    if any(p in t for p in ["what's on my screen", "whats on my screen", "what do you see",
+    if any(p in t for p in ["what's on my screen", "whats on my screen", "what is on my screen",
+                             "what's on the screen", "what is on the screen", "whats on the screen",
+                             "tell me what's on my screen", "tell me what is on my screen", "what do you see",
                              "can you see my screen", "look at my screen", "what am i looking at",
                              "what's open", "whats open", "what apps are open"]):
         return {"action": "describe_screen"}
@@ -1586,6 +1835,7 @@ async def handle_show_recent() -> str:
 
 # Track active lookups so JARVIS can report status
 _active_lookups: dict[str, dict] = {}  # id -> {"type": str, "status": str, "started": float}
+_latest_lookup_by_type: dict[str, str] = {}
 
 
 async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict] = None, voice_state: dict = None):
@@ -1599,6 +1849,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
         "status": "working",
         "started": time.time(),
     }
+    _latest_lookup_by_type[lookup_type] = lookup_id
 
     try:
         # Run the async lookup directly — these functions already use
@@ -1610,6 +1861,10 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
 
         _active_lookups[lookup_id]["status"] = "done"
 
+        if _latest_lookup_by_type.get(lookup_type) != lookup_id:
+            log.info(f"Discarding stale {lookup_type} lookup #{lookup_id}")
+            return
+
         # Speak the result — skip audio if user spoke recently to avoid collision
         if voice_state and time.time() - voice_state["last_user_time"] < 3:
             log.info(f"Skipping lookup audio for {lookup_type} — user spoke recently")
@@ -1620,14 +1875,14 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
                 else:
                     await ws.send_json({"type": "text", "text": result_text})
                 await ws.send_json({"type": "status", "state": "idle"})
             except Exception:
                 pass
 
-        log.info(f"Lookup {lookup_type} complete: {result_text[:80]}")
+        log.info(f"Lookup {lookup_type} complete: {result_text}")
 
         # Store lookup result in conversation history so JARVIS remembers it
         if history is not None:
@@ -1635,12 +1890,15 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
 
     except asyncio.TimeoutError:
         _active_lookups[lookup_id]["status"] = "timeout"
+        if _latest_lookup_by_type.get(lookup_type) != lookup_id:
+            log.info(f"Discarding stale timeout for {lookup_type} lookup #{lookup_id}")
+            return
         try:
             fallback = f"That {lookup_type} check is taking too long, sir. The data may still be syncing."
             audio = await synthesize_speech(fallback)
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
             await ws.send_json({"type": "status", "state": "idle"})
         except Exception:
             pass
@@ -1651,6 +1909,8 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
         # Clean up after 60s
         await asyncio.sleep(60)
         _active_lookups.pop(lookup_id, None)
+        if _latest_lookup_by_type.get(lookup_type) == lookup_id:
+            _latest_lookup_by_type.pop(lookup_type, None)
 
 
 async def _do_calendar_lookup() -> str:
@@ -1865,12 +2125,15 @@ async def voice_handler(ws: WebSocket):
 
     Client -> Server:
         {"type": "transcript", "text": "...", "isFinal": true}
+        {"type": "debug_logs", "enabled": true|false}
 
     Server -> Client:
         {"type": "audio", "data": "<base64 mp3>", "text": "spoken text"}
         {"type": "status", "state": "thinking"|"speaking"|"idle"|"working"}
         {"type": "task_spawned", "task_id": "...", "prompt": "..."}
         {"type": "task_complete", "task_id": "...", "summary": "..."}
+        {"type": "debug_log_snapshot", "entries": [...]}
+        {"type": "debug_log", "entry": {...}}
     """
     await ws.accept()
     task_manager.register_websocket(ws)
@@ -1949,9 +2212,16 @@ async def voice_handler(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
                     await ws.send_json({"type": "text", "text": response_text})
+                continue
+
+            if msg.get("type") == "debug_logs":
+                if msg.get("enabled"):
+                    await debug_log_stream.subscribe(ws)
+                else:
+                    debug_log_stream.unsubscribe(ws)
                 continue
 
             if msg.get("type") != "transcript" or not msg.get("isFinal"):
@@ -2348,6 +2618,7 @@ async def voice_handler(ws: WebSocket):
     except Exception as e:
         log.error(f"WebSocket error: {e}", exc_info=True)
     finally:
+        debug_log_stream.unsubscribe(ws)
         task_manager.unregister_websocket(ws)
 
 
@@ -2497,9 +2768,11 @@ async def api_get_preferences():
 
 @app.post("/api/settings/preferences")
 async def api_save_preferences(body: PreferencesUpdate):
+    normalized_calendar_accounts = body.calendar_accounts.strip() or "auto"
     _write_env_key("USER_NAME", body.user_name)
     _write_env_key("HONORIFIC", body.honorific)
-    _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
+    _write_env_key("CALENDAR_ACCOUNTS", normalized_calendar_accounts)
+    configure_calendar_accounts(normalized_calendar_accounts)
     return {"success": True}
 
 # ---------------------------------------------------------------------------
