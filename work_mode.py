@@ -1,19 +1,20 @@
 """
-JARVIS Work Mode — persistent claude -p sessions tied to projects.
+JARVIS Work Mode — persistent secondary-agent sessions tied to projects.
 
 JARVIS can connect to any project directory and maintain a conversation
-with Claude Code. Uses --continue to resume the most recent session
+with the active coding agent. Uses resume semantics to continue the most recent session
 in that directory, so context persists across messages.
 
-The user sees Claude Code working in their Terminal window.
+The user sees the coding agent working in their Terminal window.
 JARVIS reads the responses via subprocess, summarizes, and reports back.
 """
 
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
+
+from secondary_agent import SECONDARY_AGENT, run_secondary_agent_prompt
 
 log = logging.getLogger("jarvis.work_mode")
 
@@ -21,10 +22,10 @@ SESSION_FILE = Path(__file__).parent / "data" / "active_session.json"
 
 
 class WorkSession:
-    """A claude -p session tied to a project directory.
+    """A secondary-agent session tied to a project directory.
 
     Each project gets its own session. JARVIS can switch between projects
-    and --continue picks up where the last message left off.
+    and the active agent resumes the most recent session in that directory.
     """
 
     def __init__(self):
@@ -56,56 +57,32 @@ class WorkSession:
         log.info(f"Work mode started: {self._project_name} ({working_dir})")
 
     async def send(self, user_text: str) -> str:
-        """Send a message to claude -p and get the full response.
-
-        First message in a session: fresh claude -p
-        Subsequent messages: claude -p --continue (resumes last session in dir)
-        """
-        claude_path = shutil.which("claude")
-        if not claude_path:
-            return "Claude CLI not found on this system."
-
-        cmd = [
-            claude_path, "-p",
-            "--output-format", "text",
-            "--dangerously-skip-permissions",
-        ]
-
-        # Use --continue for subsequent messages to maintain context
-        if self._message_count > 0:
-            cmd.append("--continue")
+        """Send a message to the active coding agent and get the full response."""
 
         self._status = "working"
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self._working_dir,
+            result = await run_secondary_agent_prompt(
+                prompt=user_text,
+                working_dir=self._working_dir,
+                continue_session=self._message_count > 0,
+                timeout=300.0,
             )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=user_text.encode()),
-                timeout=300,
-            )
-
-            response = stdout.decode().strip()
+            response = result.message
             self._message_count += 1
             self._status = "done"
 
-            if process.returncode != 0:
-                error = stderr.decode().strip()[:200]
-                log.error(f"claude -p error: {error}")
+            if result.returncode != 0:
+                error = (result.stderr or result.stdout or "Unknown agent error")[:200]
+                log.error(f"{SECONDARY_AGENT.display_name} error: {error}")
                 self._status = "error"
                 return f"Hit a problem, sir: {error}"
 
-            log.info(f"Claude Code response for {self._project_name} ({len(response)} chars)")
+            log.info(f"{SECONDARY_AGENT.display_name} response for {self._project_name} ({len(response)} chars)")
             return response
 
         except asyncio.TimeoutError:
-            log.error("claude -p timed out after 300s")
+            log.error(f"{SECONDARY_AGENT.display_name} timed out after 300s")
             self._status = "timeout"
             return "That's taking longer than expected, sir. The operation timed out."
         except Exception as e:
@@ -162,7 +139,7 @@ class WorkSession:
 def is_casual_question(text: str) -> bool:
     """Detect if a message is casual chat vs work-related.
 
-    Casual questions go to Haiku (fast). Work goes to claude -p (powerful).
+    Casual questions go to Haiku (fast). Work goes to the secondary agent.
     """
     t = text.lower().strip()
 

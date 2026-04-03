@@ -2,7 +2,7 @@
 Feedback loop integration test for JARVIS.
 
 Tests the QA verification -> auto-retry -> success tracking pipeline
-using mocked Claude Code execution to guarantee deterministic behavior.
+using mocked coding-agent execution to guarantee deterministic behavior.
 """
 
 import sys
@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qa import QAAgent, QAResult, MAX_RETRIES
+from secondary_agent import SecondaryAgentRunResult
 from tracking import SuccessTracker
 
 
@@ -103,22 +104,21 @@ async def test_retry_below_max_attempts():
     """Auto-retry attempts execution when below max retries."""
     qa = QAAgent()
 
-    # Mock subprocess to simulate successful retry
-    mock_proc = AsyncMock()
-    mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"Fixed: added ValueError for zero division", b"")
+    # Mock the shared agent helper to simulate a successful retry
+    mock_result = SecondaryAgentRunResult(
+        returncode=0,
+        message="Fixed: added ValueError for zero division",
+        stdout="",
+        stderr="",
     )
-    mock_proc.pid = 12345
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with patch("asyncio.wait_for", return_value=mock_proc.communicate.return_value):
-            result = await qa.auto_retry(
-                task_prompt="Create calculator.py",
-                issues=["Missing zero division handling"],
-                working_dir="/tmp",
-                attempt=1,
-            )
+    with patch("qa.run_secondary_agent_prompt", AsyncMock(return_value=mock_result)):
+        result = await qa.auto_retry(
+            task_prompt="Create calculator.py",
+            issues=["Missing zero division handling"],
+            working_dir="/tmp",
+            attempt=1,
+        )
 
     assert result["status"] == "completed"
     assert result["attempt"] == 2

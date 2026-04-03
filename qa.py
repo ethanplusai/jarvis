@@ -1,15 +1,15 @@
 """
-JARVIS QA Agent — Verifies Claude Code task output.
+JARVIS QA Agent — Verifies coding-agent task output.
 
-Spawns a claude -p subprocess to check completed work, auto-retries on failure.
+Spawns the active secondary agent to check completed work, auto-retries on failure.
 """
 
 import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
-from typing import Optional
+
+from secondary_agent import SECONDARY_AGENT, run_secondary_agent_prompt
 
 log = logging.getLogger("jarvis.qa")
 
@@ -28,10 +28,10 @@ class QAResult:
 
 
 class QAAgent:
-    """Verifies Claude Code task output."""
+    """Verifies coding-agent task output."""
 
     async def verify(self, task_prompt: str, task_result: str, working_dir: str = ".") -> QAResult:
-        """Run QA on a completed task by spawning claude -p with a verification prompt."""
+        """Run QA on a completed task via the active secondary agent."""
         qa_prompt = (
             "You are a QA agent. Verify the following completed task.\n\n"
             f"ORIGINAL TASK:\n{task_prompt}\n\n"
@@ -45,22 +45,12 @@ class QAAgent:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=qa_prompt.encode()),
+            result = await run_secondary_agent_prompt(
+                prompt=qa_prompt,
+                working_dir=working_dir,
                 timeout=120.0,
             )
-
-            raw = stdout.decode().strip()
+            raw = result.message.strip()
 
             # Try to parse JSON from the response
             try:
@@ -94,10 +84,10 @@ class QAAgent:
                 summary="QA timed out",
             )
         except FileNotFoundError:
-            log.error("claude CLI not found for QA")
+            log.error(f"{SECONDARY_AGENT.display_name} not found for QA")
             return QAResult(
                 passed=True,
-                issues=["claude CLI not available for QA"],
+                issues=[f"{SECONDARY_AGENT.display_name} not available for QA"],
                 summary="QA skipped — CLI not found",
             )
         except Exception as e:
@@ -133,34 +123,23 @@ class QAAgent:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=retry_prompt.encode()),
+            result = await run_secondary_agent_prompt(
+                prompt=retry_prompt,
+                working_dir=working_dir,
                 timeout=300.0,
             )
-
-            if process.returncode == 0:
-                result = stdout.decode().strip()
+            if result.returncode == 0:
                 return {
                     "status": "completed",
-                    "result": result,
+                    "result": result.message.strip(),
                     "error": "",
                     "attempt": attempt + 1,
                 }
             else:
                 return {
                     "status": "failed",
-                    "result": stdout.decode().strip(),
-                    "error": stderr.decode().strip(),
+                    "result": result.message.strip(),
+                    "error": result.stderr.strip() or result.stdout.strip(),
                     "attempt": attempt + 1,
                 }
 
