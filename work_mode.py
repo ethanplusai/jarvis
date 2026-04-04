@@ -13,9 +13,9 @@ import asyncio
 import json
 import logging
 import shutil
+from pathlib import Path
 
 from sanitize import DANGEROUS_FLAG_LIST
-from pathlib import Path
 
 log = logging.getLogger("jarvis.work_mode")
 
@@ -48,7 +48,7 @@ class WorkSession:
     def status(self) -> str:
         return self._status
 
-    async def start(self, working_dir: str, project_name: str = None):
+    async def start(self, working_dir: str, project_name: str | None = None):
         """Start or switch to a project session."""
         self._working_dir = working_dir
         self._project_name = project_name or working_dir.split("/")[-1]
@@ -68,8 +68,10 @@ class WorkSession:
             return "Claude CLI not found on this system."
 
         cmd = [
-            claude_path, "-p",
-            "--output-format", "text",
+            claude_path,
+            "-p",
+            "--output-format",
+            "text",
             *DANGEROUS_FLAG_LIST,
         ]
 
@@ -106,7 +108,7 @@ class WorkSession:
             log.info(f"Claude Code response for {self._project_name} ({len(response)} chars)")
             return response
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.error("claude -p timed out after 300s")
             self._status = "timeout"
             return "That's taking longer than expected, sir. The operation timed out."
@@ -129,11 +131,15 @@ class WorkSession:
         """Persist session state so it survives restarts."""
         try:
             SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-            SESSION_FILE.write_text(json.dumps({
-                "project_name": self._project_name,
-                "working_dir": self._working_dir,
-                "message_count": self._message_count,
-            }))
+            SESSION_FILE.write_text(
+                json.dumps(
+                    {
+                        "project_name": self._project_name,
+                        "working_dir": self._working_dir,
+                        "message_count": self._message_count,
+                    }
+                )
+            )
         except Exception as e:
             log.debug(f"Failed to save session: {e}")
 
@@ -169,19 +175,42 @@ def is_casual_question(text: str) -> bool:
     t = text.lower().strip()
 
     casual_patterns = [
-        "what time", "what's the time", "what day",
-        "what's the weather", "weather",
-        "how are you", "are you there", "hey jarvis",
-        "good morning", "good evening", "good night",
-        "thank you", "thanks", "never mind", "nevermind",
-        "stop", "cancel", "quit work mode", "exit work mode",
-        "go back to chat", "regular mode",
-        "how's it going", "what's up",
-        "are you still there", "you there", "jarvis",
-        "are you doing it", "is it working", "what happened",
-        "did you hear me", "hello", "hey",
-        "how's that coming", "hows that coming",
-        "any update", "status update",
+        "what time",
+        "what's the time",
+        "what day",
+        "what's the weather",
+        "weather",
+        "how are you",
+        "are you there",
+        "hey jarvis",
+        "good morning",
+        "good evening",
+        "good night",
+        "thank you",
+        "thanks",
+        "never mind",
+        "nevermind",
+        "stop",
+        "cancel",
+        "quit work mode",
+        "exit work mode",
+        "go back to chat",
+        "regular mode",
+        "how's it going",
+        "what's up",
+        "are you still there",
+        "you there",
+        "jarvis",
+        "are you doing it",
+        "is it working",
+        "what happened",
+        "did you hear me",
+        "hello",
+        "hey",
+        "how's that coming",
+        "hows that coming",
+        "any update",
+        "status update",
     ]
 
     # Short greetings/acknowledgments

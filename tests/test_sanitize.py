@@ -40,7 +40,7 @@ class TestEscapeAppleScript:
         """AppleScript injection via do shell script should be neutralized."""
         malicious = '"; do shell script "whoami"'
         result = escape_applescript(malicious)
-        assert '"' not in result.replace('\\"', '')  # No unescaped quotes
+        assert '"' not in result.replace('\\"', "")  # No unescaped quotes
 
     def test_injection_attempt_string_breakout(self):
         """Attempt to break out of AppleScript string context."""
@@ -97,6 +97,7 @@ class TestExtractAction:
 
     def test_extract_basic_action(self):
         from server import extract_action
+
         text = "Right away, sir. [ACTION:BUILD] a landing page"
         clean, action = extract_action(text)
         assert clean == "Right away, sir."
@@ -105,6 +106,7 @@ class TestExtractAction:
 
     def test_extract_no_action(self):
         from server import extract_action
+
         text = "Good evening, sir."
         clean, action = extract_action(text)
         assert clean == "Good evening, sir."
@@ -112,6 +114,7 @@ class TestExtractAction:
 
     def test_extract_prompt_project(self):
         from server import extract_action
+
         text = "Connecting now. [ACTION:PROMPT_PROJECT] jarvis ||| Check the status"
         clean, action = extract_action(text)
         assert action["action"] == "prompt_project"
@@ -121,25 +124,24 @@ class TestExtractAction:
 class TestDangerousPermissionsConfig:
     """Test that the dangerous permissions flag respects config."""
 
-    def test_default_is_disabled(self):
-        # When env var is not set, should be disabled
-        os.environ.pop("ALLOW_DANGEROUS_PERMISSIONS", None)
-        # Re-import to pick up env change
+    def test_disabled_when_false(self):
+        os.environ["ALLOW_DANGEROUS_PERMISSIONS"] = "false"
         import importlib
+
         import sanitize
+
         importlib.reload(sanitize)
         assert sanitize.ALLOW_DANGEROUS_PERMS is False
         assert sanitize.DANGEROUS_FLAG == ""
         assert sanitize.DANGEROUS_FLAG_LIST == []
 
-    def test_enabled_when_set(self):
+    def test_enabled_when_true(self):
         os.environ["ALLOW_DANGEROUS_PERMISSIONS"] = "true"
         import importlib
+
         import sanitize
+
         importlib.reload(sanitize)
         assert sanitize.ALLOW_DANGEROUS_PERMS is True
         assert sanitize.DANGEROUS_FLAG == " --dangerously-skip-permissions"
         assert sanitize.DANGEROUS_FLAG_LIST == ["--dangerously-skip-permissions"]
-        # Clean up
-        os.environ.pop("ALLOW_DANGEROUS_PERMISSIONS", None)
-        importlib.reload(sanitize)

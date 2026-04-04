@@ -8,7 +8,6 @@ Two capabilities:
 
 import asyncio
 import base64
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -49,7 +48,9 @@ return windowList
 """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -63,14 +64,16 @@ return windowList
         for line in stdout.decode().strip().split("\n"):
             parts = line.strip().split("|||")
             if len(parts) >= 3:
-                windows.append({
-                    "app": parts[0].strip(),
-                    "title": parts[1].strip(),
-                    "frontmost": parts[2].strip().lower() == "true",
-                })
+                windows.append(
+                    {
+                        "app": parts[0].strip(),
+                        "title": parts[1].strip(),
+                        "frontmost": parts[2].strip().lower() == "true",
+                    }
+                )
         return windows
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("get_active_windows timed out")
         return []
     except Exception as e:
@@ -92,7 +95,9 @@ end tell
 """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -138,7 +143,7 @@ async def take_screenshot(display_only: bool = True) -> str | None:
         log.info(f"Screenshot captured: {len(data)} bytes")
         return base64.b64encode(data).decode()
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("Screenshot timed out")
         return None
     except Exception as e:
@@ -170,23 +175,25 @@ async def describe_screen(anthropic_client) -> str:
                     "Be specific about app names, file names, URLs, code, or documents visible. "
                     "2-4 sentences max. No markdown."
                 ),
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": screenshot_b64,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": screenshot_b64,
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": "What's on my screen right now?",
-                        },
-                    ],
-                }],
+                            {
+                                "type": "text",
+                                "text": "What's on my screen right now?",
+                            },
+                        ],
+                    }
+                ],
             )
             return response.content[0].text
         except Exception as e:

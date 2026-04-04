@@ -13,11 +13,10 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import anthropic
 
-from templates import TEMPLATES, get_template
+from templates import get_template
 
 log = logging.getLogger("jarvis.planner")
 
@@ -28,9 +27,17 @@ DESKTOP_PATH = Path.home() / "Desktop"
 # ---------------------------------------------------------------------------
 
 BYPASS_PHRASES = [
-    "just do it", "figure it out", "just go", "skip planning",
-    "don't ask", "stop asking", "yep just go", "just build it",
-    "wing it", "surprise me", "do your thing",
+    "just do it",
+    "figure it out",
+    "just go",
+    "skip planning",
+    "don't ask",
+    "stop asking",
+    "yep just go",
+    "just build it",
+    "wing it",
+    "surprise me",
+    "do your thing",
 ]
 
 SMART_DEFAULTS = {
@@ -56,6 +63,7 @@ SMART_DEFAULTS = {
 @dataclass
 class PlanningDecision:
     """Result of analyzing whether a request needs planning."""
+
     needs_planning: bool
     task_type: str  # build, fix, research, refactor, simple
     confidence: float  # 0.0 - 1.0
@@ -65,7 +73,7 @@ class PlanningDecision:
 
 async def detect_planning_mode(
     user_text: str,
-    client: Optional[anthropic.AsyncAnthropic] = None,
+    client: anthropic.AsyncAnthropic | None = None,
     force_bypass: bool = False,
 ) -> PlanningDecision:
     """Classify a user request as simple (execute now) or complex (needs planning).
@@ -123,9 +131,7 @@ def _quick_classify(text: str) -> str:
     return "simple"
 
 
-async def _classify_planning_mode_llm(
-    text: str, client: anthropic.AsyncAnthropic
-) -> PlanningDecision:
+async def _classify_planning_mode_llm(text: str, client: anthropic.AsyncAnthropic) -> PlanningDecision:
     """Use Haiku to classify request and identify missing info."""
     try:
         response = await client.messages.create(
@@ -198,8 +204,7 @@ def _classify_planning_mode_heuristic(text: str) -> PlanningDecision:
     if task_type == "fix":
         # Fix with file/line references → no planning needed
         has_specifics = any(
-            indicator in text
-            for indicator in ["line ", "file ", ".py", ".js", ".ts", "error:", "traceback"]
+            indicator in text for indicator in ["line ", "file ", ".py", ".js", ".ts", "error:", "traceback"]
         )
         if has_specifics and word_count > 5:
             return PlanningDecision(
@@ -243,6 +248,7 @@ def _classify_planning_mode_heuristic(text: str) -> PlanningDecision:
         missing_info=missing.get(task_type, []),
     )
 
+
 # ---------------------------------------------------------------------------
 # Task type → relevant clarifying questions
 # ---------------------------------------------------------------------------
@@ -284,13 +290,15 @@ QUESTION_MAP = {
 # Data Model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Plan:
     """A plan being built through conversation."""
+
     task_type: str  # build, fix, research, etc.
     original_request: str
-    project: Optional[str] = None
-    project_path: Optional[str] = None
+    project: str | None = None
+    project_path: str | None = None
     answers: dict = field(default_factory=dict)
     pending_questions: list = field(default_factory=list)
     current_question_index: int = 0
@@ -306,7 +314,7 @@ class Plan:
     def needs_confirmation(self) -> bool:
         return self.is_complete and not self.confirmed
 
-    def current_question(self) -> Optional[dict]:
+    def current_question(self) -> dict | None:
         if self.current_question_index < len(self.pending_questions):
             return self.pending_questions[self.current_question_index]
         return None
@@ -315,6 +323,7 @@ class Plan:
 # ---------------------------------------------------------------------------
 # Context Gatherer
 # ---------------------------------------------------------------------------
+
 
 async def gather_project_context(project_path: str) -> dict:
     """Read project files for context injection into the prompt."""
@@ -336,11 +345,9 @@ async def gather_project_context(project_path: str) -> dict:
 
     # Top-level directory listing
     try:
-        context["directory_listing"] = sorted([
-            entry.name + ("/" if entry.is_dir() else "")
-            for entry in path.iterdir()
-            if not entry.name.startswith(".")
-        ])[:30]  # cap at 30 entries
+        context["directory_listing"] = sorted(
+            [entry.name + ("/" if entry.is_dir() else "") for entry in path.iterdir() if not entry.name.startswith(".")]
+        )[:30]  # cap at 30 entries
     except PermissionError:
         pass
 
@@ -364,9 +371,13 @@ async def gather_project_context(project_path: str) -> dict:
 
     # Git log
     import asyncio
+
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "log", "--oneline", "-5",
+            "git",
+            "log",
+            "--oneline",
+            "-5",
             cwd=project_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -384,11 +395,12 @@ async def gather_project_context(project_path: str) -> dict:
 # Task Planner
 # ---------------------------------------------------------------------------
 
+
 class TaskPlanner:
     """Manages the planning conversation before spawning Claude Code."""
 
     def __init__(self):
-        self.active_plan: Optional[Plan] = None
+        self.active_plan: Plan | None = None
 
     @property
     def is_planning(self) -> bool:
@@ -480,7 +492,7 @@ class TaskPlanner:
         if any(phrase in answer_lower for phrase in skip_phrases):
             plan.skipped = True
             # Fill remaining with defaults
-            for q in plan.pending_questions[plan.current_question_index:]:
+            for q in plan.pending_questions[plan.current_question_index :]:
                 if q["default"] is not None and q["key"] not in plan.answers:
                     plan.answers[q["key"]] = q["default"]
             summary = await self.get_confirmation_summary()
@@ -546,8 +558,20 @@ class TaskPlanner:
 
         answer_lower = answer.lower().strip()
 
-        yes_phrases = ["yes", "yeah", "yep", "do it", "proceed", "go", "affirmative",
-                       "confirmed", "go ahead", "make it so", "let's go", "sure"]
+        yes_phrases = [
+            "yes",
+            "yeah",
+            "yep",
+            "do it",
+            "proceed",
+            "go",
+            "affirmative",
+            "confirmed",
+            "go ahead",
+            "make it so",
+            "let's go",
+            "sure",
+        ]
         no_phrases = ["no", "nope", "cancel", "stop", "nevermind", "forget it", "abort"]
 
         if any(phrase in answer_lower for phrase in yes_phrases):
@@ -597,9 +621,18 @@ class TaskPlanner:
             # Clean up the request — extract the core task
             clean = plan.original_request.lower()
             # Remove conversational fluff
-            for prefix in ["yeah ", "i just want to ", "can you ", "i want to ", "i need to ", "let's ", "please ", "go ahead and "]:
+            for prefix in [
+                "yeah ",
+                "i just want to ",
+                "can you ",
+                "i want to ",
+                "i need to ",
+                "let's ",
+                "please ",
+                "go ahead and ",
+            ]:
                 if clean.startswith(prefix):
-                    clean = clean[len(prefix):]
+                    clean = clean[len(prefix) :]
             parts.append(clean)
 
         # Where
@@ -703,35 +736,37 @@ class TaskPlanner:
     def _assemble_prompt(self, plan: Plan, context: dict) -> str:
         """Build a freeform prompt when no template matches."""
         lines = [
-            f"## Task",
+            "## Task",
             f"{plan.original_request}",
             "",
         ]
 
         if plan.project_path:
-            lines.extend([f"## Working Directory", f"{plan.project_path}", ""])
+            lines.extend(["## Working Directory", f"{plan.project_path}", ""])
 
         if plan.answers.get("tech_stack"):
-            lines.extend([f"## Tech Stack", f"{plan.answers['tech_stack']}", ""])
+            lines.extend(["## Tech Stack", f"{plan.answers['tech_stack']}", ""])
 
         if plan.answers.get("details"):
-            lines.extend([f"## Details", f"{plan.answers['details']}", ""])
+            lines.extend(["## Details", f"{plan.answers['details']}", ""])
 
         if plan.answers.get("error"):
-            lines.extend([f"## Error", f"{plan.answers['error']}", ""])
+            lines.extend(["## Error", f"{plan.answers['error']}", ""])
 
         if plan.answers.get("expected"):
-            lines.extend([f"## Expected Behavior", f"{plan.answers['expected']}", ""])
+            lines.extend(["## Expected Behavior", f"{plan.answers['expected']}", ""])
 
         if plan.answers.get("goal"):
-            lines.extend([f"## Goal", f"{plan.answers['goal']}", ""])
+            lines.extend(["## Goal", f"{plan.answers['goal']}", ""])
 
-        lines.extend([
-            "## Acceptance Criteria",
-            "- [ ] Task completed as described",
-            "- [ ] No console errors",
-            "- [ ] Clean, readable code",
-        ])
+        lines.extend(
+            [
+                "## Acceptance Criteria",
+                "- [ ] Task completed as described",
+                "- [ ] No console errors",
+                "- [ ] Clean, readable code",
+            ]
+        )
 
         return "\n".join(lines)
 

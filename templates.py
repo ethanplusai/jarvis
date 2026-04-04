@@ -34,7 +34,6 @@ Build a landing page for {project_name}.
 - [ ] Looks professional
 """,
     },
-
     "bug_fix": {
         "task_type": "fix",
         "keywords": ["fix", "bug", "error", "broken", "crash"],
@@ -68,7 +67,6 @@ Fix a bug in {project_name}.
 - [ ] Clean, readable fix
 """,
     },
-
     "feature": {
         "task_type": "feature",
         "keywords": ["add", "feature", "implement", "new"],
@@ -96,7 +94,6 @@ Add a new feature to {project_name}.
 - [ ] Clean, readable code
 """,
     },
-
     "refactor": {
         "task_type": "refactor",
         "keywords": ["refactor", "clean", "restructure", "reorganize"],
@@ -125,7 +122,6 @@ Refactor code in {project_name}.
 - [ ] No regressions
 """,
     },
-
     "research": {
         "task_type": "research",
         "keywords": ["research", "investigate", "analyze", "look into"],
@@ -150,7 +146,6 @@ Research: {research_topic}
 - [ ] Actionable recommendations included
 """,
     },
-
     "fullstack_app": {
         "task_type": "build",
         "keywords": ["app", "application", "fullstack", "full-stack", "dashboard"],
@@ -180,7 +175,6 @@ Build {project_name}.
 - [ ] Clean project structure
 """,
     },
-
     "api": {
         "task_type": "build",
         "keywords": ["api", "endpoint", "backend", "server", "rest"],
@@ -216,7 +210,7 @@ def get_template(task_type: str, request_text: str) -> str | None:
     best_match = None
     best_score = 0
 
-    for name, config in TEMPLATES.items():
+    for _name, config in TEMPLATES.items():
         if config["task_type"] != task_type:
             continue
 
@@ -231,7 +225,7 @@ def get_template(task_type: str, request_text: str) -> str | None:
         return best_match
 
     # Fallback: return the first template for this task_type
-    for name, config in TEMPLATES.items():
+    for _name, config in TEMPLATES.items():
         if config["task_type"] == task_type:
             return config["template"]
 

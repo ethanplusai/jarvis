@@ -8,20 +8,19 @@ filter dates in Python. Results cached and refreshed in background.
 import asyncio
 import logging
 import os
-
-from sanitize import escape_applescript
 import time as _time
 from datetime import datetime, timedelta
-from pathlib import Path
+
+from sanitize import escape_applescript
 
 log = logging.getLogger("jarvis.calendar")
 
 # Calendars to scan — set CALENDAR_ACCOUNTS env var to a comma-separated list,
 # or leave empty to auto-discover ALL calendars from Apple Calendar.
 _calendar_accounts_env = os.getenv("CALENDAR_ACCOUNTS", "")
-USER_CALENDARS: list[str] = [
-    a.strip() for a in _calendar_accounts_env.split(",") if a.strip()
-] if _calendar_accounts_env.strip() else []
+USER_CALENDARS: list[str] = (
+    [a.strip() for a in _calendar_accounts_env.split(",") if a.strip()] if _calendar_accounts_env.strip() else []
+)
 
 _auto_discovered = False
 
@@ -31,7 +30,7 @@ _cache_time: float = 0
 _calendar_launched = False
 
 # Per-calendar AppleScript: bulk property access (fast), no `whose` clause
-_BULK_SCRIPT = '''
+_BULK_SCRIPT = """
 tell application "Calendar"
     set cal to calendar "{cal_name}"
     set dateList to start date of every event of cal
@@ -43,7 +42,7 @@ tell application "Calendar"
     end repeat
     return output
 end tell
-'''
+"""
 
 
 async def _ensure_calendar_running():
@@ -53,7 +52,10 @@ async def _ensure_calendar_running():
         return
     try:
         proc = await asyncio.create_subprocess_exec(
-            "open", "-a", "Calendar", "-g",
+            "open",
+            "-a",
+            "Calendar",
+            "-g",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -70,7 +72,9 @@ async def _fetch_calendar_events(cal_name: str, timeout: float = 12.0) -> list[d
     script = _BULK_SCRIPT.replace("{cal_name}", escape_applescript(cal_name))
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -100,19 +104,21 @@ async def _fetch_calendar_events(cal_name: str, timeout: float = 12.0) -> list[d
                 parsed = _parse_applescript_date(date_str)
                 if parsed and parsed.date() == today_date:
                     time_str = "ALL_DAY" if all_day else parsed.strftime("%-I:%M %p")
-                    events.append({
-                        "calendar": cal_name,
-                        "title": title,
-                        "start": time_str,
-                        "start_dt": parsed,
-                        "all_day": all_day,
-                    })
+                    events.append(
+                        {
+                            "calendar": cal_name,
+                            "title": title,
+                            "start": time_str,
+                            "start_dt": parsed,
+                            "all_day": all_day,
+                        }
+                    )
             except Exception:
                 continue
 
         return events
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
         except Exception:
@@ -165,7 +171,7 @@ async def refresh_cache():
     all_events = []
     batch_size = 2
     for i in range(0, len(USER_CALENDARS), batch_size):
-        batch = USER_CALENDARS[i:i + batch_size]
+        batch = USER_CALENDARS[i : i + batch_size]
         results = await asyncio.gather(
             *[_fetch_calendar_events(cal, timeout=15) for cal in batch],
             return_exceptions=True,
@@ -196,10 +202,7 @@ async def get_upcoming_events(hours: int = 4) -> list[dict]:
     events = await get_todays_events()
     now = datetime.now()
     cutoff = now + timedelta(hours=hours)
-    return [
-        e for e in events
-        if not e["all_day"] and e.get("start_dt") and now <= e["start_dt"] <= cutoff
-    ]
+    return [e for e in events if not e["all_day"] and e.get("start_dt") and now <= e["start_dt"] <= cutoff]
 
 
 async def get_next_event() -> dict | None:
@@ -213,7 +216,8 @@ async def get_calendar_names() -> list[str]:
     await _ensure_calendar_running()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e",
+            "osascript",
+            "-e",
             'tell application "Calendar" to return name of every calendar',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -233,10 +237,7 @@ def format_events_for_context(events: list[dict]) -> str:
 
     lines = []
     for evt in events:
-        if evt.get("all_day"):
-            entry = f"  All day — {evt['title']}"
-        else:
-            entry = f"  {evt['start']} — {evt['title']}"
+        entry = f"  All day — {evt['title']}" if evt.get("all_day") else f"  {evt['start']} — {evt['title']}"
         if evt.get("calendar"):
             entry += f" [{evt['calendar']}]"
         lines.append(entry)

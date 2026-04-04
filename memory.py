@@ -14,7 +14,6 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("jarvis.memory")
@@ -93,18 +92,18 @@ def init_db():
 # Memories — facts JARVIS learns
 # ---------------------------------------------------------------------------
 
+
 def remember(content: str, mem_type: str = "fact", source: str = "", importance: int = 5) -> int:
     """Store a memory. Returns the memory ID."""
     conn = _get_db()
     cur = conn.execute(
         "INSERT INTO memories (type, content, source, importance, created_at) VALUES (?, ?, ?, ?, ?)",
-        (mem_type, content, source, importance, time.time())
+        (mem_type, content, source, importance, time.time()),
     )
     mem_id = cur.lastrowid
     # Update FTS
     conn.execute(
-        "INSERT INTO memory_fts (rowid, content, type, source) VALUES (?, ?, ?, ?)",
-        (mem_id, content, mem_type, source)
+        "INSERT INTO memory_fts (rowid, content, type, source) VALUES (?, ?, ?, ?)", (mem_id, content, mem_type, source)
     )
     conn.commit()
     conn.close()
@@ -131,14 +130,17 @@ def recall(query: str, limit: int = 5) -> list[dict]:
         return []
     conn = _get_db()
     try:
-        results = conn.execute("""
+        results = conn.execute(
+            """
             SELECT m.id, m.type, m.content, m.importance, m.created_at, m.access_count
             FROM memory_fts f
             JOIN memories m ON f.rowid = m.id
             WHERE memory_fts MATCH ?
             ORDER BY rank
             LIMIT ?
-        """, (fts_query, limit)).fetchall()
+        """,
+            (fts_query, limit),
+        ).fetchall()
     except Exception:
         results = []
 
@@ -146,7 +148,7 @@ def recall(query: str, limit: int = 5) -> list[dict]:
     for r in results:
         conn.execute(
             "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
-            (time.time(), r["id"])
+            (time.time(), r["id"]),
         )
     conn.commit()
     conn.close()
@@ -156,9 +158,7 @@ def recall(query: str, limit: int = 5) -> list[dict]:
 def get_recent_memories(limit: int = 10) -> list[dict]:
     """Get most recent memories."""
     conn = _get_db()
-    results = conn.execute(
-        "SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    results = conn.execute("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in results]
 
@@ -177,21 +177,27 @@ def get_important_memories(limit: int = 10) -> list[dict]:
 # Tasks
 # ---------------------------------------------------------------------------
 
-def create_task(title: str, description: str = "", priority: str = "medium",
-                due_date: str = "", due_time: str = "", project: str = "",
-                tags: list[str] = None) -> int:
+
+def create_task(
+    title: str,
+    description: str = "",
+    priority: str = "medium",
+    due_date: str = "",
+    due_time: str = "",
+    project: str = "",
+    tags: list[str] = None,
+) -> int:
     """Create a task. Returns task ID."""
     conn = _get_db()
     cur = conn.execute(
         """INSERT INTO tasks (title, description, priority, due_date, due_time,
            project, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (title, description, priority, due_date, due_time,
-         project, json.dumps(tags or []), time.time())
+        (title, description, priority, due_date, due_time, project, json.dumps(tags or []), time.time()),
     )
     task_id = cur.lastrowid
     conn.execute(
         "INSERT INTO task_fts (rowid, title, description, project, notes) VALUES (?, ?, ?, ?, ?)",
-        (task_id, title, description, project, "")
+        (task_id, title, description, project, ""),
     )
     conn.commit()
     conn.close()
@@ -206,7 +212,7 @@ def get_open_tasks(project: str = None) -> list[dict]:
         results = conn.execute(
             "SELECT * FROM tasks WHERE status IN ('open','in_progress') AND project LIKE ? ORDER BY "
             "CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, due_date",
-            (f"%{project}%",)
+            (f"%{project}%",),
         ).fetchall()
     else:
         results = conn.execute(
@@ -223,7 +229,7 @@ def get_tasks_for_date(date_str: str) -> list[dict]:
     results = conn.execute(
         "SELECT * FROM tasks WHERE due_date = ? AND status != 'cancelled' ORDER BY "
         "CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, due_time",
-        (date_str,)
+        (date_str,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in results]
@@ -232,10 +238,7 @@ def get_tasks_for_date(date_str: str) -> list[dict]:
 def complete_task(task_id: int):
     """Mark a task as done."""
     conn = _get_db()
-    conn.execute(
-        "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
-        (time.time(), task_id)
-    )
+    conn.execute("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", (time.time(), task_id))
     conn.commit()
     conn.close()
 
@@ -247,12 +250,15 @@ def search_tasks(query: str, limit: int = 10) -> list[dict]:
         return []
     conn = _get_db()
     try:
-        results = conn.execute("""
+        results = conn.execute(
+            """
             SELECT t.* FROM task_fts f
             JOIN tasks t ON f.rowid = t.id
             WHERE task_fts MATCH ?
             ORDER BY rank LIMIT ?
-        """, (fts_query, limit)).fetchall()
+        """,
+            (fts_query, limit),
+        ).fetchall()
     except Exception:
         results = []
     conn.close()
@@ -263,18 +269,18 @@ def search_tasks(query: str, limit: int = 10) -> list[dict]:
 # Notes
 # ---------------------------------------------------------------------------
 
+
 def create_note(content: str, title: str = "", topic: str = "", tags: list[str] = None) -> int:
     """Create a note. Returns note ID."""
     conn = _get_db()
     now = time.time()
     cur = conn.execute(
         "INSERT INTO notes (title, content, topic, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (title, content, topic, json.dumps(tags or []), now, now)
+        (title, content, topic, json.dumps(tags or []), now, now),
     )
     note_id = cur.lastrowid
     conn.execute(
-        "INSERT INTO note_fts (rowid, title, content, topic) VALUES (?, ?, ?, ?)",
-        (note_id, title, content, topic)
+        "INSERT INTO note_fts (rowid, title, content, topic) VALUES (?, ?, ?, ?)", (note_id, title, content, topic)
     )
     conn.commit()
     conn.close()
@@ -289,12 +295,15 @@ def search_notes(query: str, limit: int = 10) -> list[dict]:
         return []
     conn = _get_db()
     try:
-        results = conn.execute("""
+        results = conn.execute(
+            """
             SELECT n.* FROM note_fts f
             JOIN notes n ON f.rowid = n.id
             WHERE note_fts MATCH ?
             ORDER BY rank LIMIT ?
-        """, (fts_query, limit)).fetchall()
+        """,
+            (fts_query, limit),
+        ).fetchall()
     except Exception:
         results = []
     conn.close()
@@ -305,8 +314,7 @@ def get_notes_by_topic(topic: str) -> list[dict]:
     """Get all notes for a topic/project."""
     conn = _get_db()
     results = conn.execute(
-        "SELECT * FROM notes WHERE topic LIKE ? ORDER BY updated_at DESC",
-        (f"%{topic}%",)
+        "SELECT * FROM notes WHERE topic LIKE ? ORDER BY updated_at DESC", (f"%{topic}%",)
     ).fetchall()
     conn.close()
     return [dict(r) for r in results]
@@ -315,6 +323,7 @@ def get_notes_by_topic(topic: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Context Builder — smart context for LLM calls
 # ---------------------------------------------------------------------------
+
 
 def build_memory_context(user_message: str) -> str:
     """Build relevant context from memories, tasks, and notes for the LLM.
@@ -327,9 +336,10 @@ def build_memory_context(user_message: str) -> str:
     # Always include: open high-priority tasks
     high_tasks = [t for t in get_open_tasks() if t["priority"] == "high"]
     if high_tasks:
-        task_lines = [f"  - [{t['priority']}] {t['title']}" +
-                      (f" (due {t['due_date']})" if t["due_date"] else "")
-                      for t in high_tasks[:5]]
+        task_lines = [
+            f"  - [{t['priority']}] {t['title']}" + (f" (due {t['due_date']})" if t["due_date"] else "")
+            for t in high_tasks[:5]
+        ]
         parts.append("HIGH PRIORITY TASKS:\n" + "\n".join(task_lines))
 
     # Search memories relevant to what user is saying
@@ -342,8 +352,11 @@ def build_memory_context(user_message: str) -> str:
     # Recent important memories (always available)
     important = get_important_memories(limit=3)
     if important:
-        imp_lines = [f"  - {m['content']}" for m in important
-                     if not any(m["content"] == r["content"] for r in (relevant if 'relevant' in dir() else []))]
+        imp_lines = [
+            f"  - {m['content']}"
+            for m in important
+            if not any(m["content"] == r["content"] for r in (relevant if "relevant" in dir() else []))
+        ]
         if imp_lines:
             parts.append("KEY FACTS:\n" + "\n".join(imp_lines[:3]))
 
@@ -402,6 +415,7 @@ def format_plan_for_voice(tasks: list[dict], events: list[dict]) -> str:
 # Memory extraction — learn from conversations
 # ---------------------------------------------------------------------------
 
+
 async def extract_memories(user_text: str, jarvis_response: str, anthropic_client) -> list[str]:
     """After a conversation turn, extract any facts worth remembering.
 
@@ -419,7 +433,7 @@ async def extract_memories(user_text: str, jarvis_response: str, anthropic_clien
                 "Extract facts worth remembering from this conversation. "
                 "Only extract CONCRETE facts: preferences, decisions, names, dates, plans, goals. "
                 "NOT opinions, greetings, or casual chat. "
-                "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10}] "
+                'Return JSON array of objects: [{"type": "fact|preference|project|person|decision", "content": "...", "importance": 1-10}] '
                 "Return [] if nothing worth remembering. Be very selective."
             ),
             messages=[{"role": "user", "content": f"User: {user_text}\nJARVIS: {jarvis_response}"}],

@@ -56,41 +56,39 @@ class DispatchRegistry:
         cur = conn.execute(
             "INSERT INTO dispatches (project_name, project_path, original_prompt, status, created_at, updated_at) "
             "VALUES (?, ?, ?, 'pending', ?, ?)",
-            (project_name, project_path, prompt, now, now)
+            (project_name, project_path, prompt, now, now),
         )
-        dispatch_id = cur.lastrowid
+        dispatch_id: int = cur.lastrowid  # type: ignore[assignment]
         conn.commit()
         conn.close()
         log.info(f"Registered dispatch #{dispatch_id}: {project_name}")
         return dispatch_id
 
-    def update_status(self, dispatch_id: int, status: str,
-                      response: str = None, summary: str = None):
+    def update_status(self, dispatch_id: int, status: str, response: str | None = None, summary: str | None = None):
         """Update dispatch status and optionally store response/summary."""
         conn = _get_db()
         now = time.time()
         if response is not None:
             conn.execute(
-                "UPDATE dispatches SET status=?, claude_response=?, summary=?, updated_at=?, "
-                "completed_at=? WHERE id=?",
-                (status, response[:5000], summary or "", now,
-                 now if status in ("completed", "failed", "timeout") else None,
-                 dispatch_id)
+                "UPDATE dispatches SET status=?, claude_response=?, summary=?, updated_at=?, completed_at=? WHERE id=?",
+                (
+                    status,
+                    response[:5000],
+                    summary or "",
+                    now,
+                    now if status in ("completed", "failed", "timeout") else None,
+                    dispatch_id,
+                ),
             )
         else:
-            conn.execute(
-                "UPDATE dispatches SET status=?, updated_at=? WHERE id=?",
-                (status, now, dispatch_id)
-            )
+            conn.execute("UPDATE dispatches SET status=?, updated_at=? WHERE id=?", (status, now, dispatch_id))
         conn.commit()
         conn.close()
 
     def get_most_recent(self) -> dict | None:
         """Get the most recently updated dispatch."""
         conn = _get_db()
-        row = conn.execute(
-            "SELECT * FROM dispatches ORDER BY updated_at DESC LIMIT 1"
-        ).fetchone()
+        row = conn.execute("SELECT * FROM dispatches ORDER BY updated_at DESC LIMIT 1").fetchone()
         conn.close()
         return dict(row) if row else None
 
@@ -98,8 +96,7 @@ class DispatchRegistry:
         """Get all pending/building dispatches."""
         conn = _get_db()
         rows = conn.execute(
-            "SELECT * FROM dispatches WHERE status IN ('pending','building','planning') "
-            "ORDER BY updated_at DESC"
+            "SELECT * FROM dispatches WHERE status IN ('pending','building','planning') ORDER BY updated_at DESC"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -108,8 +105,7 @@ class DispatchRegistry:
         """Fuzzy match dispatch by project name."""
         conn = _get_db()
         row = conn.execute(
-            "SELECT * FROM dispatches WHERE project_name LIKE ? ORDER BY updated_at DESC LIMIT 1",
-            (f"%{name}%",)
+            "SELECT * FROM dispatches WHERE project_name LIKE ? ORDER BY updated_at DESC LIMIT 1", (f"%{name}%",)
         ).fetchone()
         conn.close()
         return dict(row) if row else None
@@ -122,7 +118,7 @@ class DispatchRegistry:
             "SELECT * FROM dispatches WHERE project_name LIKE ? AND status = 'completed' "
             "AND completed_at IS NOT NULL AND completed_at >= ? "
             "ORDER BY completed_at DESC LIMIT 1",
-            (f"%{project_name}%", cutoff)
+            (f"%{project_name}%", cutoff),
         ).fetchone()
         conn.close()
         return dict(row) if row else None
@@ -130,9 +126,7 @@ class DispatchRegistry:
     def get_recent(self, limit: int = 5) -> list[dict]:
         """Get last N dispatches."""
         conn = _get_db()
-        rows = conn.execute(
-            "SELECT * FROM dispatches ORDER BY updated_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM dispatches ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -154,7 +148,11 @@ class DispatchRegistry:
         if completed:
             lines = []
             for d in completed[:2]:
-                lines.append(f"  - {d['project_name']}: {d['summary'][:80]}" if d["summary"] else f"  - {d['project_name']}: completed")
+                lines.append(
+                    f"  - {d['project_name']}: {d['summary'][:80]}"
+                    if d["summary"]
+                    else f"  - {d['project_name']}: completed"
+                )
             parts.append("RECENTLY COMPLETED:\n" + "\n".join(lines))
 
         return "\n".join(parts) if parts else "No active or recent dispatches."

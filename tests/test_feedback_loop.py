@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from qa import QAAgent, QAResult, MAX_RETRIES
+from qa import MAX_RETRIES, QAAgent, QAResult
 from tracking import SuccessTracker
 
 
@@ -52,10 +52,7 @@ def test_qa_result_success():
 
 def test_retry_prompt_includes_feedback():
     """Retry prompt should include specific QA feedback."""
-    original_task = (
-        "Create calculator.py with add, subtract, multiply, divide. "
-        "divide(a, 0) must raise ValueError."
-    )
+    original_task = "Create calculator.py with add, subtract, multiply, divide. divide(a, 0) must raise ValueError."
     issues = [
         "divide(a, 0) returns infinity instead of raising ValueError",
         "No input validation on non-numeric arguments",
@@ -106,19 +103,19 @@ async def test_retry_below_max_attempts():
     # Mock subprocess to simulate successful retry
     mock_proc = AsyncMock()
     mock_proc.returncode = 0
-    mock_proc.communicate = AsyncMock(
-        return_value=(b"Fixed: added ValueError for zero division", b"")
-    )
+    mock_proc.communicate = AsyncMock(return_value=(b"Fixed: added ValueError for zero division", b""))
     mock_proc.pid = 12345
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with patch("asyncio.wait_for", return_value=mock_proc.communicate.return_value):
-            result = await qa.auto_retry(
-                task_prompt="Create calculator.py",
-                issues=["Missing zero division handling"],
-                working_dir="/tmp",
-                attempt=1,
-            )
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch("asyncio.wait_for", return_value=mock_proc.communicate.return_value),
+    ):
+        result = await qa.auto_retry(
+            task_prompt="Create calculator.py",
+            issues=["Missing zero division handling"],
+            working_dir="/tmp",
+            attempt=1,
+        )
 
     assert result["status"] == "completed"
     assert result["attempt"] == 2
@@ -173,7 +170,7 @@ async def test_full_feedback_loop_mocked(tracker):
     """Full feedback loop: execute -> QA fail -> retry -> QA pass -> log."""
 
     # Step 1: Simulate first execution (produces bad code)
-    first_result = "def divide(a, b): return a / b"  # No ValueError on zero
+    # Step 1 result (bad code): "def divide(a, b): return a / b" — no ValueError on zero
 
     # Step 2: QA detects the issue
     qa_fail = QAResult(
@@ -191,11 +188,9 @@ async def test_full_feedback_loop_mocked(tracker):
     assert "ValueError" in retry_issues[0]
 
     # Step 5: Simulate successful retry
-    second_result = (
-        "def divide(a, b):\n"
-        "    if b == 0:\n"
-        "        raise ValueError('Cannot divide by zero')\n"
-        "    return a / b"
+    # Step 5 result (fixed code):
+    _fixed_code = (
+        "def divide(a, b):\n    if b == 0:\n        raise ValueError('Cannot divide by zero')\n    return a / b"
     )
 
     # Step 6: QA passes on retry

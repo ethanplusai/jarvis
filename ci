@@ -1,0 +1,125 @@
+#!/bin/bash
+# Run the full CI pipeline locally — same checks as GitHub Actions.
+# Usage: ./ci [check]     — lint, typecheck, test, security (default)
+#        ./ci fix         — auto-fix lint issues
+#        ./ci lint        — lint only
+#        ./ci test        — tests only
+#        ./ci typecheck   — mypy only
+#        ./ci security    — bandit only
+#        ./ci frontend    — frontend typecheck only
+
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+pass() { echo -e "  ${GREEN}PASS${NC} $1"; }
+fail() { echo -e "  ${RED}FAIL${NC} $1"; FAILED=1; }
+info() { echo -e "\n${BOLD}$1${NC}"; }
+
+FAILED=0
+CMD="${1:-check}"
+
+run_lint() {
+    info "Lint (ruff)"
+    if ruff check . 2>/dev/null; then
+        pass "ruff check"
+    else
+        fail "ruff check"
+    fi
+
+    if ruff format --check . 2>/dev/null; then
+        pass "ruff format"
+    else
+        fail "ruff format — run './ci fix' to auto-fix"
+    fi
+}
+
+run_fix() {
+    info "Auto-fixing lint issues"
+    ruff check --fix . 2>/dev/null || true
+    ruff format . 2>/dev/null
+    echo -e "  ${GREEN}Done${NC}"
+}
+
+run_typecheck() {
+    info "Type Check (mypy)"
+    if mypy --config-file pyproject.toml . 2>/dev/null; then
+        pass "mypy"
+    else
+        fail "mypy"
+    fi
+}
+
+run_test() {
+    info "Tests (pytest)"
+    if python -m pytest tests/ -v --ignore=tests/test_classifier.py --ignore=tests/test_browser_integration.py 2>&1; then
+        pass "pytest"
+    else
+        fail "pytest"
+    fi
+}
+
+run_security() {
+    info "Security Scan (bandit)"
+    # B603/B607: subprocess with shell=False — intentional for osascript/claude
+    if bandit -r . -x ./venv,./frontend,./tests -s B603,B607 --severity-level high -q 2>/dev/null; then
+        pass "bandit (no high/critical findings)"
+    else
+        fail "bandit"
+    fi
+}
+
+run_frontend() {
+    info "Frontend Type Check (tsc)"
+    if (cd frontend && npx tsc --noEmit 2>&1); then
+        pass "tsc --noEmit"
+    else
+        fail "tsc"
+    fi
+}
+
+case "$CMD" in
+    check)
+        echo -e "${BOLD}Running full CI pipeline locally...${NC}"
+        run_lint
+        run_typecheck
+        run_test
+        run_security
+        run_frontend
+        echo ""
+        if [ "$FAILED" -eq 0 ]; then
+            echo -e "${GREEN}${BOLD}All checks passed.${NC}"
+        else
+            echo -e "${RED}${BOLD}Some checks failed.${NC}"
+            exit 1
+        fi
+        ;;
+    fix)
+        run_fix
+        ;;
+    lint)
+        run_lint
+        ;;
+    test)
+        run_test
+        ;;
+    typecheck)
+        run_typecheck
+        ;;
+    security)
+        run_security
+        ;;
+    frontend)
+        run_frontend
+        ;;
+    *)
+        echo "Usage: ./ci [check|fix|lint|test|typecheck|security|frontend]"
+        exit 1
+        ;;
+esac

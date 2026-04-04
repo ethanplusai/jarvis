@@ -5,13 +5,11 @@ Looks at success/failure data, identifies patterns, and creates new template
 versions incorporating improvements.
 """
 
-import json
 import logging
 import sqlite3
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -118,18 +116,14 @@ class TemplateEvolver:
                         if keyword in text:
                             if pattern_name not in patterns_found:
                                 patterns_found.append(pattern_name)
-                                issues.append(
-                                    f"{pattern_name}: {keyword} found in failure data"
-                                )
+                                issues.append(f"{pattern_name}: {keyword} found in failure data")
                             break
 
             # Generate suggested improvements based on patterns
             suggested = []
             for pattern in patterns_found:
                 info = FAILURE_PATTERNS[pattern]
-                suggested.append(
-                    f"Add to {info['section']}: {info['fix']}"
-                )
+                suggested.append(f"Add to {info['section']}: {info['fix']}")
 
         except Exception as e:
             log.warning(f"Failure analysis error: {e}")
@@ -176,12 +170,14 @@ class TemplateEvolver:
             if info["fix"] in current_content:
                 continue
 
-            improvements.append(Improvement(
-                section_name=target_section,
-                current_content=current_content[:200],
-                suggested_change=info["fix"],
-                rationale=f"Pattern '{pattern}' detected in {analysis.total_failures} failures",
-            ))
+            improvements.append(
+                Improvement(
+                    section_name=target_section,
+                    current_content=current_content[:200],
+                    suggested_change=info["fix"],
+                    rationale=f"Pattern '{pattern}' detected in {analysis.total_failures} failures",
+                )
+            )
 
         return improvements
 
@@ -235,7 +231,7 @@ class TemplateEvolver:
             log.warning(f"Failed to save new template: {e}")
             return ""
 
-    def evolve_if_needed(self, task_type: str, min_failures: int = 5) -> Optional[str]:
+    def evolve_if_needed(self, task_type: str, min_failures: int = 5) -> str | None:
         """Check if evolution is warranted and create new version if so.
 
         Only evolves if there are enough failures to detect patterns.
@@ -256,9 +252,7 @@ class TemplateEvolver:
 
         new_version = self.create_new_version(task_type, improvements)
         if new_version:
-            log.info(
-                f"Evolved {task_type} to {new_version} with {len(improvements)} improvements"
-            )
+            log.info(f"Evolved {task_type} to {new_version} with {len(improvements)} improvements")
         return new_version
 
     def close(self):

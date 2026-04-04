@@ -7,10 +7,9 @@ and suggests relevant context based on patterns.
 
 import logging
 import sqlite3
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("jarvis.learning")
 
@@ -91,7 +90,7 @@ class UsageLearner:
         self,
         user_text: str,
         known_projects: list[dict] = None,
-    ) -> Optional[ContextSuggestion]:
+    ) -> ContextSuggestion | None:
         """Suggest relevant context based on user text and recent patterns.
 
         Returns a ContextSuggestion if confidence is high enough, None otherwise.
@@ -132,8 +131,7 @@ class UsageLearner:
         if best_match and best_confidence >= 0.7:
             return ContextSuggestion(
                 suggestion_text=(
-                    f"Based on your recent work, shall I use the {best_match['name']} "
-                    f"project directory, sir?"
+                    f"Based on your recent work, shall I use the {best_match['name']} project directory, sir?"
                 ),
                 project_dir=best_match.get("path", ""),
                 confidence=best_confidence,
@@ -169,9 +167,7 @@ class UsageLearner:
         """Get overall usage statistics for the current session summary."""
         try:
             total = self.db.execute("SELECT COUNT(*) as cnt FROM task_log").fetchone()["cnt"]
-            success = self.db.execute(
-                "SELECT COUNT(*) as cnt FROM task_log WHERE success = 1"
-            ).fetchone()["cnt"]
+            success = self.db.execute("SELECT COUNT(*) as cnt FROM task_log WHERE success = 1").fetchone()["cnt"]
             recent = self.db.execute(
                 "SELECT COUNT(*) as cnt FROM task_log WHERE created_at > ?",
                 ((datetime.now() - timedelta(days=7)).isoformat(),),

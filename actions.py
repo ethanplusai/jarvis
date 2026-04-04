@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-from sanitize import escape_applescript, escape_shell_in_applescript, DANGEROUS_FLAG
+from sanitize import DANGEROUS_FLAG, escape_applescript, escape_shell_in_applescript
 
 log = logging.getLogger("jarvis.actions")
 
@@ -26,14 +26,12 @@ async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
     Shows the user JARVIS is active in that terminal. Reverts after revert_after seconds.
     """
     # Save the current profile, switch to Ocean, then revert
-    script_save = (
-        'tell application "Terminal"\n'
-        '    return name of current settings of front window\n'
-        'end tell'
-    )
+    script_save = 'tell application "Terminal"\n    return name of current settings of front window\nend tell'
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script_save,
+            "osascript",
+            "-e",
+            script_save,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -42,12 +40,12 @@ async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
 
         # Switch to Ocean
         script_set = (
-            'tell application "Terminal"\n'
-            '    set current settings of front window to settings set "Ocean"\n'
-            'end tell'
+            'tell application "Terminal"\n    set current settings of front window to settings set "Ocean"\nend tell'
         )
         proc2 = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script_set,
+            "osascript",
+            "-e",
+            script_set,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -56,8 +54,7 @@ async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
         # Schedule revert
         if original_profile and original_profile != "Ocean":
             asyncio.get_event_loop().call_later(
-                revert_after,
-                lambda: asyncio.ensure_future(_revert_terminal_theme(original_profile))
+                revert_after, lambda: asyncio.ensure_future(_revert_terminal_theme(original_profile))
             )
     except Exception:
         pass
@@ -67,13 +64,13 @@ async def _revert_terminal_theme(profile_name: str):
     """Revert a Terminal window back to its original profile."""
     escaped = escape_applescript(profile_name)
     script = (
-        'tell application "Terminal"\n'
-        f'    set current settings of front window to settings set "{escaped}"\n'
-        'end tell'
+        f'tell application "Terminal"\n    set current settings of front window to settings set "{escaped}"\nend tell'
     )
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -86,20 +83,13 @@ async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
     if command:
         escaped = escape_applescript(command)
-        script = (
-            'tell application "Terminal"\n'
-            "    activate\n"
-            f'    do script "{escaped}"\n'
-            "end tell"
-        )
+        script = f'tell application "Terminal"\n    activate\n    do script "{escaped}"\nend tell'
     else:
-        script = (
-            'tell application "Terminal"\n'
-            "    activate\n"
-            "end tell"
-        )
+        script = 'tell application "Terminal"\n    activate\nend tell'
     proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
+        "osascript",
+        "-e",
+        script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -121,23 +111,15 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
 
     if browser.lower() == "firefox":
         app_name = "Firefox"
-        script = (
-            'tell application "Firefox"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
+        script = f'tell application "Firefox"\n    activate\n    open location "{escaped_url}"\nend tell'
     else:
         app_name = "Chrome"
-        script = (
-            'tell application "Google Chrome"\n'
-            "    activate\n"
-            f'    open location "{escaped_url}"\n'
-            "end tell"
-        )
+        script = f'tell application "Google Chrome"\n    activate\n    open location "{escaped_url}"\nend tell'
 
     proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
+        "osascript",
+        "-e",
+        script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -175,7 +157,9 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
         "end tell"
     )
     proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
+        "osascript",
+        "-e",
+        script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -244,7 +228,9 @@ return "OK"
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -266,11 +252,12 @@ return "OK"
 
         return {
             "success": success,
-            "confirmation": f"Sent that to {project_name}, sir." if success
+            "confirmation": f"Sent that to {project_name}, sir."
+            if success
             else f"Had trouble typing into {project_name}, sir.",
         }
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"success": False, "confirmation": "Terminal operation timed out, sir."}
     except Exception as e:
         log.error(f"prompt_existing_terminal failed: {e}")
@@ -288,7 +275,9 @@ async def get_chrome_tab_info() -> dict:
     )
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -334,7 +323,7 @@ async def monitor_build(project_dir: str, ws=None, synthesize_fn=None) -> None:
     log.warning(f"Build timed out in {project_dir}")
 
 
-async def execute_action(intent: dict, projects: list = None) -> dict:
+async def execute_action(intent: dict, projects: list | None = None) -> dict:
     """Route a classified intent to the right action function.
 
     Args:
@@ -359,10 +348,7 @@ async def execute_action(intent: dict, projects: list = None) -> dict:
 
         # Detect which browser user wants
         target_lower = target.lower()
-        if "firefox" in target_lower:
-            browser = "firefox"
-        else:
-            browser = "chrome"
+        browser = "firefox" if "firefox" in target_lower else "chrome"
 
         result = await open_browser(url, browser)
         result["project_dir"] = None
@@ -393,7 +379,7 @@ def _generate_project_name(prompt: str) -> str:
             return re.sub(r"[\s]+", "-", name.lower())
 
     # Second: check for "called X" or "named X" pattern
-    called = re.search(r'(?:called|named)\s+(\S+(?:[-_]\S+)*)', prompt, re.IGNORECASE)
+    called = re.search(r"(?:called|named)\s+(\S+(?:[-_]\S+)*)", prompt, re.IGNORECASE)
     if called:
         name = re.sub(r"[^a-zA-Z0-9-]", "", called.group(1))
         if len(name) > 3:
@@ -401,9 +387,38 @@ def _generate_project_name(prompt: str) -> str:
 
     # Fallback: extract meaningful words
     words = re.sub(r"[^a-zA-Z0-9\s]", "", prompt.lower()).split()
-    skip = {"a", "the", "an", "me", "build", "create", "make", "for", "with", "and",
-            "to", "of", "i", "want", "need", "new", "project", "directory", "called",
-            "on", "desktop", "that", "application", "app", "full", "stack", "simple",
-            "web", "page", "site", "named"}
+    skip = {
+        "a",
+        "the",
+        "an",
+        "me",
+        "build",
+        "create",
+        "make",
+        "for",
+        "with",
+        "and",
+        "to",
+        "of",
+        "i",
+        "want",
+        "need",
+        "new",
+        "project",
+        "directory",
+        "called",
+        "on",
+        "desktop",
+        "that",
+        "application",
+        "app",
+        "full",
+        "stack",
+        "simple",
+        "web",
+        "page",
+        "site",
+        "named",
+    }
     meaningful = [w for w in words if w not in skip and len(w) > 2][:4]
     return "-".join(meaningful) if meaningful else "jarvis-project"

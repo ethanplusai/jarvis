@@ -8,11 +8,10 @@ IMPORTANT: This module is intentionally READ-ONLY.
 No send, delete, move, or modify functions exist by design.
 """
 
-from sanitize import escape_applescript
-
 import asyncio
 import logging
-from datetime import datetime
+
+from sanitize import escape_applescript
 
 log = logging.getLogger("jarvis.mail")
 
@@ -28,7 +27,9 @@ async def _ensure_mail_running():
     check = 'tell application "System Events" to return (name of every application process) contains "Mail"'
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", check,
+            "osascript",
+            "-e",
+            check,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -41,7 +42,10 @@ async def _ensure_mail_running():
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "open", "-a", "Mail", "-g",
+            "open",
+            "-a",
+            "Mail",
+            "-g",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -58,7 +62,9 @@ async def _run_mail_script(script: str, timeout: float = 20) -> str:
     await _ensure_mail_running()
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -70,7 +76,7 @@ async def _run_mail_script(script: str, timeout: float = 20) -> str:
             return ""
 
         return stdout.decode().strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("Mail script timed out")
         return ""
     except Exception as e:
@@ -169,13 +175,15 @@ end tell
     for line in raw.split("\n"):
         parts = line.strip().split("|||")
         if len(parts) >= 4:
-            messages.append({
-                "sender": parts[0].strip(),
-                "subject": parts[1].strip(),
-                "date": parts[2].strip(),
-                "read": parts[3].strip().lower() == "true",
-                "preview": parts[4].strip() if len(parts) > 4 else "",
-            })
+            messages.append(
+                {
+                    "sender": parts[0].strip(),
+                    "subject": parts[1].strip(),
+                    "date": parts[2].strip(),
+                    "read": parts[3].strip().lower() == "true",
+                    "preview": parts[4].strip() if len(parts) > 4 else "",
+                }
+            )
     return messages
 
 
@@ -215,13 +223,15 @@ end tell
     for line in raw.split("\n"):
         parts = line.strip().split("|||")
         if len(parts) >= 3:
-            messages.append({
-                "sender": parts[0].strip(),
-                "subject": parts[1].strip(),
-                "date": parts[2].strip(),
-                "read": False,
-                "preview": parts[3].strip() if len(parts) > 3 else "",
-            })
+            messages.append(
+                {
+                    "sender": parts[0].strip(),
+                    "subject": parts[1].strip(),
+                    "date": parts[2].strip(),
+                    "read": False,
+                    "preview": parts[3].strip() if len(parts) > 3 else "",
+                }
+            )
     return messages
 
 
@@ -254,12 +264,14 @@ end tell
     for line in raw.split("\n"):
         parts = line.strip().split("|||")
         if len(parts) >= 4:
-            messages.append({
-                "sender": parts[0].strip(),
-                "subject": parts[1].strip(),
-                "date": parts[2].strip(),
-                "read": parts[3].strip().lower() == "true",
-            })
+            messages.append(
+                {
+                    "sender": parts[0].strip(),
+                    "subject": parts[1].strip(),
+                    "date": parts[2].strip(),
+                    "read": parts[3].strip().lower() == "true",
+                }
+            )
     return messages
 
 
@@ -297,12 +309,14 @@ end tell
     for line in raw.split("\n"):
         parts = line.strip().split("|||")
         if len(parts) >= 4:
-            messages.append({
-                "sender": parts[0].strip(),
-                "subject": parts[1].strip(),
-                "date": parts[2].strip(),
-                "read": parts[3].strip().lower() == "true",
-            })
+            messages.append(
+                {
+                    "sender": parts[0].strip(),
+                    "subject": parts[1].strip(),
+                    "date": parts[2].strip(),
+                    "read": parts[3].strip().lower() == "true",
+                }
+            )
     return messages
 
 

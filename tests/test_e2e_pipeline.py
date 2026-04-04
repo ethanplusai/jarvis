@@ -18,11 +18,11 @@ import pytest
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from planner import detect_planning_mode, PlanningDecision, TaskPlanner, gather_project_context
-from qa import QAAgent, QAResult
-from suggestions import suggest_followup, Suggestion
-from tracking import SuccessTracker
+from planner import PlanningDecision, detect_planning_mode, gather_project_context
+from qa import QAResult
+from suggestions import suggest_followup
 from templates import get_template
+from tracking import SuccessTracker
 
 
 @pytest.fixture
@@ -65,9 +65,7 @@ async def test_planning_mode_complex_task():
 @pytest.mark.asyncio
 async def test_planning_mode_bypass():
     """Bypass mode should skip planning with smart defaults."""
-    decision = await detect_planning_mode(
-        "Just build something cool", force_bypass=True
-    )
+    decision = await detect_planning_mode("Just build something cool", force_bypass=True)
     assert decision.needs_planning is False
     assert len(decision.smart_defaults) > 0
 
@@ -138,7 +136,7 @@ async def test_full_pipeline_mocked(temp_dir, tracker):
     assert context["path"] == temp_dir
 
     # 3. Template matching
-    tmpl = get_template("build", "create a Python script")
+    get_template("build", "create a Python script")
     # May or may not find a matching template - that's fine
 
     # 4. Mock Claude Code execution - simulate it creating hello.py

@@ -8,9 +8,7 @@ Runs headless Chromium with realistic user agent to avoid blocking.
 import asyncio
 import logging
 import tempfile
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from typing import Optional
+from dataclasses import asdict, dataclass, field
 
 log = logging.getLogger("jarvis.browser")
 
@@ -24,6 +22,7 @@ TIMEOUT_MS = 30_000
 # ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SearchResult:
@@ -60,6 +59,7 @@ class ResearchResult:
 # ---------------------------------------------------------------------------
 # Browser Manager
 # ---------------------------------------------------------------------------
+
 
 class JarvisBrowser:
     """Playwright-based web browsing for JARVIS."""
@@ -118,11 +118,13 @@ class JarvisBrowser:
 
             for r in raw:
                 if r.get("title") and r.get("url"):
-                    results.append(SearchResult(
-                        title=r["title"],
-                        url=r["url"],
-                        snippet=r.get("snippet", ""),
-                    ))
+                    results.append(
+                        SearchResult(
+                            title=r["title"],
+                            url=r["url"],
+                            snippet=r.get("snippet", ""),
+                        )
+                    )
 
             log.info(f"Search '{query}' returned {len(results)} results")
             # Let user see the search results for a moment
@@ -228,9 +230,7 @@ class JarvisBrowser:
             try:
                 page_content = await self.visit(r.url)
                 sources.append(r.url)
-                contents.append(
-                    f"## {r.title}\nURL: {r.url}\n\n{page_content.text_content[:1500]}"
-                )
+                contents.append(f"## {r.title}\nURL: {r.url}\n\n{page_content.text_content[:1500]}")
             except Exception:
                 continue
 

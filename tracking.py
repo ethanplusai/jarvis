@@ -8,7 +8,6 @@ import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("jarvis.tracking")
 
@@ -151,8 +150,7 @@ class SuccessTracker:
         """Get the most common action types."""
         try:
             rows = self.db.execute(
-                "SELECT action_type, keyword, count, last_used FROM usage_patterns "
-                "ORDER BY count DESC LIMIT ?",
+                "SELECT action_type, keyword, count, last_used FROM usage_patterns ORDER BY count DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]

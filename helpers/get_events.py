@@ -8,11 +8,11 @@ import sys
 # Set CALENDAR_ACCOUNTS env var to a comma-separated list of calendar names/emails,
 # or leave empty to auto-discover all calendars from Apple Calendar.
 _calendar_accounts_env = os.getenv("CALENDAR_ACCOUNTS", "")
-CALENDARS: list[str] = [
-    a.strip() for a in _calendar_accounts_env.split(",") if a.strip()
-] if _calendar_accounts_env.strip() else []
+CALENDARS: list[str] = (
+    [a.strip() for a in _calendar_accounts_env.split(",") if a.strip()] if _calendar_accounts_env.strip() else []
+)
 
-SCRIPT_TEMPLATE = '''
+SCRIPT_TEMPLATE = """
 tell application "Calendar"
     set cal to calendar "{cal_name}"
     set allStarts to start date of every event of cal
@@ -45,20 +45,22 @@ tell application "Calendar"
     end repeat
     return output
 end tell
-'''
+"""
 
 
 async def fetch_calendar(cal_name: str, timeout: float = 5.0) -> str:
     script = SCRIPT_TEMPLATE.replace("{cal_name}", cal_name)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return stdout.decode().strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
         except Exception:
@@ -72,7 +74,8 @@ async def discover_calendars() -> list[str]:
     """Auto-discover all calendar names from Apple Calendar."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e",
+            "osascript",
+            "-e",
             'tell application "Calendar" to return name of every calendar',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

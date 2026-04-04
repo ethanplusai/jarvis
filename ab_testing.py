@@ -10,10 +10,9 @@ import math
 import random
 import sqlite3
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -31,13 +30,14 @@ MIN_RATE_DIFFERENCE = 10.0
 @dataclass
 class PromptTemplate:
     """A loaded prompt template with metadata."""
+
     task_type: str
     version: str
     file_path: str
     description: str
     sections: list[dict] = field(default_factory=list)
-    success_rate: Optional[float] = None
-    raw_data: Optional[dict] = field(default=None, repr=False)
+    success_rate: float | None = None
+    raw_data: dict | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -97,15 +97,17 @@ class ABTester:
             try:
                 data = yaml.safe_load(f.read_text())
                 if data and data.get("task_type") == task_type:
-                    templates.append(PromptTemplate(
-                        task_type=data.get("task_type", task_type),
-                        version=data.get("version", "v1"),
-                        file_path=str(f),
-                        description=data.get("description", ""),
-                        sections=data.get("sections", []),
-                        success_rate=data.get("success_rate"),
-                        raw_data=data,
-                    ))
+                    templates.append(
+                        PromptTemplate(
+                            task_type=data.get("task_type", task_type),
+                            version=data.get("version", "v1"),
+                            file_path=str(f),
+                            description=data.get("description", ""),
+                            sections=data.get("sections", []),
+                            success_rate=data.get("success_rate"),
+                            raw_data=data,
+                        )
+                    )
             except Exception as e:
                 log.warning(f"Failed to load template {f}: {e}")
 
@@ -135,10 +137,7 @@ class ABTester:
         selected = random.choice(versions)
         experiment_id = self._create_experiment(task_type, selected.version)
 
-        log.info(
-            f"Selected template {task_type} {selected.version} "
-            f"(experiment {experiment_id})"
-        )
+        log.info(f"Selected template {task_type} {selected.version} (experiment {experiment_id})")
         return selected, experiment_id
 
     def _create_experiment(self, task_type: str, version: str) -> str:
@@ -146,8 +145,7 @@ class ABTester:
         experiment_id = str(uuid.uuid4())[:12]
         try:
             self.db.execute(
-                "INSERT INTO experiments (id, task_type, template_version, created_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO experiments (id, task_type, template_version, created_at) VALUES (?, ?, ?, ?)",
                 (experiment_id, task_type, version, datetime.now().isoformat()),
             )
             self.db.commit()
@@ -155,9 +153,7 @@ class ABTester:
             log.warning(f"Failed to record experiment: {e}")
         return experiment_id
 
-    def record_result(
-        self, experiment_id: str, template_version: str, success: bool
-    ):
+    def record_result(self, experiment_id: str, template_version: str, success: bool):
         """Record the outcome of an A/B experiment.
 
         Args:
@@ -172,8 +168,7 @@ class ABTester:
             )
             self.db.commit()
             log.info(
-                f"Recorded experiment {experiment_id}: "
-                f"version={template_version}, {'passed' if success else 'failed'}"
+                f"Recorded experiment {experiment_id}: version={template_version}, {'passed' if success else 'failed'}"
             )
         except Exception as e:
             log.warning(f"Failed to record result: {e}")
@@ -219,7 +214,7 @@ class ABTester:
 
         return stats
 
-    def promote_winner(self, task_type: str) -> Optional[str]:
+    def promote_winner(self, task_type: str) -> str | None:
         """Identify the winning template version if data supports it.
 
         Requirements:
@@ -229,26 +224,18 @@ class ABTester:
         stats = self.get_version_stats(task_type)
 
         # Need at least 2 versions with enough data
-        qualified = {
-            v: s for v, s in stats.items()
-            if s.total_tasks >= MIN_TASKS_FOR_WINNER
-        }
+        qualified = {v: s for v, s in stats.items() if s.total_tasks >= MIN_TASKS_FOR_WINNER}
 
         if len(qualified) < 2:
             return None
 
         # Sort by success rate descending
-        ranked = sorted(
-            qualified.values(), key=lambda s: s.success_rate, reverse=True
-        )
+        ranked = sorted(qualified.values(), key=lambda s: s.success_rate, reverse=True)
         best = ranked[0]
         second = ranked[1]
 
         if best.success_rate - second.success_rate >= MIN_RATE_DIFFERENCE:
-            log.info(
-                f"Winner for {task_type}: {best.version} "
-                f"({best.success_rate:.1f}% vs {second.success_rate:.1f}%)"
-            )
+            log.info(f"Winner for {task_type}: {best.version} ({best.success_rate:.1f}% vs {second.success_rate:.1f}%)")
             return best.version
 
         return None
@@ -258,9 +245,7 @@ class ABTester:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _wilson_interval(
-        successes: int, total: int, z: float = 1.96
-    ) -> tuple[float, float]:
+    def _wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
         """Wilson score interval for binomial proportion (~95% confidence).
 
         Returns interval as percentages (0-100).
@@ -271,11 +256,7 @@ class ABTester:
         p = successes / total
         denom = 1 + z * z / total
         centre = (p + z * z / (2 * total)) / denom
-        spread = (
-            z
-            * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total)
-            / denom
-        )
+        spread = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denom
 
         lower = max(0.0, centre - spread) * 100
         upper = min(1.0, centre + spread) * 100

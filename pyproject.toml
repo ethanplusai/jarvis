@@ -1,0 +1,112 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (replaces flake8, isort, black)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: assert is fine, /tmp paths, subprocess mocking, test auth tokens
+"tests/*" = ["S101", "S105", "S108", "S603"]
+# server.py: .env loaded before imports (E402), osascript subprocess (S603/S607),
+#   intentional try-except-pass for resilient integrations (S110/SIM105),
+#   compact one-liners in status endpoint (E701/E702),
+#   F821 are REAL BUGS — do NOT suppress (qa_agent/success_tracker undefined)
+#   S310: intentional URL open; S606: os.execv for restart
+"server.py" = ["S603", "S607", "E402", "S110", "SIM105", "E701", "E702", "S310", "S606"]
+# AppleScript integration files: subprocess calls, resilient try-except-pass
+"actions.py" = ["S603", "S607", "S110"]
+"calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
+"mail_access.py" = ["S603", "S607", "S110"]
+"notes_access.py" = ["S603", "S607", "S110"]
+"screen.py" = ["S603", "S607", "S110", "SIM105"]
+"work_mode.py" = ["S603", "S607", "S110", "SIM105"]
+"qa.py" = ["S603", "S607"]
+"browser.py" = ["S603", "S607", "S112", "S306"]
+# Background/evolution modules: resilient try-except-pass
+# S311: random.choice for A/B testing, not crypto
+"ab_testing.py" = ["S110", "SIM105", "S311"]
+"evolution.py" = ["S110", "SIM105"]
+"learning.py" = ["S110", "SIM105"]
+"tracking.py" = ["S110", "SIM105"]
+"planner.py" = ["S110", "SIM105"]
+"helpers/get_events.py" = ["S110", "SIM105"]
+# Standalone test scripts with their own .env loading
+"tests/test_classifier.py" = ["E402"]
+"tests/test_browser_integration.py" = ["S306"]
+
+# ---------------------------------------------------------------------------
+# Mypy — type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+exclude = ["venv", "frontend", "data"]
+
+# Third-party libs without stubs — list explicitly so new missing imports get caught
+[[tool.mypy.overrides]]
+module = [
+    "anthropic",
+    "anthropic.*",
+    "httpx",
+    "uvicorn",
+    "playwright.*",
+    "yaml",
+]
+ignore_missing_imports = true
+
+# Pre-existing type issues in files not yet refactored.
+# Remove these overrides as files are cleaned up.
+[[tool.mypy.overrides]]
+module = [
+    "memory",
+    "evolution",
+    "tracking",
+    "templates",
+    "planner",  # also has Anthropic union-attr
+    "learning",
+    "ab_testing",
+    "mail_access",
+    "conversation",
+    "browser",
+]
+disable_error_code = ["assignment", "return-value", "var-annotated", "call-overload", "arg-type", "index", "union-attr"]
+
+# server.py: Anthropic SDK response.content[0].text is always TextBlock at runtime,
+# but mypy sees the full union type. Also uvicorn.run(**ssl_kwargs) typing issue.
+[[tool.mypy.overrides]]
+module = "server"
+disable_error_code = ["union-attr", "arg-type", "var-annotated"]
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+asyncio_mode = "auto"
+markers = [
+    "requires_api: test requires ANTHROPIC_API_KEY",
+    "requires_network: test requires network access",
+]

@@ -17,7 +17,9 @@ async def _run_notes_script(script: str, timeout: float = 10) -> str:
     """Run an AppleScript against Notes.app."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", script,
+            "osascript",
+            "-e",
+            script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -26,7 +28,7 @@ async def _run_notes_script(script: str, timeout: float = 10) -> str:
             log.warning(f"Notes script failed: {stderr.decode()[:200]}")
             return ""
         return stdout.decode().strip()
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("Notes script timed out")
         return ""
     except Exception as e:
@@ -36,7 +38,7 @@ async def _run_notes_script(script: str, timeout: float = 10) -> str:
 
 async def get_recent_notes(count: int = 10) -> list[dict]:
     """Get most recent notes (title + creation date)."""
-    script = f'''
+    script = f"""
 tell application "Notes"
     set output to ""
     set allNotes to every note
@@ -51,7 +53,7 @@ tell application "Notes"
     end repeat
     return output
 end tell
-'''
+"""
     raw = await _run_notes_script(script, timeout=15)
     if not raw:
         return []
@@ -59,11 +61,13 @@ end tell
     for line in raw.split("\n"):
         parts = line.strip().split("|||")
         if len(parts) >= 3:
-            notes.append({
-                "title": parts[0].strip(),
-                "date": parts[1].strip(),
-                "folder": parts[2].strip(),
-            })
+            notes.append(
+                {
+                    "title": parts[0].strip(),
+                    "date": parts[1].strip(),
+                    "folder": parts[2].strip(),
+                }
+            )
     return notes
 
 
@@ -159,6 +163,7 @@ def _body_to_html(body: str) -> str:
     - Plain text → paragraphs
     """
     import re
+
     lines = body.split("\n")
     html_lines = []
 
@@ -189,7 +194,7 @@ def _body_to_html(body: str) -> str:
 
 async def get_note_folders() -> list[str]:
     """Get list of note folder names."""
-    script = '''
+    script = """
 tell application "Notes"
     set output to ""
     repeat with f in every folder
@@ -197,6 +202,6 @@ tell application "Notes"
     end repeat
     return output
 end tell
-'''
+"""
     raw = await _run_notes_script(script)
     return [f.strip() for f in raw.split("\n") if f.strip()]

@@ -7,9 +7,7 @@ Spawns a claude -p subprocess to check completed work, auto-retries on failure.
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, asdict
-from datetime import datetime
-from typing import Optional
+from dataclasses import asdict, dataclass
 
 from sanitize import DANGEROUS_FLAG_LIST
 
@@ -48,8 +46,10 @@ class QAAgent:
 
         try:
             process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
+                "claude",
+                "-p",
+                "--output-format",
+                "text",
                 *DANGEROUS_FLAG_LIST,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -88,7 +88,7 @@ class QAAgent:
                     summary=f"QA output (non-JSON): {raw[:200]}",
                 )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("QA verification timed out")
             return QAResult(
                 passed=True,
@@ -136,8 +136,10 @@ class QAAgent:
 
         try:
             process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
+                "claude",
+                "-p",
+                "--output-format",
+                "text",
                 *DANGEROUS_FLAG_LIST,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -166,7 +168,7 @@ class QAAgent:
                     "attempt": attempt + 1,
                 }
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {
                 "status": "failed",
                 "result": "",

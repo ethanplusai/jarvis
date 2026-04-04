@@ -7,10 +7,8 @@ and reports issues that need fixing. Run alongside the JARVIS server.
 Usage: python monitor.py
 """
 
-import json
 import os
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -34,11 +32,13 @@ class ConversationMonitor:
         self.report_interval = 30  # Report every 30 seconds if issues found
 
     def add_message(self, role: str, text: str):
-        self.messages.append({
-            "role": role,
-            "text": text,
-            "time": datetime.now().isoformat(),
-        })
+        self.messages.append(
+            {
+                "role": role,
+                "text": text,
+                "time": datetime.now().isoformat(),
+            }
+        )
         self.analyze_latest()
 
     def analyze_latest(self):
@@ -84,9 +84,10 @@ class ConversationMonitor:
             if prev and prev["role"] == "user":
                 user_text = prev["text"].lower()
                 # Check if user referenced something from earlier
-                if any(w in user_text for w in ["earlier", "before", "you said", "we talked about", "remember"]):
-                    if "I don't recall" in text or "I'm not sure what" in text:
-                        self.flag("JARVIS failed to recall earlier conversation — memory issue")
+                if any(w in user_text for w in ["earlier", "before", "you said", "we talked about", "remember"]) and (
+                    "I don't recall" in text or "I'm not sure what" in text
+                ):
+                    self.flag("JARVIS failed to recall earlier conversation — memory issue")
 
             # Response references Samantha?
             if "samantha" in text.lower():
@@ -96,10 +97,17 @@ class ConversationMonitor:
         if latest["role"] == "user":
             text = latest["text"].lower()
             complaint_patterns = [
-                "you forgot", "you don't remember", "i already told you",
-                "that's wrong", "no that's not right", "you're not listening",
-                "i said", "what i meant was", "can you hear me",
-                "that doesn't work", "you can't do that",
+                "you forgot",
+                "you don't remember",
+                "i already told you",
+                "that's wrong",
+                "no that's not right",
+                "you're not listening",
+                "i said",
+                "what i meant was",
+                "can you hear me",
+                "that doesn't work",
+                "you can't do that",
             ]
             for pattern in complaint_patterns:
                 if pattern in text:
@@ -156,9 +164,10 @@ def main():
                 monitor.add_message("jarvis", text)
 
             # Parse errors
-            if "error" in line.lower() or "Error" in line:
-                if "LLM error" in line or "TTS error" in line or "WebSocket error" in line:
-                    monitor.flag(f"SERVER ERROR: {line}")
+            if ("error" in line.lower() or "Error" in line) and (
+                "LLM error" in line or "TTS error" in line or "WebSocket error" in line
+            ):
+                monitor.flag(f"SERVER ERROR: {line}")
 
             monitor.report()
 

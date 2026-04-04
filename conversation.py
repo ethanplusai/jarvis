@@ -6,9 +6,8 @@ plan modifications across multiple exchanges.
 """
 
 import logging
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Optional
 
 log = logging.getLogger("jarvis.conversation")
 
@@ -109,11 +108,13 @@ class PlanningSession:
 
     def add_exchange(self, role: str, content: str):
         """Add a message to the context window."""
-        self.context_window.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-        })
+        self.context_window.append(
+            {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
         # Cap context window
         if len(self.context_window) > CONTEXT_WINDOW_MAX:
             self.context_window = self.context_window[-CONTEXT_WINDOW_MAX:]
@@ -153,10 +154,7 @@ class PlanningSession:
         elif "remove" in mod_lower:
             # "remove the pricing section"
             to_remove = mod_lower.replace("remove", "").replace("the", "").strip()
-            self.current_plan.features = [
-                f for f in self.current_plan.features
-                if to_remove not in f.lower()
-            ]
+            self.current_plan.features = [f for f in self.current_plan.features if to_remove not in f.lower()]
             self.add_decision("feature_removed", to_remove)
 
         elif "change" in mod_lower:
@@ -201,7 +199,9 @@ class PlanningSession:
     def close(self, reason: str = "completed"):
         """Close the session."""
         self._closed = True
-        log.info(f"Planning session closed: {reason} ({self.exchange_count} exchanges, {len(self.decisions)} decisions)")
+        log.info(
+            f"Planning session closed: {reason} ({self.exchange_count} exchanges, {len(self.decisions)} decisions)"
+        )
 
     def reset(self):
         """Reset session for reuse."""
@@ -219,14 +219,14 @@ class ConversationMode:
 
     def __init__(self):
         self._mode = "chat"
-        self._planning_session: Optional[PlanningSession] = None
+        self._planning_session: PlanningSession | None = None
 
     @property
     def mode(self) -> str:
         return self._mode
 
     @property
-    def planning_session(self) -> Optional[PlanningSession]:
+    def planning_session(self) -> PlanningSession | None:
         return self._planning_session
 
     def enter_planning(self) -> PlanningSession:
