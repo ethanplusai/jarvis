@@ -1620,6 +1620,20 @@ async def api_list_sessions():
     return {"sessions": sessions}
 
 
+@app.get("/api/memory", dependencies=[Depends(require_auth)])
+async def api_memory():
+    memories = get_important_memories(limit=20)
+    tasks = get_open_tasks()
+    return {"memories": memories, "tasks": tasks}
+
+
+@app.get("/api/dispatches", dependencies=[Depends(require_auth)])
+async def api_dispatches():
+    active = dispatch_registry.get_active()
+    recent = dispatch_registry.get_recent(limit=10)
+    return {"active": active, "recent": recent}
+
+
 # -- Fast Action Detection (no LLM call) -----------------------------------
 
 
