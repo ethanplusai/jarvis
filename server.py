@@ -38,9 +38,6 @@ from action_handlers import (
     execute_browse as _execute_browse,
 )
 from action_handlers import (
-    execute_open_terminal as _execute_open_terminal,
-)
-from action_handlers import (
     handle_open_terminal,
     handle_show_recent,
 )
@@ -59,6 +56,15 @@ from dispatch import (
     self_work_and_notify as _self_work_and_notify,
 )
 from dispatch_registry import DispatchRegistry
+from embedded_actions import (
+    default_response_for as default_action_response,
+)
+from embedded_actions import (
+    dispatch as dispatch_embedded_action,
+)
+from embedded_actions import (
+    is_injected as is_action_injected,
+)
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
@@ -88,11 +94,8 @@ from lookups import (
 from mc_client import mc_client
 from mc_inbox import watch_inbox
 from memory import (
-    create_note,
     extract_memories,
-    remember,
 )
-from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from projects import scan_projects
 from projects import scan_projects_sync as _scan_projects_sync
@@ -745,228 +748,31 @@ async def voice_handler(ws: WebSocket):
 
                             # Check for action tags embedded in LLM response
                             clean_response, embedded_action = extract_action(response_text)
-                            if embedded_action:
-                                # Validate action wasn't injected from untrusted context
-                                action_tag = f"[ACTION:{embedded_action['action'].upper()}]"
-                                untrusted = [
-                                    _ctx_cache.get("calendar", ""),
-                                    _ctx_cache.get("mail", ""),
-                                    _ctx_cache.get("screen", ""),
-                                ]
-                                if any(action_tag in ctx for ctx in untrusted if ctx):
-                                    log.warning(
-                                        f"Blocked potentially injected action from untrusted context: {action_tag}"
-                                    )
-                                    embedded_action = None
+                            if embedded_action and is_action_injected(embedded_action, _ctx_cache):
+                                log.warning(
+                                    f"Blocked potentially injected action from untrusted context: "
+                                    f"[ACTION:{embedded_action['action'].upper()}]"
+                                )
+                                embedded_action = None
                             if embedded_action:
                                 log.info(f"LLM embedded action: {embedded_action}")
                                 response_text = clean_response
-                                # Ensure there's always something to speak
                                 if not response_text.strip():
-                                    action_type = embedded_action["action"]
-                                    if action_type == "prompt_project":
-                                        proj = embedded_action["target"].split("|||")[0].strip()
-                                        response_text = f"Connecting to {proj} now, sir."
-                                    elif action_type == "build":
-                                        response_text = "On it, sir."
-                                    elif action_type == "research":
-                                        response_text = "Looking into that now, sir."
-                                    else:
-                                        response_text = "Right away, sir."
-
-                                if embedded_action["action"] == "build":
-                                    # Dispatch build to Mission Control — daemon handles execution
-                                    target = embedded_action["target"]
-                                    mc_task = await mc_client.create_task(
-                                        title=_generate_project_name(target),
-                                        description=target,
-                                        importance="important",
-                                        urgency="urgent",
-                                        assigned_to="developer",
+                                    response_text = default_action_response(
+                                        embedded_action["action"], embedded_action["target"]
                                     )
-                                    if mc_task:
-                                        log.info(f"MC build task created: {mc_task['id']} — {mc_task['title']}")
-                                    else:
-                                        # Fallback: old direct dispatch if MC is offline
-                                        log.warning("MC offline — falling back to direct dispatch")
-                                        name = _generate_project_name(target)
-                                        path = str(Path.home() / "Desktop" / name)
-                                        os.makedirs(path, exist_ok=True)
-                                        Path(path, "CLAUDE.md").write_text(
-                                            f"# Task\n\n{target}\n\nBuild this completely.\n"
-                                        )
-                                        did = dispatch_registry.register(name, path, target)
-                                        asyncio.create_task(
-                                            _execute_prompt_project(
-                                                name,
-                                                target,
-                                                work_session,
-                                                ws,
-                                                dispatch_id=did,
-                                                history=history,
-                                                voice_state=voice_state,
-                                            )
-                                        )
-                                elif embedded_action["action"] == "browse":
-                                    asyncio.create_task(_execute_browse(embedded_action["target"]))
-                                elif embedded_action["action"] == "research":
-                                    # Dispatch research to Mission Control
-                                    target = embedded_action["target"]
-                                    mc_task = await mc_client.create_task(
-                                        title=f"Research: {target[:80]}",
-                                        description=target,
-                                        importance="important",
-                                        urgency="not-urgent",
-                                        assigned_to="researcher",
-                                    )
-                                    if mc_task:
-                                        log.info(f"MC research task created: {mc_task['id']}")
-                                    else:
-                                        # Fallback: old direct dispatch if MC is offline
-                                        log.warning("MC offline — falling back to direct research")
-                                        name = _generate_project_name(target)
-                                        path = str(Path.home() / "Desktop" / name)
-                                        os.makedirs(path, exist_ok=True)
-                                        await work_session.start(path)
-                                        asyncio.create_task(self_work_and_notify(work_session, target, ws))
-                                elif embedded_action["action"] == "open_terminal":
-                                    asyncio.create_task(_execute_open_terminal())
-                                elif embedded_action["action"] == "prompt_project":
-                                    target = embedded_action["target"]
-                                    if "|||" in target:
-                                        proj_name, _, prompt = target.partition("|||")
-                                        proj_name = proj_name.strip()
-                                        prompt = prompt.strip()
-                                        # Always dispatch fresh — caching caused stale/repeated responses
-                                        asyncio.create_task(
-                                            _execute_prompt_project(
-                                                proj_name,
-                                                prompt,
-                                                work_session,
-                                                ws,
-                                                history=history,
-                                                voice_state=voice_state,
-                                            )
-                                        )
-                                    else:
-                                        log.warning(f"PROMPT_PROJECT missing ||| delimiter: {target}")
-                                elif embedded_action["action"] == "add_task":
-                                    target = embedded_action["target"]
-                                    parts = target.split("|||")
-                                    if len(parts) >= 2:
-                                        priority = parts[0].strip() or "medium"
-                                        title = parts[1].strip()
-                                        desc = parts[2].strip() if len(parts) > 2 else ""
-                                        # Map JARVIS priority → Eisenhower matrix
-                                        importance = "important" if priority in ("high", "medium") else "not-important"
-                                        urgency = "urgent" if priority == "high" else "not-urgent"
-                                        await mc_client.create_task(
-                                            title=title,
-                                            description=desc,
-                                            importance=importance,
-                                            urgency=urgency,
-                                            assigned_to="me",
-                                        )
-                                        log.info(f"MC task created: {title}")
-                                elif embedded_action["action"] == "add_note":
-                                    target = embedded_action["target"]
-                                    if "|||" in target:
-                                        topic, _, content = target.partition("|||")
-                                        create_note(content=content.strip(), topic=topic.strip())
-                                    else:
-                                        create_note(content=target)
-                                    log.info("Note created")
-                                elif embedded_action["action"] == "complete_task":
-                                    task_id = embedded_action["target"].strip()
-                                    if task_id:
-                                        await mc_client.complete_task(task_id)
-                                        log.info(f"MC task {task_id} completed")
-                                elif embedded_action["action"] == "remember":
-                                    remember(embedded_action["target"].strip(), mem_type="fact", importance=7)
-                                    log.info(f"Memory stored: {embedded_action['target'][:60]}")
-                                elif embedded_action["action"] == "create_note":
-                                    target = embedded_action["target"]
-                                    if "|||" in target:
-                                        title, _, body = target.partition("|||")
-                                        asyncio.create_task(create_apple_note(title.strip(), body.strip()))
-                                        log.info(f"Apple Note created: {title.strip()}")
-                                    else:
-                                        asyncio.create_task(create_apple_note("JARVIS Note", target))
-                                elif embedded_action["action"] == "screen":
-                                    asyncio.create_task(
-                                        _lookup_and_report(
-                                            "screen", _do_screen_lookup, ws, history=history, voice_state=voice_state
-                                        )
-                                    )
-                                elif embedded_action["action"] == "read_note":
-                                    # Read note in background and report back
-                                    async def _read_and_report(search_term, _ws):
-                                        note = await read_note(search_term)
-                                        if note:
-                                            msg = f"Sir, your note '{note['title']}' says: {note['body'][:200]}"
-                                        else:
-                                            msg = f"Couldn't find a note matching '{search_term}', sir."
-                                        audio = await synthesize_speech(strip_markdown_for_tts(msg))
-                                        if audio and _ws:
-                                            try:
-                                                await _ws.send_json({"type": "status", "state": "speaking"})
-                                                await _ws.send_json(
-                                                    {
-                                                        "type": "audio",
-                                                        "data": base64.b64encode(audio).decode(),
-                                                        "text": msg,
-                                                    }
-                                                )
-                                            except Exception:
-                                                pass
-
-                                    asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
-                                elif embedded_action["action"] == "set_timer":
-                                    # Parse: "5 minutes ||| check on the build" or just "5 minutes"
-                                    target = embedded_action["target"]
-                                    parts = target.split("|||")
-                                    time_str = parts[0].strip()
-                                    reminder_msg = parts[1].strip() if len(parts) > 1 else "Your timer is up, sir."
-
-                                    # Parse seconds from time string
-                                    import re as _timer_re
-
-                                    seconds = 0
-                                    hrs = _timer_re.search(r"(\d+)\s*h", time_str)
-                                    mins = _timer_re.search(r"(\d+)\s*m", time_str)
-                                    secs = _timer_re.search(r"(\d+)\s*s", time_str)
-                                    if hrs:
-                                        seconds += int(hrs.group(1)) * 3600
-                                    if mins:
-                                        seconds += int(mins.group(1)) * 60
-                                    if secs:
-                                        seconds += int(secs.group(1))
-                                    if not seconds:
-                                        # Try bare number as minutes
-                                        bare = _timer_re.search(r"(\d+)", time_str)
-                                        if bare:
-                                            seconds = int(bare.group(1)) * 60
-
-                                    if seconds > 0:
-
-                                        async def _timer_fire(_seconds, _msg, _ws):
-                                            await asyncio.sleep(_seconds)
-                                            audio = await synthesize_speech(strip_markdown_for_tts(_msg))
-                                            if audio and _ws:
-                                                try:
-                                                    await _ws.send_json({"type": "status", "state": "speaking"})
-                                                    await _ws.send_json(
-                                                        {
-                                                            "type": "audio",
-                                                            "data": base64.b64encode(audio).decode(),
-                                                            "text": _msg,
-                                                        }
-                                                    )
-                                                except Exception:
-                                                    pass
-
-                                        asyncio.create_task(_timer_fire(seconds, reminder_msg, ws))
-                                        log.info(f"Timer set: {seconds}s — {reminder_msg}")
+                                await dispatch_embedded_action(
+                                    embedded_action,
+                                    ws=ws,
+                                    work_session=work_session,
+                                    history=history,
+                                    voice_state=voice_state,
+                                    dispatch_registry=dispatch_registry,
+                                    execute_prompt_project=_execute_prompt_project,
+                                    self_work_and_notify=self_work_and_notify,
+                                    lookup_and_report=_lookup_and_report,
+                                    do_screen_lookup=_do_screen_lookup,
+                                )
 
                 # Update history
                 history.append({"role": "user", "content": user_text})
