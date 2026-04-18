@@ -11,7 +11,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
-from actions import _generate_project_name
+from macos.actions import _generate_project_name
 from planner import BYPASS_PHRASES
 
 log = logging.getLogger("jarvis.voice_planning")

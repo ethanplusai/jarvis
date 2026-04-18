@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.request
 
-from screen import format_windows_for_context
+from macos.screen import format_windows_for_context
 
 log = logging.getLogger("jarvis.context_cache")
 

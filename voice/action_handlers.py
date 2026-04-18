@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import Path
 
-from actions import _generate_project_name, open_browser, open_terminal
+from macos.actions import _generate_project_name, open_browser, open_terminal
 from sanitize import DANGEROUS_FLAG, escape_shell_in_applescript
 
 log = logging.getLogger("jarvis.action_handlers")

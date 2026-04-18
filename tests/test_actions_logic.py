@@ -1,6 +1,6 @@
 """Tests for _generate_project_name in actions.py."""
 
-from actions import _generate_project_name
+from macos.actions import _generate_project_name
 
 
 class TestGenerateProjectName:

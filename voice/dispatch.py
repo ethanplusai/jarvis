@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from actions import _generate_project_name, open_browser
 from formatting import strip_markdown_for_tts
+from macos.actions import _generate_project_name, open_browser
 from sanitize import DANGEROUS_FLAG_LIST, escape_applescript
 from tts import synthesize_speech
 from work_mode import WorkSession, session_manager

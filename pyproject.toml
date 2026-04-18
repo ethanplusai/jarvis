@@ -35,12 +35,12 @@ ignore = [
 #   S310: intentional URL open; S606: os.execv for restart
 "server.py" = ["S603", "S607", "E402", "S110", "SIM105", "E701", "E702", "S310", "S606"]
 # AppleScript integration files: subprocess calls, resilient try-except-pass
-"actions.py" = ["S603", "S607", "S110"]
+"macos/actions.py" = ["S603", "S607", "S110"]
 "context_cache.py" = ["S603", "S607"]
-"calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
-"mail_access.py" = ["S603", "S607", "S110"]
-"notes_access.py" = ["S603", "S607", "S110"]
-"screen.py" = ["S603", "S607", "S110", "SIM105"]
+"macos/calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
+"macos/mail_access.py" = ["S603", "S607", "S110"]
+"macos/notes_access.py" = ["S603", "S607", "S110"]
+"macos/screen.py" = ["S603", "S607", "S110", "SIM105"]
 # S101: type-narrowing asserts in _send_tmux
 "work_mode.py" = ["S603", "S607", "S110", "SIM105", "S101"]
 "qa.py" = ["S603", "S607"]
@@ -88,7 +88,7 @@ module = [
     "planner",  # also has Anthropic union-attr
     "feedback.learning",
     "feedback.ab_testing",
-    "mail_access",
+    "macos.mail_access",
     "conversation",
     "browser",
 ]

@@ -14,19 +14,19 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from calendar_access import (
+from formatting import strip_markdown_for_tts
+from macos.calendar_access import (
     format_events_for_context,
     format_schedule_summary,
     get_todays_events,
 )
-from calendar_access import refresh_cache as refresh_calendar_cache
-from formatting import strip_markdown_for_tts
-from mail_access import (
+from macos.calendar_access import refresh_cache as refresh_calendar_cache
+from macos.mail_access import (
     format_unread_summary,
     get_unread_count,
     get_unread_messages,
 )
-from screen import describe_screen, get_active_windows
+from macos.screen import describe_screen, get_active_windows
 from tts import synthesize_speech
 
 log = logging.getLogger("jarvis.lookups")

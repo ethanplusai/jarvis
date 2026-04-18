@@ -21,10 +21,10 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from calendar_access import get_todays_events
-from mail_access import get_unread_count
+from macos.calendar_access import get_todays_events
+from macos.mail_access import get_unread_count
+from macos.notes_access import get_recent_notes
 from memory import get_important_memories, get_open_tasks
-from notes_access import get_recent_notes
 from usage import SESSION_START
 
 log = logging.getLogger("jarvis.api_settings")
