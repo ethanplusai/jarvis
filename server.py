@@ -9,7 +9,6 @@ Handles:
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -50,7 +49,7 @@ from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
     extract_action,  # noqa: F401 — re-exported for tests
     format_projects_for_prompt,  # noqa: F401 — re-exported for tests
-    strip_markdown_for_tts,
+    strip_markdown_for_tts,  # noqa: F401 — re-exported for tests
 )
 from greeting import maybe_greet
 from learning import UsageLearner
@@ -79,7 +78,6 @@ from session_memory import SessionMemory
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
 from tracking import SuccessTracker
-from tts import synthesize_speech
 from usage import (
     append_usage_entry as _append_usage_entry,  # noqa: F401
 )
@@ -88,6 +86,7 @@ from usage import (
 )
 from voice_chat_mode import handle_chat_message
 from voice_planning import handle_planning_message
+from voice_tts import speak, speak_fallback
 from voice_work_mode import handle_work_mode_message
 from work_mode import WorkSession, is_casual_question
 
@@ -406,14 +405,7 @@ async def voice_handler(ws: WebSocket):
             if msg_type == "fix_self":
                 jarvis_dir = str(Path(__file__).parent)
                 await work_session.start(jarvis_dir)
-                response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
+                await speak(ws, "Work mode active in my own repo, sir. Tell me what needs fixing.")
                 continue
 
             # transcript type — validate fields
@@ -550,34 +542,13 @@ async def voice_handler(ws: WebSocket):
                 if anthropic_client and len(user_text) > 15:
                     asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
 
-                # TTS
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json(
-                        {"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text}
-                    )
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
-                    await ws.send_json({"type": "status", "state": "idle"})
+                await speak(ws, response_text)
                 log.info(f"JARVIS: {response_text}")
                 last_jarvis_response = response_text
 
             except Exception as e:
                 log.error(f"Error: {e}", exc_info=True)
-                try:
-                    fallback = "Something went wrong, sir."
-                    audio = await synthesize_speech(fallback)
-                    if audio:
-                        await ws.send_json(
-                            {"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback}
-                        )
-                    else:
-                        await ws.send_json({"type": "audio", "data": "", "text": fallback})
-                    # Let client's audioPlayer.onFinished handle idle transition
-                except Exception:
-                    pass
+                await speak_fallback(ws, "Something went wrong, sir.")
 
     except WebSocketDisconnect:
         log.info("Voice WebSocket disconnected")
