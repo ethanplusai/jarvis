@@ -30,7 +30,6 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
-import httpx
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -89,6 +88,8 @@ from memory import (
 )
 from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
+from projects import scan_projects
+from projects import scan_projects_sync as _scan_projects_sync
 from qa import QAAgent
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
@@ -120,37 +121,6 @@ USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DESKTOP_PATH = Path.home() / "Desktop"
-
-
-# ---------------------------------------------------------------------------
-# Weather (wttr.in)
-# ---------------------------------------------------------------------------
-
-_cached_weather: str | None = None
-_weather_fetched: bool = False
-
-
-async def fetch_weather() -> str:
-    """Fetch current weather from wttr.in. Cached for the session."""
-    global _cached_weather, _weather_fetched
-    if _weather_fetched:
-        return _cached_weather or "Weather data unavailable."
-    _weather_fetched = True
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            resp = await http.get("https://wttr.in/?format=%l:+%C,+%t", headers={"User-Agent": "curl"})
-            if resp.status_code == 200:
-                _cached_weather = resp.text.strip()
-                return _cached_weather
-    except Exception as e:
-        log.warning(f"Weather fetch failed: {e}")
-    _cached_weather = None
-    return "Weather data unavailable."
-
-
-# ---------------------------------------------------------------------------
-# Data Models
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -206,45 +176,7 @@ async def generate_response(
     )
 
 
-# ---------------------------------------------------------------------------
-# Project Scanner
-# ---------------------------------------------------------------------------
-
-
-async def scan_projects() -> list[dict]:
-    """Quick scan of ~/Desktop for git repos (depth 1)."""
-    projects = []
-    desktop = DESKTOP_PATH
-
-    if not desktop.exists():
-        return projects
-
-    try:
-        for entry in sorted(desktop.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            git_dir = entry / ".git"
-            if git_dir.exists():
-                branch = "unknown"
-                head_file = git_dir / "HEAD"
-                try:
-                    head_content = head_file.read_text().strip()
-                    if head_content.startswith("ref: refs/heads/"):
-                        branch = head_content.replace("ref: refs/heads/", "")
-                except Exception:
-                    pass
-
-                projects.append(
-                    {
-                        "name": entry.name,
-                        "path": str(entry),
-                        "branch": branch,
-                    }
-                )
-    except (PermissionError, FileNotFoundError):
-        pass
-
-    return projects
+# Project discovery — see projects.py for implementations.
 
 
 # Dispatch helpers — see dispatch.py for implementation.
@@ -423,28 +355,6 @@ app.include_router(build_core_router(require_auth, task_manager, dispatch_regist
 
 
 # -- Fast Action Detection (no LLM call) -----------------------------------
-
-
-def _scan_projects_sync() -> list[dict]:
-    """Scan common project directories — runs in executor."""
-    projects = []
-    search_dirs = [
-        Path.home() / "Desktop",
-        Path.home() / "Documents",
-        Path.home() / "IdeaProjects",
-        Path.home() / "Projects",
-    ]
-    for search_dir in search_dirs:
-        try:
-            for entry in search_dir.iterdir():
-                if entry.is_dir() and not entry.name.startswith("."):
-                    projects.append({"name": entry.name, "path": str(entry), "branch": ""})
-        except PermissionError:
-            continue
-        except Exception as e:
-            log.debug(f"Project scan error in {search_dir}: {e}")
-            continue
-    return projects
 
 
 # -- Action Handlers -------------------------------------------------------
