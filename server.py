@@ -26,7 +26,6 @@ if _env_path.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 
 import anthropic
@@ -69,6 +68,7 @@ from formatting import (
     format_projects_for_prompt,  # noqa: F401 — re-exported for tests
     strip_markdown_for_tts,
 )
+from greeting import maybe_greet
 from learning import UsageLearner
 from llm import (
     generate_response as _llm_generate_response,
@@ -213,8 +213,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
     await _self_work_and_notify(session, prompt, ws, anthropic_client=anthropic_client)
 
 
-# Smart greeting — track last greeting to avoid re-greeting on reconnect
-_last_greeting_time: float = 0
+# Smart greeting — see greeting.maybe_greet (owns dedupe timer).
 
 
 # Context refresh thread — see context_cache.start_context_refresh.
@@ -396,35 +395,7 @@ async def voice_handler(ws: WebSocket):
 
     try:
         # ── Greeting — always start in conversation mode ──
-        now = datetime.now()
-        hour = now.hour
-        if hour < 12:
-            greeting = "Good morning, sir."
-        elif hour < 17:
-            greeting = "Good afternoon, sir."
-        else:
-            greeting = "Good evening, sir."
-
-        global _last_greeting_time
-        should_greet = (time.time() - _last_greeting_time) > 60
-
-        if should_greet:
-            _last_greeting_time = time.time()
-
-            async def _send_greeting():
-                try:
-                    audio_bytes = await synthesize_speech(greeting)
-                    if audio_bytes:
-                        encoded = base64.b64encode(audio_bytes).decode()
-                        await ws.send_json({"type": "status", "state": "speaking"})
-                        await ws.send_json({"type": "audio", "data": encoded, "text": greeting})
-                        history.append({"role": "assistant", "content": greeting})
-                        log.info(f"JARVIS: {greeting}")
-                        await ws.send_json({"type": "status", "state": "idle"})
-                except Exception as e:
-                    log.warning(f"Greeting failed: {e}")
-
-            asyncio.create_task(_send_greeting())
+        maybe_greet(ws, history)
 
         try:
             await ws.send_json({"type": "status", "state": "idle"})
