@@ -189,15 +189,15 @@ Microphone -> Web Speech API -> WebSocket -> FastAPI -> Claude (Haiku) -> Fish A
                                         (Calendar, Mail, Notes, Terminal)
 ```
 
-| Layer         | Technology                                  |
-|---------------|---------------------------------------------|
-| Backend       | FastAPI + Python (`server.py`, ~2300 lines) |
-| Frontend      | Vite + TypeScript + Three.js                |
-| Communication | WebSocket (JSON messages + binary audio)    |
-| AI (fast)     | Claude Haiku -- low-latency voice responses |
-| AI (deep)     | Claude Opus -- research and complex tasks   |
-| TTS           | Fish Audio with JARVIS voice model          |
-| System        | AppleScript for all macOS integrations      |
+| Layer         | Technology                                                                 |
+|---------------|----------------------------------------------------------------------------|
+| Backend       | FastAPI + Python — `server.py` (~640 lines) + `voice/`, `api/`, `macos/`, `feedback/` packages |
+| Frontend      | Vite + TypeScript + Three.js                                               |
+| Communication | WebSocket (JSON messages + binary audio)                                   |
+| AI (fast)     | Claude Haiku — low-latency voice responses                                 |
+| AI (deep)     | Claude Opus — research and complex tasks                                   |
+| TTS           | Fish Audio with JARVIS voice model                                         |
+| System        | AppleScript for all macOS integrations                                     |
 
 ## How the Voice Loop Works
 
@@ -214,19 +214,23 @@ Microphone -> Web Speech API -> WebSocket -> FastAPI -> Claude (Haiku) -> Fish A
 
 ## Key Files
 
-| File                    | Purpose                                              |
-|-------------------------|------------------------------------------------------|
-| `server.py`             | Main server -- WebSocket handler, LLM, action system |
-| `frontend/src/orb.ts`   | Three.js particle orb visualization                  |
-| `frontend/src/voice.ts` | Web Speech API + audio playback                      |
-| `frontend/src/main.ts`  | Frontend state machine                               |
-| `memory.py`             | SQLite memory system with FTS5 full-text search      |
-| `calendar_access.py`    | Apple Calendar integration via AppleScript           |
-| `mail_access.py`        | Apple Mail integration (read-only)                   |
-| `notes_access.py`       | Apple Notes integration                              |
-| `actions.py`            | System actions (Terminal, Chrome, Claude Code)       |
-| `browser.py`            | Playwright web automation                            |
-| `work_mode.py`          | Persistent Claude Code sessions                      |
+| File / Package                    | Purpose                                                                     |
+|-----------------------------------|-----------------------------------------------------------------------------|
+| `server.py`                       | FastAPI app, lifespan, WebSocket voice handler, app wiring                  |
+| `voice/`                          | Everything the voice handler calls — chat/work/planning mode helpers, fast action detection, embedded `[ACTION:*]` dispatch, background lookups, claude -p dispatch, TTS |
+| `api/`                            | REST router factories: `core`, `settings`, `control`                        |
+| `macos/`                          | AppleScript access: `calendar_access`, `mail_access`, `notes_access`, `screen`, `actions` |
+| `feedback/`                       | Task-outcome feedback loops: `SuccessTracker`, `ABTester`, `UsageLearner`   |
+| `llm.py`                          | Anthropic call + system prompt assembly                                     |
+| `planner.py`                      | Clarifying-question flow for complex tasks                                  |
+| `task_manager.py`                 | Background `claude -p` subprocess manager                                   |
+| `memory.py`                       | SQLite memory system with FTS5 full-text search                             |
+| `mc_client.py` / `mc_inbox.py`    | Mission Control REST client + inbox watcher                                 |
+| `work_mode.py`                    | Persistent Claude Code sessions (tmux)                                      |
+| `browser.py`                      | Playwright web automation                                                   |
+| `frontend/src/orb.ts`             | Three.js particle orb visualization                                         |
+| `frontend/src/voice.ts`           | Web Speech API + audio playback                                             |
+| `frontend/src/main.ts`            | Frontend state machine                                                      |
 | `planner.py`            | Multi-step task planning with smart questions        |
 
 ## Features in Detail

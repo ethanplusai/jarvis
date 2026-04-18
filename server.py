@@ -93,13 +93,9 @@ log = logging.getLogger("jarvis")
 # ---------------------------------------------------------------------------
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
-FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-DESKTOP_PATH = Path.home() / "Desktop"
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +151,12 @@ async def generate_response(
     )
 
 
-# Project discovery — see projects.py for implementations.
-
-
-# Dispatch helpers — see dispatch.py for implementation.
+# ---------------------------------------------------------------------------
+# Thin adapters that bind module-global runtime state into pure helpers
+# imported from voice/. The voice package is self-contained (no server.py
+# import), so server.py hands it the anthropic_client / dispatch_registry /
+# cached_projects references through these wrappers.
+# ---------------------------------------------------------------------------
 
 
 async def _execute_research(target: str, ws=None):
@@ -192,16 +190,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
     await _self_work_and_notify(session, prompt, ws, anthropic_client=anthropic_client)
 
 
-# Smart greeting — see greeting.maybe_greet (owns dedupe timer).
-
-
-# Context refresh thread — see context_cache.start_context_refresh.
-
-
 _AUTH_TOKEN: str = ""
-
-
-# MC inbox watcher — see mc_inbox.watch_inbox.
 
 
 @asynccontextmanager
