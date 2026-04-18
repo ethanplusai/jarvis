@@ -237,11 +237,13 @@ app = FastAPI(title="JARVIS Server", version="0.1.0", lifespan=lifespan)
 # If you expose JARVIS to a network, reduce this or add per-route limits.
 from slowapi import Limiter, _rate_limit_exceeded_handler  # noqa: E402
 from slowapi.errors import RateLimitExceeded  # noqa: E402
+from slowapi.middleware import SlowAPIMiddleware  # noqa: E402
 from slowapi.util import get_remote_address  # noqa: E402
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)  # applies default_limits to every route
 
 _ALLOWED_ORIGINS = [
     "http://localhost:5173",
