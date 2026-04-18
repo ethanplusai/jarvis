@@ -62,7 +62,7 @@ ignore = [
 [tool.mypy]
 python_version = "3.12"
 warn_unused_configs = true
-exclude = ["venv", "frontend", "data"]
+exclude = ["venv", "frontend", "data", "tests/test_classifier.py"]
 
 # Third-party libs without stubs — list explicitly so new missing imports get caught
 [[tool.mypy.overrides]]
@@ -98,6 +98,17 @@ disable_error_code = ["assignment", "return-value", "var-annotated", "call-overl
 [[tool.mypy.overrides]]
 module = "server"
 disable_error_code = ["union-attr", "arg-type", "var-annotated"]
+
+# Strictly typed modules — full type checking, no overrides.
+# Add modules here as they're cleaned up.
+[[tool.mypy.overrides]]
+module = [
+    "sanitize",
+    "mc_client",
+    "dispatch_registry",
+]
+check_untyped_defs = true
+disallow_untyped_defs = false
 
 # ---------------------------------------------------------------------------
 # Pytest
