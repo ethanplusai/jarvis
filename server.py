@@ -37,10 +37,6 @@ from ab_testing import ABTester
 from action_handlers import (
     execute_browse as _execute_browse,
 )
-from action_handlers import (
-    handle_open_terminal,
-    handle_show_recent,
-)
 from actions import (
     _generate_project_name,
 )
@@ -65,13 +61,11 @@ from embedded_actions import (
 from embedded_actions import (
     is_injected as is_action_injected,
 )
+from fast_action_handlers import handle_fast_action
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
     extract_action,  # noqa: F401 — re-exported for tests
-    format_mc_decisions_for_voice,
-    format_mc_inbox_for_voice,
-    format_mc_tasks_for_voice,
     format_projects_for_prompt,  # noqa: F401 — re-exported for tests
     strip_markdown_for_tts,
 )
@@ -110,10 +104,7 @@ from usage import (
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
 )
-from usage import (
-    get_usage_summary,
-)
-from work_mode import WorkSession, is_casual_question, session_manager
+from work_mode import WorkSession, is_casual_question
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("jarvis")
@@ -673,65 +664,17 @@ async def voice_handler(ws: WebSocket):
                     action = detect_action_fast(user_text)
 
                     if action:
-                        if action["action"] == "open_terminal":
-                            response_text = await handle_open_terminal()
-                        elif action["action"] == "show_recent":
-                            response_text = await handle_show_recent()
-                        elif action["action"] == "describe_screen":
-                            response_text = "Taking a look now, sir."
-                            asyncio.create_task(
-                                _lookup_and_report(
-                                    "screen", _do_screen_lookup, ws, history=history, voice_state=voice_state
-                                )
-                            )
-                        elif action["action"] == "check_calendar":
-                            response_text = "Checking your calendar now, sir."
-                            asyncio.create_task(
-                                _lookup_and_report(
-                                    "calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state
-                                )
-                            )
-                        elif action["action"] == "check_mail":
-                            response_text = "Checking your inbox now, sir."
-                            asyncio.create_task(
-                                _lookup_and_report(
-                                    "mail", _do_mail_lookup, ws, history=history, voice_state=voice_state
-                                )
-                            )
-                        elif action["action"] == "check_dispatch":
-                            recent = dispatch_registry.get_most_recent()
-                            if not recent:
-                                response_text = "No recent builds on record, sir."
-                            else:
-                                name = recent["project_name"]
-                                status = recent["status"]
-                                if status == "building" or status == "pending":
-                                    elapsed = int(time.time() - recent["updated_at"])
-                                    response_text = f"Still working on {name}, sir. Been at it for {elapsed} seconds."
-                                elif status == "completed":
-                                    response_text = recent.get("summary") or f"{name} is complete, sir."
-                                elif status in ("failed", "timeout"):
-                                    response_text = f"{name} ran into problems, sir."
-                                else:
-                                    response_text = f"{name} is {status}, sir."
-                        elif action["action"] == "check_sessions":
-                            response_text = session_manager.format_for_voice()
-                        elif action["action"] == "check_tasks":
-                            # Get both not-started and in-progress from MC
-                            pending = await mc_client.list_tasks(kanban="not-started", limit=20)
-                            active = await mc_client.list_tasks(kanban="in-progress", limit=20)
-                            mc_tasks = active + pending
-                            response_text = format_mc_tasks_for_voice(mc_tasks)
-                        elif action["action"] == "check_inbox":
-                            messages = await mc_client.list_inbox(agent="me", status="unread", limit=10)
-                            response_text = format_mc_inbox_for_voice(messages)
-                        elif action["action"] == "check_decisions":
-                            decisions = await mc_client.list_decisions(status="pending")
-                            response_text = format_mc_decisions_for_voice(decisions)
-                        elif action["action"] == "check_usage":
-                            response_text = get_usage_summary()
-                        else:
-                            response_text = "Understood, sir."
+                        response_text = await handle_fast_action(
+                            action,
+                            ws=ws,
+                            history=history,
+                            voice_state=voice_state,
+                            dispatch_registry=dispatch_registry,
+                            lookup_and_report=_lookup_and_report,
+                            do_screen_lookup=_do_screen_lookup,
+                            do_calendar_lookup=_do_calendar_lookup,
+                            do_mail_lookup=_do_mail_lookup,
+                        )
                     else:
                         if not anthropic_client:
                             response_text = "API key not configured."
