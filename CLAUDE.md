@@ -17,25 +17,29 @@ When a user clones this repo and starts Claude Code, help them:
 10. Click to enable audio, speak to JARVIS
 
 ## Architecture
-- **Backend**: FastAPI + Python (server.py, ~2300 lines)
+- **Backend**: FastAPI + Python — `server.py` (~620 lines, app wiring + WebSocket voice handler) plus four packages
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
 - **AI**: Claude Haiku for fast responses, Claude Opus for research
 - **TTS**: Fish Audio with JARVIS voice model
 - **System**: AppleScript for Calendar, Mail, Notes, Terminal integration
 
-## Key Files
-- `server.py` — Main server, WebSocket handler, LLM integration, action system
+## Key Files / Packages
+- `server.py` — FastAPI app, lifespan, WebSocket voice handler, app wiring
+- `voice/` — everything the voice handler delegates to: chat/work/planning mode helpers, `[ACTION:*]` dispatch, fast keyword detection, background lookups, claude -p dispatch, TTS
+- `api/` — REST router factories (`core`, `settings`, `control`) mounted on the FastAPI app
+- `macos/` — AppleScript access: `calendar_access`, `mail_access`, `notes_access`, `screen`, `actions`
+- `feedback/` — task-outcome loops: `SuccessTracker`, `ABTester`, `UsageLearner`
+- `llm.py` — Anthropic call + system prompt assembly
+- `planner.py` — clarifying-question flow for complex tasks
+- `task_manager.py` — background `claude -p` subprocess manager
+- `memory.py` — SQLite memory system with FTS5 full-text search
+- `mc_client.py` / `mc_inbox.py` — Mission Control REST client + inbox watcher
+- `work_mode.py` — persistent Claude Code tmux sessions
+- `browser.py` — Playwright web automation
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
-- `memory.py` — SQLite memory system with FTS5 search
-- `calendar_access.py` — Apple Calendar integration via AppleScript
-- `mail_access.py` — Apple Mail integration (READ-ONLY)
-- `notes_access.py` — Apple Notes integration
-- `actions.py` — System actions (Terminal, Chrome, Claude Code)
-- `browser.py` — Playwright web automation
-- `work_mode.py` — Persistent Claude Code sessions
 
 ## Environment Variables
 - `ANTHROPIC_API_KEY` (required) — Claude API access
