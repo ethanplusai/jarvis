@@ -33,9 +33,6 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 from fastapi.middleware.cors import CORSMiddleware
 
 from ab_testing import ABTester
-from actions import (
-    _generate_project_name,
-)
 from api_control import build_control_router
 from api_core import build_core_router
 from api_settings import build_settings_router
@@ -87,7 +84,7 @@ from mc_inbox import watch_inbox
 from memory import (
     extract_memories,
 )
-from planner import BYPASS_PHRASES, TaskPlanner
+from planner import TaskPlanner
 from projects import scan_projects
 from projects import scan_projects_sync as _scan_projects_sync
 from qa import QAAgent
@@ -101,6 +98,7 @@ from usage import (
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
 )
+from voice_planning import handle_planning_message
 from voice_work_mode import handle_work_mode_message
 from work_mode import WorkSession, is_casual_question
 
@@ -474,71 +472,18 @@ async def voice_handler(ws: WebSocket):
 
                 # ── PLANNING MODE: answering clarifying questions ──
                 if planner.is_planning:
-                    # Check for bypass
-                    if any(p in t_lower for p in BYPASS_PHRASES):
-                        plan = planner.active_plan
-                        if plan:
-                            plan.skipped = True
-                            for q in plan.pending_questions[plan.current_question_index :]:
-                                if q.get("default") is not None and q["key"] not in plan.answers:
-                                    plan.answers[q["key"]] = q["default"]
-                        prompt = await planner.build_prompt()
-                        name = _generate_project_name(prompt)
-                        path = str(Path.home() / "Desktop" / name)
-                        os.makedirs(path, exist_ok=True)
-                        Path(path, "CLAUDE.md").write_text(prompt)
-                        did = dispatch_registry.register(name, path, prompt[:200])
-                        asyncio.create_task(
-                            _execute_prompt_project(
-                                name,
-                                prompt,
-                                work_session,
-                                ws,
-                                dispatch_id=did,
-                                history=history,
-                                voice_state=voice_state,
-                            )
-                        )
-                        planner.reset()
-                        response_text = "Building it now, sir."
-                    elif (
-                        planner.active_plan
-                        and planner.active_plan.confirmed is False
-                        and planner.active_plan.current_question_index >= len(planner.active_plan.pending_questions)
-                    ):
-                        # Confirmation phase
-                        result = await planner.handle_confirmation(user_text)
-                        if result["confirmed"]:
-                            prompt = await planner.build_prompt()
-                            name = _generate_project_name(prompt)
-                            path = str(Path.home() / "Desktop" / name)
-                            os.makedirs(path, exist_ok=True)
-                            Path(path, "CLAUDE.md").write_text(prompt)
-                            did = dispatch_registry.register(name, path, prompt[:200])
-                            asyncio.create_task(
-                                _execute_prompt_project(
-                                    name,
-                                    prompt,
-                                    work_session,
-                                    ws,
-                                    dispatch_id=did,
-                                    history=history,
-                                    voice_state=voice_state,
-                                )
-                            )
-                            planner.reset()
-                            response_text = "On it, sir."
-                        elif result["cancelled"]:
-                            planner.reset()
-                            response_text = "Cancelled, sir."
-                        else:
-                            response_text = result.get("modification_question", "How shall I adjust the plan, sir?")
-                    else:
-                        result = await planner.process_answer(user_text, cached_projects)
-                        if result["plan_complete"]:
-                            response_text = result.get("confirmation_summary", "Ready to build. Shall I proceed, sir?")
-                        else:
-                            response_text = result.get("next_question", "What else, sir?")
+                    response_text = await handle_planning_message(
+                        user_text,
+                        t_lower,
+                        planner=planner,
+                        work_session=work_session,
+                        ws=ws,
+                        history=history,
+                        voice_state=voice_state,
+                        cached_projects=cached_projects,
+                        dispatch_registry=dispatch_registry,
+                        execute_prompt_project=_execute_prompt_project,
+                    )
 
                 elif any(
                     w in t_lower
