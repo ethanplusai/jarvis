@@ -35,7 +35,6 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from ab_testing import ABTester
 from action_handlers import (
@@ -53,9 +52,7 @@ from actions import (
     _generate_project_name,
     open_browser,
 )
-from calendar_access import (
-    get_todays_events,
-)
+from api_settings import build_settings_router
 from dispatch_registry import DispatchRegistry
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
@@ -78,9 +75,6 @@ from lookups import (
 from lookups import (
     lookup_and_report as _lookup_and_report,
 )
-from mail_access import (
-    get_unread_count,
-)
 from mc_client import mc_client
 from memory import (
     create_note,
@@ -90,7 +84,7 @@ from memory import (
     remember,
 )
 from models import TaskRequest
-from notes_access import create_apple_note, get_recent_notes, read_note
+from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from qa import QAAgent
 from sanitize import (
@@ -1765,191 +1759,10 @@ async def voice_handler(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Settings / Configuration endpoints
+# Settings / Configuration endpoints — see api_settings.py
 # ---------------------------------------------------------------------------
 
-
-def _env_file_path() -> Path:
-    return Path(__file__).parent / ".env"
-
-
-def _env_example_path() -> Path:
-    return Path(__file__).parent / ".env.example"
-
-
-def _read_env() -> tuple[list[str], dict[str, str]]:
-    """Read .env file. Returns (raw_lines, parsed_dict). Creates from .env.example if missing."""
-    path = _env_file_path()
-    if not path.exists():
-        example = _env_example_path()
-        if example.exists():
-            import shutil as _shutil
-
-            _shutil.copy2(str(example), str(path))
-        else:
-            path.write_text("")
-    lines = path.read_text().splitlines()
-    parsed: dict[str, str] = {}
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k, _, v = stripped.partition("=")
-            parsed[k.strip()] = v.strip().strip('"').strip("'")
-    return lines, parsed
-
-
-def _write_env_key(key: str, value: str) -> None:
-    """Update a single key in .env, preserving comments and order."""
-    lines, _ = _read_env()
-    found = False
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k, _, _ = stripped.partition("=")
-            if k.strip() == key:
-                new_lines.append(f"{key}={value}")
-                found = True
-                continue
-        new_lines.append(line)
-    if not found:
-        new_lines.append(f"{key}={value}")
-    _env_file_path().write_text("\n".join(new_lines) + "\n")
-    os.environ[key] = value
-
-
-class KeyUpdate(BaseModel):
-    key_name: str
-    key_value: str
-
-
-class KeyTest(BaseModel):
-    key_value: str | None = None
-
-
-class PreferencesUpdate(BaseModel):
-    user_name: str = ""
-    honorific: str = "sir"
-    calendar_accounts: str = "auto"
-
-
-@app.post("/api/settings/keys", dependencies=[Depends(require_auth)])
-async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
-    if body.key_name not in allowed:
-        return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
-    _write_env_key(body.key_name, body.key_value)
-    return {"success": True}
-
-
-@app.post("/api/settings/test-anthropic", dependencies=[Depends(require_auth)])
-async def api_test_anthropic(body: KeyTest):
-    key = body.key_value or os.getenv("ANTHROPIC_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
-    try:
-        client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(
-            model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}]
-        )
-        return {"valid": True}
-    except Exception as e:
-        return {"valid": False, "error": str(e)[:200]}
-
-
-@app.post("/api/settings/test-fish", dependencies=[Depends(require_auth)])
-async def api_test_fish(body: KeyTest):
-    key = body.key_value or os.getenv("FISH_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://api.fish.audio/v1/tts",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"text": "test", "reference_id": FISH_VOICE_ID},
-            )
-            if resp.status_code in (200, 201):
-                return {"valid": True}
-            elif resp.status_code == 401:
-                return {"valid": False, "error": "Invalid API key"}
-            else:
-                return {"valid": False, "error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"valid": False, "error": str(e)[:200]}
-
-
-@app.get("/api/settings/status", dependencies=[Depends(require_auth)])
-async def api_settings_status():
-    import shutil as _shutil
-
-    _, env_dict = _read_env()
-    claude_installed = _shutil.which("claude") is not None
-    calendar_ok = mail_ok = notes_ok = False
-    try:
-        await get_todays_events()
-        calendar_ok = True
-    except Exception:
-        pass
-    try:
-        await get_unread_count()
-        mail_ok = True
-    except Exception:
-        pass
-    try:
-        await get_recent_notes(count=1)
-        notes_ok = True
-    except Exception:
-        pass
-    memory_count = task_count = 0
-    try:
-        memory_count = len(get_important_memories(limit=9999))
-    except Exception:
-        pass
-    try:
-        task_count = len(get_open_tasks())
-    except Exception:
-        pass
-    return {
-        "claude_code_installed": claude_installed,
-        "calendar_accessible": calendar_ok,
-        "mail_accessible": mail_ok,
-        "notes_accessible": notes_ok,
-        "memory_count": memory_count,
-        "task_count": task_count,
-        "server_port": 8340,
-        "uptime_seconds": int(time.time() - _session_start),
-        "env_keys_set": {
-            "anthropic": bool(
-                env_dict.get("ANTHROPIC_API_KEY", "").strip()
-                and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"
-            ),
-            "fish_audio": bool(
-                env_dict.get("FISH_API_KEY", "").strip()
-                and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"
-            ),
-            "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
-            "user_name": env_dict.get("USER_NAME", ""),
-        },
-    }
-
-
-@app.get("/api/settings/preferences", dependencies=[Depends(require_auth)])
-async def api_get_preferences():
-    _, env_dict = _read_env()
-    return {
-        "user_name": env_dict.get("USER_NAME", ""),
-        "honorific": env_dict.get("HONORIFIC", "sir"),
-        "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
-    }
-
-
-@app.post("/api/settings/preferences", dependencies=[Depends(require_auth)])
-async def api_save_preferences(body: PreferencesUpdate):
-    _write_env_key("USER_NAME", body.user_name)
-    _write_env_key("HONORIFIC", body.honorific)
-    _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
-    return {"success": True}
+app.include_router(build_settings_router(require_auth, FISH_VOICE_ID))
 
 
 # ---------------------------------------------------------------------------
