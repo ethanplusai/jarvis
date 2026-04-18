@@ -47,10 +47,10 @@ ignore = [
 "browser.py" = ["S603", "S607", "S112", "S306"]
 # Background/evolution modules: resilient try-except-pass
 # S311: random.choice for A/B testing, not crypto
-"ab_testing.py" = ["S110", "SIM105", "S311"]
+"feedback/ab_testing.py" = ["S110", "SIM105", "S311"]
 "evolution.py" = ["S110", "SIM105"]
-"learning.py" = ["S110", "SIM105"]
-"tracking.py" = ["S110", "SIM105"]
+"feedback/learning.py" = ["S110", "SIM105"]
+"feedback/tracking.py" = ["S110", "SIM105"]
 "planner.py" = ["S110", "SIM105"]
 "helpers/get_events.py" = ["S110", "SIM105"]
 # Standalone test scripts with their own .env loading
@@ -83,11 +83,11 @@ ignore_missing_imports = true
 module = [
     "memory",
     "evolution",
-    "tracking",
+    "feedback.tracking",
     "templates",
     "planner",  # also has Anthropic union-attr
-    "learning",
-    "ab_testing",
+    "feedback.learning",
+    "feedback.ab_testing",
     "mail_access",
     "conversation",
     "browser",

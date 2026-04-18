@@ -31,17 +31,16 @@ import anthropic
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from ab_testing import ABTester
 from api import build_control_router, build_core_router, build_settings_router
 from context_cache import start_context_refresh
 from dispatch_registry import DispatchRegistry
+from feedback import ABTester, SuccessTracker, UsageLearner
 from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
     extract_action,  # noqa: F401 — re-exported for tests
     format_projects_for_prompt,  # noqa: F401 — re-exported for tests
     strip_markdown_for_tts,  # noqa: F401 — re-exported for tests
 )
-from learning import UsageLearner
 from llm import (
     generate_response as _llm_generate_response,
 )
@@ -56,7 +55,6 @@ from projects import scan_projects_sync as _scan_projects_sync
 from qa import QAAgent
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
-from tracking import SuccessTracker
 from usage import (
     append_usage_entry as _append_usage_entry,  # noqa: F401
 )

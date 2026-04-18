@@ -18,11 +18,11 @@ import pytest
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from feedback.tracking import SuccessTracker
 from planner import PlanningDecision, detect_planning_mode, gather_project_context
 from qa import QAResult
 from suggestions import suggest_followup
 from templates import get_template
-from tracking import SuccessTracker
 
 
 @pytest.fixture
@@ -242,7 +242,7 @@ def test_tracker_avg_duration(tracker):
 
 def test_ab_tester_integration():
     """A/B tester integrates with templates."""
-    from ab_testing import ABTester, PromptTemplate
+    from feedback.ab_testing import ABTester, PromptTemplate
 
     tester = ABTester(db_path=":memory:")
 
