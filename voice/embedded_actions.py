@@ -18,13 +18,14 @@ from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
-from action_handlers import execute_browse, execute_open_terminal
 from actions import _generate_project_name
 from formatting import strip_markdown_for_tts
 from mc_client import mc_client
 from memory import create_note, remember
 from notes_access import create_apple_note, read_note
 from tts import synthesize_speech
+
+from .action_handlers import execute_browse, execute_open_terminal
 
 log = logging.getLogger("jarvis.embedded_actions")
 

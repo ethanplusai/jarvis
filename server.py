@@ -34,34 +34,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from ab_testing import ABTester
 from api import build_control_router, build_core_router, build_settings_router
 from context_cache import start_context_refresh
-from dispatch import (
-    execute_prompt_project,
-    execute_research,
-)
-from dispatch import (
-    self_work_and_notify as _self_work_and_notify,
-)
 from dispatch_registry import DispatchRegistry
-from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
     extract_action,  # noqa: F401 — re-exported for tests
     format_projects_for_prompt,  # noqa: F401 — re-exported for tests
     strip_markdown_for_tts,  # noqa: F401 — re-exported for tests
 )
-from greeting import maybe_greet
 from learning import UsageLearner
 from llm import (
     generate_response as _llm_generate_response,
-)
-from lookups import (
-    do_calendar_lookup,
-    do_mail_lookup,
-    do_screen_lookup,
-    get_lookup_status,
-)
-from lookups import (
-    lookup_and_report as _lookup_and_report,
 )
 from mc_client import mc_client
 from mc_inbox import watch_inbox
@@ -72,7 +54,6 @@ from planner import TaskPlanner
 from projects import scan_projects
 from projects import scan_projects_sync as _scan_projects_sync
 from qa import QAAgent
-from session_memory import SessionMemory
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
 from tracking import SuccessTracker
@@ -82,10 +63,28 @@ from usage import (
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
 )
-from voice_chat_mode import handle_chat_message
-from voice_planning import handle_planning_message
-from voice_tts import speak, speak_fallback
-from voice_work_mode import handle_work_mode_message
+from voice import (
+    SessionMemory,
+    detect_action_fast,  # noqa: F401 — re-exported for tests
+    do_calendar_lookup,
+    do_mail_lookup,
+    do_screen_lookup,
+    execute_prompt_project,
+    execute_research,
+    get_lookup_status,
+    handle_chat_message,
+    handle_planning_message,
+    handle_work_mode_message,
+    maybe_greet,
+    speak,
+    speak_fallback,
+)
+from voice import (
+    lookup_and_report as _lookup_and_report,
+)
+from voice import (
+    self_work_and_notify as _self_work_and_notify,
+)
 from work_mode import WorkSession, is_casual_question
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")

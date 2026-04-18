@@ -8,11 +8,12 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
-from embedded_actions import default_response_for, is_injected
-from embedded_actions import dispatch as dispatch_embedded_action
-from fast_action_handlers import handle_fast_action
-from fast_actions import detect_action_fast
 from formatting import extract_action
+
+from .embedded_actions import default_response_for, is_injected
+from .embedded_actions import dispatch as dispatch_embedded_action
+from .fast_action_handlers import handle_fast_action
+from .fast_actions import detect_action_fast
 
 log = logging.getLogger("jarvis.voice_chat_mode")
 

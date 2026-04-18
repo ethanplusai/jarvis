@@ -13,11 +13,12 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
-from action_handlers import handle_open_terminal, handle_show_recent
 from formatting import format_mc_decisions_for_voice, format_mc_inbox_for_voice, format_mc_tasks_for_voice
 from mc_client import mc_client
 from usage import get_usage_summary
 from work_mode import session_manager
+
+from .action_handlers import handle_open_terminal, handle_show_recent
 
 log = logging.getLogger("jarvis.fast_action_handlers")
 

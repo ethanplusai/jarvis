@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from action_handlers import execute_browse
+from .action_handlers import execute_browse
 
 log = logging.getLogger("jarvis.voice_work_mode")
 
