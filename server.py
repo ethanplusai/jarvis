@@ -67,9 +67,6 @@ from learning import UsageLearner
 from llm import (
     generate_response as _llm_generate_response,
 )
-from llm import (
-    update_session_summary as _update_session_summary,
-)
 from lookups import (
     do_calendar_lookup,
     do_mail_lookup,
@@ -88,6 +85,7 @@ from planner import TaskPlanner
 from projects import scan_projects
 from projects import scan_projects_sync as _scan_projects_sync
 from qa import QAAgent
+from session_memory import SessionMemory
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
 from tracking import SuccessTracker
@@ -381,11 +379,8 @@ async def voice_handler(ws: WebSocket):
     # Self-awareness — track last spoken response to avoid repetition
     last_jarvis_response = ""
 
-    # Three-tier conversation memory
-    session_buffer: list[dict] = []  # ALL messages, never truncated
-    session_summary: str = ""  # Rolling summary of older conversation
-    summary_update_pending: bool = False
-    messages_since_last_summary: int = 0
+    # Three-tier conversation memory — see session_memory.SessionMemory
+    memory = SessionMemory()
 
     log.info("Voice WebSocket connected")
 
@@ -503,7 +498,7 @@ async def voice_handler(ws: WebSocket):
                         _ac=anthropic_client,
                         _cp=cached_projects,
                         _lr=last_jarvis_response,
-                        _ss=session_summary,
+                        _ss=memory.summary,
                     ):
                         return await generate_response(
                             _ut,
@@ -552,7 +547,7 @@ async def voice_handler(ws: WebSocket):
                                 cached_projects,
                                 history,
                                 last_response=last_jarvis_response,
-                                session_summary=session_summary,
+                                session_summary=memory.summary,
                             )
 
                             # Check for action tags embedded in LLM response
@@ -583,31 +578,9 @@ async def voice_handler(ws: WebSocket):
                                     do_screen_lookup=_do_screen_lookup,
                                 )
 
-                # Update history
-                history.append({"role": "user", "content": user_text})
-                history.append({"role": "assistant", "content": response_text})
-
-                # Three-tier memory: also track in session buffer
-                session_buffer.append({"role": "user", "content": user_text})
-                session_buffer.append({"role": "assistant", "content": response_text})
-
-                # Check if rolling summary needs updating
-                messages_since_last_summary += 1
-                if messages_since_last_summary >= 5 and len(history) > 20 and not summary_update_pending:
-                    summary_update_pending = True
-                    messages_since_last_summary = 0
-                    # Get messages that are about to be rotated out
-                    rotated = history[:-20] if len(history) > 20 else []
-                    if rotated and anthropic_client:
-
-                        async def _do_summary(_rotated=rotated):
-                            nonlocal session_summary, summary_update_pending
-                            session_summary = await _update_session_summary(session_summary, _rotated, anthropic_client)
-                            summary_update_pending = False
-
-                        asyncio.create_task(_do_summary())
-                    else:
-                        summary_update_pending = False
+                # Update history + three-tier memory, schedule rolling summary refresh
+                memory.record(user_text, response_text, history)
+                memory.maybe_refresh(history, anthropic_client)
 
                 # Extract memories in background (doesn't block response)
                 if anthropic_client and len(user_text) > 15:
