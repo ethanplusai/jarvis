@@ -93,10 +93,10 @@ module = [
 ]
 disable_error_code = ["assignment", "return-value", "var-annotated", "call-overload", "arg-type", "index", "union-attr"]
 
-# server.py: Anthropic SDK response.content[0].text is always TextBlock at runtime,
-# but mypy sees the full union type. Also uvicorn.run(**ssl_kwargs) typing issue.
+# server.py / llm.py: Anthropic SDK response.content[0].text is always TextBlock
+# at runtime, but mypy sees the full union type. Also uvicorn.run(**ssl_kwargs) issue.
 [[tool.mypy.overrides]]
-module = "server"
+module = ["server", "llm"]
 disable_error_code = ["union-attr", "arg-type", "var-annotated"]
 
 # Strictly typed modules — full type checking, no overrides.

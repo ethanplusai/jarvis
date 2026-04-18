@@ -52,15 +52,16 @@ from calendar_access import (
 from calendar_access import refresh_cache as refresh_calendar_cache
 from dispatch_registry import DispatchRegistry
 from formatting import (
-    apply_speech_corrections,
-    extract_action,
+    apply_speech_corrections,  # noqa: F401 — re-exported for tests
+    extract_action,  # noqa: F401 — re-exported for tests
     format_mc_decisions_for_voice,
     format_mc_inbox_for_voice,
     format_mc_tasks_for_voice,
-    format_projects_for_prompt,
+    format_projects_for_prompt,  # noqa: F401 — re-exported for tests
     strip_markdown_for_tts,
 )
 from learning import UsageLearner
+from llm import generate_response as _llm_generate_response
 from mail_access import (
     format_unread_summary,
     get_unread_count,
@@ -68,7 +69,6 @@ from mail_access import (
 )
 from mc_client import mc_client
 from memory import (
-    build_memory_context,
     create_note,
     extract_memories,
     get_important_memories,
@@ -78,7 +78,6 @@ from memory import (
 from models import ClaudeTask, TaskRequest
 from notes_access import create_apple_note, get_recent_notes, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
-from prompts import JARVIS_SYSTEM_PROMPT
 from qa import QAAgent
 from sanitize import (
     ALLOW_REMOTE_CONTROL,
@@ -90,6 +89,25 @@ from sanitize import (
 from screen import describe_screen, format_windows_for_context, get_active_windows
 from suggestions import suggest_followup
 from tracking import SuccessTracker
+from tts import synthesize_speech
+from usage import (
+    SESSION_START as _session_start,
+)
+from usage import (
+    SESSION_TOKENS as _session_tokens,
+)
+from usage import (
+    append_usage_entry as _append_usage_entry,  # noqa: F401
+)
+from usage import (
+    cost_from_tokens as _cost_from_tokens,  # noqa: F401
+)
+from usage import (
+    get_usage_for_period as _get_usage_for_period,
+)
+from usage import (
+    get_usage_summary,
+)
 from work_mode import WorkSession, is_casual_question, session_manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -414,6 +432,55 @@ class ClaudeTaskManager:
         for t in completed_recent:
             lines.append(f"- [{t.id}] COMPLETED: {t.prompt[:60]} -> {t.result[:80]}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Shared state (module-level singletons used across handlers)
+# ---------------------------------------------------------------------------
+
+task_manager = ClaudeTaskManager(max_concurrent=3)
+qa_agent = QAAgent()
+success_tracker = SuccessTracker()
+ab_tester = ABTester()
+usage_learner = UsageLearner()
+anthropic_client: anthropic.AsyncAnthropic | None = None
+cached_projects: list[dict] = []
+recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
+dispatch_registry = DispatchRegistry()
+
+# Background context cache — never blocks responses
+_ctx_cache = {
+    "screen": "",
+    "calendar": "No calendar data yet.",
+    "mail": "No mail data yet.",
+    "weather": "Weather data unavailable.",
+}
+
+
+async def generate_response(
+    text: str,
+    client,
+    task_mgr,
+    projects: list[dict],
+    conversation_history: list[dict],
+    last_response: str = "",
+    session_summary: str = "",
+) -> str:
+    """Server-local adapter injecting shared state into llm.generate_response."""
+    return await _llm_generate_response(
+        text=text,
+        client=client,
+        task_mgr=task_mgr,
+        projects=projects,
+        conversation_history=conversation_history,
+        ctx_cache=_ctx_cache,
+        dispatch_registry=dispatch_registry,
+        user_name=USER_NAME,
+        project_dir=PROJECT_DIR,
+        last_response=last_response,
+        session_summary=session_summary,
+        lookup_status=get_lookup_status() if "get_lookup_status" in globals() else "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -799,231 +866,6 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
 
 # Smart greeting — track last greeting to avoid re-greeting on reconnect
 _last_greeting_time: float = 0
-
-
-# ---------------------------------------------------------------------------
-# TTS (Fish Audio)
-# ---------------------------------------------------------------------------
-
-
-async def synthesize_speech(text: str) -> bytes | None:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
-    except Exception as e:
-        log.error(f"TTS error: {e}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# LLM Response
-# ---------------------------------------------------------------------------
-
-
-async def generate_response(
-    text: str,
-    client: anthropic.AsyncAnthropic,
-    task_mgr: ClaudeTaskManager,
-    projects: list[dict],
-    conversation_history: list[dict],
-    last_response: str = "",
-    session_summary: str = "",
-) -> str:
-    """Generate a JARVIS response using Anthropic API."""
-    now = datetime.now()
-    current_time = now.strftime("%A, %B %d, %Y at %I:%M %p")
-
-    # Use cached weather
-    weather_info = _ctx_cache.get("weather", "Weather data unavailable.")
-
-    # Use cached context (refreshed in background, never blocks responses)
-    screen_ctx = _ctx_cache["screen"]
-    calendar_ctx = _ctx_cache["calendar"]
-    mail_ctx = _ctx_cache["mail"]
-
-    # Check if any lookups are in progress
-    lookup_status = get_lookup_status()
-
-    system = JARVIS_SYSTEM_PROMPT.format(
-        current_time=current_time,
-        weather_info=weather_info,
-        screen_context=screen_ctx or "Not checked yet.",
-        calendar_context=calendar_ctx,
-        mail_context=mail_ctx,
-        active_tasks=task_mgr.get_active_tasks_summary(),
-        dispatch_context=dispatch_registry.format_for_prompt(),
-        known_projects=format_projects_for_prompt(projects),
-        user_name=USER_NAME,
-        project_dir=PROJECT_DIR,
-    )
-    if lookup_status:
-        system += f"\n\nACTIVE LOOKUPS:\n{lookup_status}\nIf asked about progress, report this status."
-
-    # Inject relevant memories and tasks
-    memory_ctx = build_memory_context(text)
-    if memory_ctx:
-        system += f"\n\nJARVIS MEMORY:\n{memory_ctx}"
-
-    # Three-tier memory — inject rolling summary of earlier conversation
-    if session_summary:
-        system += f"\n\nSESSION CONTEXT (earlier in this conversation):\n{session_summary}"
-
-    # Self-awareness — remind JARVIS of last response to avoid repetition
-    if last_response:
-        system += f'\n\nYOUR LAST RESPONSE (do not repeat this):\n"{last_response[:150]}"'
-
-    # Use conversation history — keep the last 20 messages for context
-    # (older conversation is captured in session_summary)
-    messages = conversation_history[-20:]
-    # If the last message isn't the current user text, add it
-    if not messages or messages[-1].get("content") != text:
-        messages = messages + [{"role": "user", "content": text}]
-
-    try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=250,  # Extra room for [ACTION:X] tags
-            system=system,
-            messages=messages,
-        )
-        track_usage(response)
-        return response.content[0].text
-    except Exception as e:
-        log.error(f"LLM error: {e}")
-        return "Apologies, sir. I'm having trouble connecting to my language systems."
-
-
-# ---------------------------------------------------------------------------
-# FastAPI App
-# ---------------------------------------------------------------------------
-
-# Shared state
-task_manager = ClaudeTaskManager(max_concurrent=3)
-qa_agent = QAAgent()
-success_tracker = SuccessTracker()
-ab_tester = ABTester()
-usage_learner = UsageLearner()
-anthropic_client: anthropic.AsyncAnthropic | None = None
-cached_projects: list[dict] = []
-recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
-dispatch_registry = DispatchRegistry()
-
-# Usage tracking — logs every call with timestamp, persists to disk
-_USAGE_FILE = Path(__file__).parent / "data" / "usage_log.jsonl"
-_session_start = time.time()
-_session_tokens = {"input": 0, "output": 0, "api_calls": 0, "tts_calls": 0}
-
-
-def _append_usage_entry(input_tokens: int, output_tokens: int, call_type: str = "api"):
-    """Append a usage entry with timestamp to the log file."""
-    try:
-        _USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        import json as _json
-
-        entry = {
-            "ts": time.time(),
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "type": call_type,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
-        with open(_USAGE_FILE, "a") as f:
-            f.write(_json.dumps(entry) + "\n")
-    except Exception:
-        pass
-
-
-def _get_usage_for_period(seconds: float | None = None) -> dict:
-    """Sum usage from the log file for a time period. None = all time."""
-    import json as _json
-
-    totals = {"input_tokens": 0, "output_tokens": 0, "api_calls": 0, "tts_calls": 0}
-    cutoff = (time.time() - seconds) if seconds else 0
-    try:
-        if _USAGE_FILE.exists():
-            for line in _USAGE_FILE.read_text().strip().split("\n"):
-                if not line:
-                    continue
-                entry = _json.loads(line)
-                if entry["ts"] >= cutoff:
-                    totals["input_tokens"] += entry.get("input_tokens", 0)
-                    totals["output_tokens"] += entry.get("output_tokens", 0)
-                    if entry.get("type") == "tts":
-                        totals["tts_calls"] += 1
-                    else:
-                        totals["api_calls"] += 1
-    except Exception:
-        pass
-    return totals
-
-
-def _cost_from_tokens(input_t: int, output_t: int) -> float:
-    return (input_t / 1_000_000) * 0.80 + (output_t / 1_000_000) * 4.00
-
-
-def track_usage(response):
-    """Track token usage from an Anthropic API response."""
-    inp = getattr(response.usage, "input_tokens", 0) if hasattr(response, "usage") else 0
-    out = getattr(response.usage, "output_tokens", 0) if hasattr(response, "usage") else 0
-    _session_tokens["input"] += inp
-    _session_tokens["output"] += out
-    _session_tokens["api_calls"] += 1
-    _append_usage_entry(inp, out, "api")
-
-
-def get_usage_summary() -> str:
-    """Get a voice-friendly usage summary with time breakdowns."""
-    uptime_min = int((time.time() - _session_start) / 60)
-
-    session = _session_tokens
-    today = _get_usage_for_period(86400)
-    all_time = _get_usage_for_period(None)
-
-    session_cost = _cost_from_tokens(session["input"], session["output"])
-    today_cost = _cost_from_tokens(today["input_tokens"], today["output_tokens"])
-    all_cost = _cost_from_tokens(all_time["input_tokens"], all_time["output_tokens"])
-
-    parts = [f"This session: {uptime_min} minutes, {session['api_calls']} calls, ${session_cost:.2f}."]
-
-    if today["api_calls"] > session["api_calls"]:
-        parts.append(f"Today total: {today['api_calls']} calls, ${today_cost:.2f}.")
-
-    if all_time["api_calls"] > today["api_calls"]:
-        parts.append(f"All time: {all_time['api_calls']} calls, ${all_cost:.2f}.")
-
-    return " ".join(parts)
-
-
-# Background context cache — never blocks responses
-_ctx_cache = {
-    "screen": "",
-    "calendar": "No calendar data yet.",
-    "mail": "No mail data yet.",
-    "weather": "Weather data unavailable.",
-}
 
 
 def _refresh_context_sync():
