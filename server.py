@@ -33,9 +33,6 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 from fastapi.middleware.cors import CORSMiddleware
 
 from ab_testing import ABTester
-from action_handlers import (
-    execute_browse as _execute_browse,
-)
 from actions import (
     _generate_project_name,
 )
@@ -104,6 +101,7 @@ from usage import (
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
 )
+from voice_work_mode import handle_work_mode_message
 from work_mode import WorkSession, is_casual_question
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -554,81 +552,33 @@ async def voice_handler(ws: WebSocket):
 
                 # ── WORK MODE: speech → claude -p → Haiku summary → JARVIS voice ──
                 elif work_session.active:
-                    if is_casual_question(user_text):
-                        # Quick chat — bypass claude -p, use Haiku
-                        response_text = await generate_response(
-                            user_text,
-                            anthropic_client,
+
+                    async def _casual(
+                        _ut=user_text,
+                        _ac=anthropic_client,
+                        _cp=cached_projects,
+                        _lr=last_jarvis_response,
+                        _ss=session_summary,
+                    ):
+                        return await generate_response(
+                            _ut,
+                            _ac,
                             task_manager,
-                            cached_projects,
+                            _cp,
                             history,
-                            last_response=last_jarvis_response,
-                            session_summary=session_summary,
+                            last_response=_lr,
+                            session_summary=_ss,
                         )
-                    else:
-                        # Send to claude -p (full power)
-                        await ws.send_json({"type": "status", "state": "working"})
-                        log.info(f"Work mode → claude -p: {user_text[:80]}")
 
-                        full_response = await work_session.send(user_text)
-
-                        # Detect if Claude Code is stalling (asking questions instead of building)
-                        if full_response and anthropic_client:
-                            stall_words = [
-                                "which option",
-                                "would you prefer",
-                                "would you like me to",
-                                "before I proceed",
-                                "before proceeding",
-                                "should I",
-                                "do you want me to",
-                                "let me know",
-                                "please confirm",
-                                "which approach",
-                                "what would you",
-                            ]
-                            is_stalling = any(w in full_response.lower() for w in stall_words)
-                            if is_stalling and work_session._message_count >= 2:
-                                # Claude Code keeps asking — push it to build
-                                log.info("Claude Code stalling — pushing to build")
-                                push_response = await work_session.send(
-                                    "Stop asking questions. Use your best judgment and start building now. "
-                                    "Write the actual code files. Go with the simplest reasonable approach."
-                                )
-                                if push_response:
-                                    full_response = push_response
-
-                        # Auto-open any localhost URLs Claude Code mentions
-                        import re as _re
-
-                        localhost_match = _re.search(r"https?://localhost:\d+", full_response or "")
-                        if localhost_match:
-                            asyncio.create_task(_execute_browse(localhost_match.group(0)))
-                            log.info(f"Auto-opening {localhost_match.group(0)}")
-
-                        # Always summarize work mode responses via Haiku
-                        if full_response and anthropic_client:
-                            try:
-                                summary = await anthropic_client.messages.create(
-                                    model="claude-haiku-4-5-20251001",
-                                    max_tokens=100,
-                                    system=(
-                                        f"You are JARVIS reporting to the user ({USER_NAME}). Summarize what happened in 1-2 sentences. "
-                                        "Speak in first person — 'I built', 'I found', 'I set up'. "
-                                        "You are talking TO THE USER, not to a coding tool. "
-                                        "NEVER give instructions like 'go ahead and build' or 'set up the frontend' — those are NOT for the user. "
-                                        "NEVER say 'Claude Code'. NEVER output [ACTION:...] tags. "
-                                        "NEVER read out URLs. No markdown. British precision."
-                                    ),
-                                    messages=[
-                                        {"role": "user", "content": f"Claude Code said:\n{full_response[:2000]}"}
-                                    ],
-                                )
-                                response_text = summary.content[0].text
-                            except Exception:
-                                response_text = full_response[:200]
-                        else:
-                            response_text = full_response
+                    response_text = await handle_work_mode_message(
+                        user_text,
+                        ws=ws,
+                        work_session=work_session,
+                        anthropic_client=anthropic_client,
+                        user_name=USER_NAME,
+                        generate_casual_response=_casual,
+                        is_casual=is_casual_question(user_text),
+                    )
 
                 # ── CHAT MODE: fast keyword detection + Haiku ──
                 else:
