@@ -13,6 +13,7 @@ from typing import Any
 
 from macos.actions import _generate_project_name
 from planner import BYPASS_PHRASES
+from prompts import BUILD_DOCS_REQUIREMENT
 
 log = logging.getLogger("jarvis.voice_planning")
 
@@ -36,7 +37,7 @@ async def _dispatch_plan(
     name = _generate_project_name(prompt)
     path = str(Path.home() / "Desktop" / name)
     os.makedirs(path, exist_ok=True)
-    Path(path, "CLAUDE.md").write_text(prompt)
+    Path(path, "CLAUDE.md").write_text(prompt + BUILD_DOCS_REQUIREMENT)
     did = dispatch_registry.register(name, path, prompt[:200])
     asyncio.create_task(
         execute_prompt_project(

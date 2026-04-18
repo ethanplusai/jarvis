@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+from prompts import BUILD_DOCS_REQUIREMENT
 from sanitize import DANGEROUS_FLAG, escape_applescript, escape_shell_in_applescript
 from tmux_sessions import TMUX_AVAILABLE
 from work_mode import session_manager
@@ -163,7 +164,11 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
 
     # Write prompt to CLAUDE.md — claude reads this automatically
     claude_md = Path(project_dir) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+    claude_md.write_text(
+        f"# Task\n\n{prompt}\n\n"
+        f"Build this completely. If web app, make index.html work standalone.\n"
+        f"{BUILD_DOCS_REQUIREMENT}"
+    )
 
     if TMUX_AVAILABLE:
         cmd = f"claude{DANGEROUS_FLAG}"

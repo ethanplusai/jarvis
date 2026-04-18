@@ -187,3 +187,16 @@ KNOWN PROJECTS:
 MCP SERVERS:
 The rick_mcp security toolkit is available in spawned Claude Code sessions. For any security, pentesting, recon, threat modeling, or offensive/defensive security requests — delegate to a Claude Code session. It will discover the rick_mcp tools automatically.
 """
+
+
+# Appended to every build kick-off CLAUDE.md so generated projects ship
+# self-documenting. Every "build me X" path (action_handlers.handle_build,
+# embedded_actions dispatch, macos/actions, voice/planning._dispatch_plan)
+# writes this into the project's CLAUDE.md alongside the task text.
+BUILD_DOCS_REQUIREMENT = """\
+
+## Required deliverables
+Before finishing, create:
+1. `README.md` — what this project does, how to run it, the key files, any env vars.
+2. An updated `CLAUDE.md` — document the architecture, conventions, and any non-obvious decisions so the next Claude Code session that opens this repo has context.
+"""

@@ -23,6 +23,7 @@ from macos.actions import _generate_project_name
 from macos.notes_access import create_apple_note, read_note
 from mc_client import mc_client
 from memory import create_note, remember
+from prompts import BUILD_DOCS_REQUIREMENT
 from tts import synthesize_speech
 
 from .action_handlers import execute_browse, execute_open_terminal
@@ -132,7 +133,7 @@ async def dispatch(
         name = _generate_project_name(target)
         path = str(Path.home() / "Desktop" / name)
         os.makedirs(path, exist_ok=True)
-        Path(path, "CLAUDE.md").write_text(f"# Task\n\n{target}\n\nBuild this completely.\n")
+        Path(path, "CLAUDE.md").write_text(f"# Task\n\n{target}\n\nBuild this completely.\n{BUILD_DOCS_REQUIREMENT}")
         did = dispatch_registry.register(name, path, target)
         asyncio.create_task(
             execute_prompt_project(

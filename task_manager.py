@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import WebSocket
 
 from models import ClaudeTask
+from prompts import BUILD_DOCS_REQUIREMENT
 from sanitize import DANGEROUS_FLAG, escape_shell_in_applescript
 
 log = logging.getLogger("jarvis.task_manager")
@@ -120,7 +121,7 @@ class ClaudeTaskManager:
             task.working_dir = work_dir
 
         prompt_file = Path(work_dir) / ".jarvis_prompt.md"
-        prompt_file.write_text(task.prompt)
+        prompt_file.write_text(task.prompt + BUILD_DOCS_REQUIREMENT)
 
         applescript = f"""
         tell application "Terminal"

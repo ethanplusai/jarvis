@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from macos.actions import _generate_project_name, open_browser, open_terminal
+from prompts import BUILD_DOCS_REQUIREMENT
 from sanitize import DANGEROUS_FLAG, escape_shell_in_applescript
 
 log = logging.getLogger("jarvis.action_handlers")
@@ -31,7 +32,11 @@ async def handle_build(target: str) -> str:
     os.makedirs(path, exist_ok=True)
 
     claude_md = Path(path) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{target}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+    claude_md.write_text(
+        f"# Task\n\n{target}\n\n"
+        f"Build this completely. If web app, make index.html work standalone.\n"
+        f"{BUILD_DOCS_REQUIREMENT}"
+    )
 
     prompt_file = Path(path) / ".jarvis_prompt.txt"
     prompt_file.write_text(target)
