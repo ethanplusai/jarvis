@@ -45,10 +45,9 @@ ignore = [
 "work_mode.py" = ["S603", "S607", "S110", "SIM105", "S101"]
 "qa.py" = ["S603", "S607"]
 "browser.py" = ["S603", "S607", "S112", "S306"]
-# Background/evolution modules: resilient try-except-pass
+# Background/feedback modules: resilient try-except-pass
 # S311: random.choice for A/B testing, not crypto
 "feedback/ab_testing.py" = ["S110", "SIM105", "S311"]
-"evolution.py" = ["S110", "SIM105"]
 "feedback/learning.py" = ["S110", "SIM105"]
 "feedback/tracking.py" = ["S110", "SIM105"]
 "planner.py" = ["S110", "SIM105"]
@@ -82,7 +81,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "memory",
-    "evolution",
     "feedback.tracking",
     "templates",
     "planner",  # also has Anthropic union-attr
@@ -107,6 +105,8 @@ module = [
     "sanitize",
     "mc_client",
     "dispatch_registry",
+    "tmux_sessions",
+    "work_mode",
 ]
 check_untyped_defs = true
 disallow_untyped_defs = false
