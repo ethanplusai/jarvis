@@ -380,8 +380,8 @@ class TestRemoteControlEndpoints:
     """Test that restart/fix-self endpoints respect ALLOW_REMOTE_CONTROL."""
 
     def test_restart_blocked_when_remote_control_disabled(self, monkeypatch):
-        import api_control
         import server
+        from api import control as api_control
 
         monkeypatch.setattr(server, "_AUTH_TOKEN", "")
         monkeypatch.setattr(api_control, "ALLOW_REMOTE_CONTROL", False)
@@ -394,8 +394,8 @@ class TestRemoteControlEndpoints:
         assert "Remote control disabled" in resp.json()["error"]
 
     def test_fix_self_blocked_when_remote_control_disabled(self, monkeypatch):
-        import api_control
         import server
+        from api import control as api_control
 
         monkeypatch.setattr(server, "_AUTH_TOKEN", "")
         monkeypatch.setattr(api_control, "ALLOW_REMOTE_CONTROL", False)

@@ -32,9 +32,7 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 from fastapi.middleware.cors import CORSMiddleware
 
 from ab_testing import ABTester
-from api_control import build_control_router
-from api_core import build_core_router
-from api_settings import build_settings_router
+from api import build_control_router, build_core_router, build_settings_router
 from context_cache import start_context_refresh
 from dispatch import (
     execute_prompt_project,
