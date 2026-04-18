@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import secrets
-import sys
 import time
 from pathlib import Path
 
@@ -52,6 +51,7 @@ from actions import (
     _generate_project_name,
     open_browser,
 )
+from api_control import build_control_router
 from api_settings import build_settings_router
 from dispatch_registry import DispatchRegistry
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
@@ -88,11 +88,8 @@ from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from qa import QAAgent
 from sanitize import (
-    ALLOW_REMOTE_CONTROL,
-    DANGEROUS_FLAG,
     DANGEROUS_FLAG_LIST,
     escape_applescript,
-    escape_shell_in_applescript,
 )
 from screen import format_windows_for_context
 from suggestions import suggest_followup
@@ -1770,60 +1767,7 @@ app.include_router(build_settings_router(require_auth, FISH_VOICE_ID))
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/restart", dependencies=[Depends(require_auth)])
-async def api_restart():
-    """Restart the JARVIS server."""
-    if not ALLOW_REMOTE_CONTROL:
-        return JSONResponse(
-            status_code=403, content={"error": "Remote control disabled. Set ALLOW_REMOTE_CONTROL=true in .env"}
-        )
-    log.info("Restart requested — shutting down in 2 seconds")
-
-    async def _restart():
-        await asyncio.sleep(2)
-        cmd = [sys.executable, __file__, "--port", "8340", "--host", "127.0.0.1"]
-        os.execv(sys.executable, cmd)
-
-    asyncio.create_task(_restart())
-    return {"status": "restarting"}
-
-
-@app.post("/api/fix-self", dependencies=[Depends(require_auth)])
-async def api_fix_self():
-    """Enter work mode in the JARVIS repo — JARVIS can now fix himself."""
-    if not ALLOW_REMOTE_CONTROL:
-        return JSONResponse(
-            status_code=403, content={"error": "Remote control disabled. Set ALLOW_REMOTE_CONTROL=true in .env"}
-        )
-    jarvis_dir = str(Path(__file__).parent)
-
-    # Launch in tmux session for monitoring, open Terminal attached to it
-    from tmux_sessions import TMUX_AVAILABLE
-
-    if TMUX_AVAILABLE:
-        cmd = f"claude{DANGEROUS_FLAG}"
-        tmux = await session_manager.create_session("jarvis-self", jarvis_dir, command=cmd, mode="interactive")
-        if tmux:
-            await session_manager.attach_in_terminal(tmux.name)
-            log.info("Work mode: JARVIS repo opened for self-improvement (tmux)")
-            return {"status": "work_mode_active", "path": jarvis_dir}
-
-    # Fallback: AppleScript
-    script = (
-        'tell application "Terminal"\n'
-        "    activate\n"
-        f'    do script "cd {escape_shell_in_applescript(jarvis_dir)} && claude{DANGEROUS_FLAG}"\n'
-        "end tell"
-    )
-    await asyncio.create_subprocess_exec(
-        "osascript",
-        "-e",
-        script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log.info("Work mode: JARVIS repo opened for self-improvement")
-    return {"status": "work_mode_active", "path": jarvis_dir}
+app.include_router(build_control_router(require_auth, __file__))
 
 
 # ---------------------------------------------------------------------------
