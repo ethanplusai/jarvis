@@ -45,7 +45,6 @@ from action_handlers import (
 from action_handlers import (
     handle_open_terminal,
     handle_show_recent,
-    recently_built,
 )
 from actions import (
     _generate_project_name,
@@ -53,6 +52,13 @@ from actions import (
 )
 from api_control import build_control_router
 from api_settings import build_settings_router
+from dispatch import (
+    execute_prompt_project,
+    execute_research,
+)
+from dispatch import (
+    self_work_and_notify as _self_work_and_notify,
+)
 from dispatch_registry import DispatchRegistry
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
@@ -87,10 +93,6 @@ from models import TaskRequest
 from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from qa import QAAgent
-from sanitize import (
-    DANGEROUS_FLAG_LIST,
-    escape_applescript,
-)
 from screen import format_windows_for_context
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
@@ -258,147 +260,11 @@ async def scan_projects() -> list[dict]:
     return projects
 
 
+# Dispatch helpers — see dispatch.py for implementation.
+
+
 async def _execute_research(target: str, ws=None):
-    """Execute research via claude -p in background. Opens report and speaks when done."""
-    try:
-        name = _generate_project_name(target)
-        path = str(Path.home() / "Desktop" / name)
-        os.makedirs(path, exist_ok=True)
-
-        prompt = (
-            f"{target}\n\n"
-            f"Research this thoroughly. Find REAL data — not made-up examples.\n"
-            f"Create a well-designed HTML file called `report.html` in the current directory.\n"
-            f"Dark theme, clean typography, organized sections, real links and sources.\n"
-            f"The working directory is: {path}"
-        )
-
-        log.info(f"Research started via claude -p in {path}")
-
-        process = await asyncio.create_subprocess_exec(
-            "claude",
-            "-p",
-            "--output-format",
-            "text",
-            *DANGEROUS_FLAG_LIST,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=path,
-        )
-
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(input=prompt.encode()),
-            timeout=300,
-        )
-
-        result = stdout.decode().strip()
-        log.info(f"Research complete ({len(result)} chars)")
-
-        recently_built.append({"name": name, "path": path, "time": time.time()})
-
-        # Find and open any HTML report
-        report = Path(path) / "report.html"
-        if not report.exists():
-            # Check for any HTML file
-            html_files = list(Path(path).glob("*.html"))
-            if html_files:
-                report = html_files[0]
-
-        if report.exists():
-            await open_browser(f"file://{report}")
-            log.info(f"Opened {report.name} in browser")
-
-        # Notify via voice if WebSocket still connected
-        if ws:
-            try:
-                notify_text = "Research is complete, sir. Report is open in your browser."
-                audio = await synthesize_speech(notify_text)
-                if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": notify_text})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {notify_text}")
-            except Exception:
-                pass  # WebSocket might be gone
-
-    except TimeoutError:
-        log.error("Research timed out after 5 minutes")
-        if ws:
-            try:
-                audio = await synthesize_speech("Research timed out, sir. It was taking too long.")
-                if audio:
-                    await ws.send_json(
-                        {"type": "audio", "data": base64.b64encode(audio).decode(), "text": "Research timed out, sir."}
-                    )
-            except Exception:
-                pass
-    except Exception as e:
-        log.error(f"Research execution failed: {e}")
-
-
-async def _focus_terminal_window(project_name: str):
-    """Bring a Terminal window for the project to front.
-
-    Uses tmux attach when a session exists, falls back to AppleScript window search.
-    """
-    # Try tmux first
-    session = session_manager.find_session(project_name)
-    if session and await session.is_alive():
-        await session_manager.attach_in_terminal(session.name)
-        return
-
-    # Fallback: search Terminal windows by name
-    escaped = escape_applescript(project_name)
-    script = f'''
-tell application "Terminal"
-    repeat with w in windows
-        if name of w contains "{escaped}" then
-            set index of w to 1
-            activate
-            exit repeat
-        end if
-    end repeat
-end tell
-'''
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "osascript",
-            "-e",
-            script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=5)
-    except Exception:
-        pass
-
-
-def _find_project_dir(project_name: str) -> str | None:
-    """Find a project directory by name from cached projects or Desktop."""
-    for p in cached_projects:
-        if project_name.lower() in p.get("name", "").lower():
-            return p.get("path")
-    # Check common project locations
-    search_dirs = [
-        Path.home() / "Desktop",
-        Path.home() / "Documents",
-        Path.home() / "IdeaProjects",
-        Path.home() / "Projects",
-    ]
-    for search_dir in search_dirs:
-        # Direct path check — works even when macOS TCC blocks directory listing
-        direct = search_dir / project_name
-        if direct.is_dir():
-            return str(direct)
-        # Fall back to directory scan for fuzzy/partial matches
-        try:
-            for d in search_dir.iterdir():
-                if d.is_dir() and project_name.lower() in d.name.lower():
-                    return str(d)
-        except (PermissionError, FileNotFoundError):
-            continue
-    return None
+    await execute_research(target, ws)
 
 
 async def _execute_prompt_project(
@@ -410,163 +276,22 @@ async def _execute_prompt_project(
     history: list[dict] | None = None,
     voice_state: dict | None = None,
 ):
-    """Dispatch a prompt to Claude Code in a project directory.
-
-    Runs entirely in the background. JARVIS returns to conversation mode
-    immediately. When Claude Code finishes, JARVIS interrupts to report.
-    """
-    try:
-        project_dir = _find_project_dir(project_name)
-
-        # Register dispatch if not already registered
-        if dispatch_id is None:
-            dispatch_id = dispatch_registry.register(project_name, project_dir or "", prompt)
-
-        if not project_dir:
-            msg = f"Couldn't find the {project_name} project directory, sir."
-            audio = await synthesize_speech(msg)
-            if audio and ws:
-                try:
-                    await ws.send_json({"type": "status", "state": "speaking"})
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-                except Exception:
-                    pass
-            return
-
-        # Use a SEPARATE session so we don't trap the main conversation
-        dispatch = WorkSession()
-        await dispatch.start(project_dir, project_name)
-
-        # Bring matching Terminal window to front so user can watch
-        asyncio.create_task(_focus_terminal_window(project_name))
-
-        log.info(f"Dispatching to {project_name} in {project_dir}: {prompt[:80]}")
-        dispatch_registry.update_status(dispatch_id, "building")
-
-        # Run claude -p in background
-        full_response = await dispatch.send(prompt)
-        await dispatch.stop()
-
-        # Auto-open any localhost URLs from response
-        import re as _re
-
-        # Check for the explicit RUNNING_AT marker first
-        running_match = _re.search(r"RUNNING_AT=(https?://localhost:\d+)", full_response or "")
-        if not running_match:
-            running_match = _re.search(r"https?://localhost:\d+", full_response or "")
-        if running_match:
-            url = running_match.group(1) if running_match.lastindex else running_match.group(0)
-            asyncio.create_task(_execute_browse(url))
-            log.info(f"Auto-opening {url}")
-            # Store URL in dispatch
-            if dispatch_id:
-                dispatch_registry.update_status(
-                    dispatch_id, "completed", response=full_response[:2000], summary=f"Running at {url}"
-                )
-
-        if not full_response or full_response.startswith("Hit a problem") or full_response.startswith("That's taking"):
-            dispatch_registry.update_status(
-                dispatch_id, "failed" if full_response else "timeout", response=full_response or ""
-            )
-            msg = f"Sir, I ran into an issue with {project_name}. {full_response[:150] if full_response else 'No response received.'}"
-        else:
-            # Summarize via Haiku — don't read word for word
-            if anthropic_client:
-                try:
-                    summary = await anthropic_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=150,
-                        system=(
-                            "You are JARVIS reporting back on what you found or built in a project. "
-                            "Speak in first person — 'I found', 'I built', 'I reviewed'. "
-                            "Start with 'Sir, ' to get the user's attention. "
-                            "Be specific but concise — highlight the key findings or actions taken. "
-                            "If there are multiple items, give the count and top 2-3 briefly. "
-                            "End by asking how the user wants to proceed. "
-                            "NEVER read out URLs or localhost addresses. NEVER say 'Claude Code'. "
-                            "2-3 sentences max. No markdown. Natural spoken voice."
-                        ),
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": f"Project: {project_name}\nClaude Code reported:\n{full_response[:3000]}",
-                            }
-                        ],
-                    )
-                    msg = summary.content[0].text
-                except Exception:
-                    msg = f"Sir, {project_name} finished. Here's the gist: {full_response[:200]}"
-            else:
-                msg = f"Sir, {project_name} is done. {full_response[:200]}"
-
-        # Speak the result — skip if user has spoken recently to avoid audio collision
-        log.info(f"Dispatch summary for {project_name}: {msg[:100]}")
-        if voice_state and time.time() - voice_state["last_user_time"] < 3:
-            log.info(f"Skipping dispatch audio for {project_name} — user spoke recently")
-            # Result is still stored in history below so JARVIS can reference it
-        else:
-            audio = await synthesize_speech(strip_markdown_for_tts(msg))
-            if ws:
-                try:
-                    await ws.send_json({"type": "status", "state": "speaking"})
-                    if audio:
-                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-                        log.info(f"Dispatch audio sent for {project_name}")
-                    else:
-                        await ws.send_json({"type": "text", "text": msg})
-                        log.info(f"Dispatch text fallback sent for {project_name}")
-                except Exception as e:
-                    log.error(f"Dispatch audio send failed: {e}")
-
-        # Store dispatch result in conversation history so JARVIS remembers it
-        if history is not None:
-            history.append({"role": "assistant", "content": f"[Dispatch result for {project_name}]: {msg}"})
-
-        dispatch_registry.update_status(dispatch_id, "completed", response=full_response[:2000], summary=msg[:200])
-        log.info(f"Project {project_name} dispatch complete ({len(full_response)} chars)")
-
-    except Exception as e:
-        log.error(f"Prompt project failed: {e}", exc_info=True)
-        try:
-            msg = f"Had trouble connecting to {project_name}, sir."
-            audio = await synthesize_speech(msg)
-            if audio and ws:
-                await ws.send_json({"type": "status", "state": "speaking"})
-                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-        except Exception:
-            pass
+    await execute_prompt_project(
+        project_name,
+        prompt,
+        work_session,
+        ws,
+        anthropic_client=anthropic_client,
+        dispatch_registry=dispatch_registry,
+        cached_projects=cached_projects,
+        dispatch_id=dispatch_id,
+        history=history,
+        voice_state=voice_state,
+    )
 
 
 async def self_work_and_notify(session: WorkSession, prompt: str, ws):
-    """Run claude -p in background and notify via voice when done."""
-    try:
-        full_response = await session.send(prompt)
-        log.info(f"Background work complete ({len(full_response)} chars)")
-
-        # Summarize and speak
-        if anthropic_client and full_response:
-            try:
-                summary = await anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=100,
-                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
-                    messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
-                )
-                msg = summary.content[0].text
-            except Exception:
-                msg = "Work is complete, sir."
-
-            try:
-                audio = await synthesize_speech(msg)
-                if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {msg}")
-            except Exception:
-                pass
-    except Exception as e:
-        log.error(f"Background work failed: {e}")
+    await _self_work_and_notify(session, prompt, ws, anthropic_client=anthropic_client)
 
 
 # Smart greeting — track last greeting to avoid re-greeting on reconnect
