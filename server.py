@@ -47,11 +47,11 @@ from action_handlers import (
 )
 from actions import (
     _generate_project_name,
-    open_browser,
 )
 from api_control import build_control_router
 from api_core import build_core_router
 from api_settings import build_settings_router
+from context_cache import start_context_refresh
 from dispatch import (
     execute_prompt_project,
     execute_research,
@@ -90,7 +90,6 @@ from memory import (
 from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from qa import QAAgent
-from screen import format_windows_for_context
 from suggestions import suggest_followup
 from task_manager import ClaudeTaskManager
 from tracking import SuccessTracker
@@ -286,89 +285,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
 _last_greeting_time: float = 0
 
 
-def _refresh_context_sync():
-    """Run in a SEPARATE THREAD — refreshes screen/calendar/mail context.
-
-    This runs completely off the async event loop so it never blocks responses.
-    """
-    import threading
-
-    def _worker():
-        while True:
-            try:
-                # Screen — fast
-                try:
-                    proc = __import__("subprocess").run(
-                        [
-                            "osascript",
-                            "-e",
-                            """
-set windowList to ""
-tell application "System Events"
-    set frontApp to name of first application process whose frontmost is true
-    set visibleApps to every application process whose visible is true
-    repeat with proc in visibleApps
-        set appName to name of proc
-        try
-            set winCount to count of windows of proc
-            if winCount > 0 then
-                repeat with w in (windows of proc)
-                    try
-                        set winTitle to name of w
-                        if winTitle is not "" and winTitle is not missing value then
-                            set windowList to windowList & appName & "|||" & winTitle & "|||" & (appName = frontApp) & linefeed
-                        end if
-                    end try
-                end repeat
-            end if
-        end try
-    end repeat
-end tell
-return windowList
-""",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    if proc.returncode == 0 and proc.stdout.strip():
-                        windows = []
-                        for line in proc.stdout.strip().split("\n"):
-                            parts = line.strip().split("|||")
-                            if len(parts) >= 3:
-                                windows.append(
-                                    {
-                                        "app": parts[0].strip(),
-                                        "title": parts[1].strip(),
-                                        "frontmost": parts[2].strip().lower() == "true",
-                                    }
-                                )
-                        if windows:
-                            _ctx_cache["screen"] = format_windows_for_context(windows)
-                except Exception:
-                    pass
-
-            except Exception as e:
-                log.debug(f"Context thread error: {e}")
-
-            # Weather — refresh every loop (30s is fine, API is fast)
-            try:
-                import json as _json
-                import urllib.request
-
-                url = "https://api.open-meteo.com/v1/forecast?latitude=27.77&longitude=-82.64&current=temperature_2m,weathercode&temperature_unit=fahrenheit"
-                with urllib.request.urlopen(url, timeout=3) as resp:
-                    d = _json.loads(resp.read()).get("current", {})
-                    temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
-            except Exception:
-                pass
-
-            time.sleep(30)
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    log.info("Context refresh thread started")
+# Context refresh thread — see context_cache.start_context_refresh.
 
 
 _AUTH_TOKEN: str = ""
@@ -420,7 +337,7 @@ async def lifespan(application: FastAPI):
     cached_projects = []
 
     # Start context refresh in a separate thread (never touches event loop)
-    _refresh_context_sync()
+    start_context_refresh(_ctx_cache)
 
     # Start MC daemon if MC is reachable
     if await mc_client.is_healthy():
@@ -550,126 +467,6 @@ async def _do_mail_lookup() -> str:
 
 async def _do_screen_lookup() -> str:
     return await do_screen_lookup(anthropic_client)
-
-
-async def handle_browse(text: str, target: str) -> str:
-    """Open a URL directly or search. Smart about detecting URLs in speech."""
-    import re
-    from urllib.parse import quote
-
-    browser = "firefox" if "firefox" in text.lower() else "chrome"
-
-    # 1. Try to find a URL or domain in the text
-    # Match things like "joetmd.com", "google.com/maps", "https://example.com"
-    url_pattern = r"(?:https?://)?(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z]{2,})+(?:/[^\s]*)?)"
-    url_match = re.search(url_pattern, text, re.IGNORECASE)
-
-    if url_match:
-        domain = url_match.group(0)
-        if not domain.startswith("http"):
-            domain = "https://" + domain
-        await open_browser(domain, browser)
-        return f"Opened {url_match.group(0)}, sir."
-
-    # 2. Check for spoken domains that speech-to-text mangled
-    # "Joe tmd.com" → "joetmd.com", "roofo.co" etc.
-    # Try joining words that end/start with a dot pattern
-    words = text.split()
-    for _i, word in enumerate(words):
-        # Look for word ending with common TLD
-        if re.search(r"\.(com|co|io|ai|org|net|dev|app)$", word, re.IGNORECASE):
-            # This word IS a domain — might have spaces before it
-            domain = word
-            # Check if previous word should be joined (e.g., "Joe tmd.com" → "joetmd.com" is tricky)
-            if not domain.startswith("http"):
-                domain = "https://" + domain
-            await open_browser(domain, browser)
-            return f"Opened {word}, sir."
-
-    # 3. Fall back to Google search with cleaned query
-    query = target
-    for prefix in [
-        "search for",
-        "look up",
-        "google",
-        "find me",
-        "pull up",
-        "open chrome",
-        "open firefox",
-        "open browser",
-        "go to",
-        "can you",
-        "in the browser",
-        "can you go to",
-        "please",
-    ]:
-        query = query.lower().replace(prefix, "").strip()
-    # Remove filler words
-    query = re.sub(r"\b(can|you|the|in|to|a|an|for|me|my|please)\b", "", query).strip()
-    query = re.sub(r"\s+", " ", query).strip()
-
-    if not query:
-        query = target
-
-    url = f"https://www.google.com/search?q={quote(query)}"
-    await open_browser(url, browser)
-    return "Searching for that, sir."
-
-
-async def handle_research(text: str, target: str, client: anthropic.AsyncAnthropic) -> str:
-    """Deep research with Opus — write results to HTML, open in browser."""
-    try:
-        research_response = await client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2000,
-            system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
-            messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
-        )
-        research_text = research_response.content[0].text
-
-        import html as _html
-
-        html_content = f"""<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<title>JARVIS Research: {_html.escape(target[:60])}</title>
-<style>
-body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #0a0a0a; color: #e0e0e0; line-height: 1.7; }}
-h1 {{ color: #0ea5e9; font-size: 1.4em; border-bottom: 1px solid #222; padding-bottom: 10px; }}
-h2 {{ color: #38bdf8; font-size: 1.1em; margin-top: 24px; }}
-a {{ color: #0ea5e9; }}
-pre {{ background: #111; padding: 12px; border-radius: 6px; overflow-x: auto; }}
-code {{ background: #111; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
-blockquote {{ border-left: 3px solid #0ea5e9; margin-left: 0; padding-left: 16px; color: #aaa; }}
-</style>
-</head><body>
-<h1>Research: {_html.escape(target[:80])}</h1>
-<div>{research_text.replace(chr(10), "<br>")}</div>
-<hr style="border-color:#222;margin-top:40px">
-<p style="color:#555;font-size:0.8em">Researched by JARVIS using Claude Opus &bull; {datetime.now().strftime("%B %d, %Y %I:%M %p")}</p>
-</body></html>"""
-
-        results_file = Path.home() / "Desktop" / ".jarvis_research.html"
-        results_file.write_text(html_content)
-
-        browser_name = "firefox" if "firefox" in text.lower() else "chrome"
-        await open_browser(f"file://{results_file}", browser_name)
-
-        # Short voice summary via Haiku
-        summary = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=80,
-            system="Summarize this research in ONE sentence for voice. No markdown.",
-            messages=[{"role": "user", "content": research_text[:2000]}],
-        )
-        return summary.content[0].text + " Full results are in your browser, sir."
-
-    except Exception as e:
-        log.error(f"Research failed: {e}")
-        from urllib.parse import quote
-
-        await open_browser(f"https://www.google.com/search?q={quote(target)}")
-        return "Pulled up a search for that, sir."
 
 
 # -- Session Summary (Three-Tier Memory) -----------------------------------

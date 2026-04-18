@@ -36,6 +36,7 @@ ignore = [
 "server.py" = ["S603", "S607", "E402", "S110", "SIM105", "E701", "E702", "S310", "S606"]
 # AppleScript integration files: subprocess calls, resilient try-except-pass
 "actions.py" = ["S603", "S607", "S110"]
+"context_cache.py" = ["S603", "S607"]
 "calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
 "mail_access.py" = ["S603", "S607", "S110"]
 "notes_access.py" = ["S603", "S607", "S110"]
