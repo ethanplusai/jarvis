@@ -7,12 +7,15 @@ here append to it.
 """
 
 import asyncio
+import logging
 import os
 import time
 from pathlib import Path
 
 from actions import _generate_project_name, open_browser, open_terminal
 from sanitize import DANGEROUS_FLAG, escape_shell_in_applescript
+
+log = logging.getLogger("jarvis.action_handlers")
 
 recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
 
@@ -49,6 +52,27 @@ async def handle_build(target: str) -> str:
 
     recently_built.append({"name": name, "path": path, "time": time.time()})
     return f"On it, sir. Claude Code is working in {name}."
+
+
+async def execute_browse(target: str) -> None:
+    """Execute a browse action from an LLM-embedded [ACTION:BROWSE] tag."""
+    try:
+        if target.startswith("http") or "." in target.split()[0]:
+            await open_browser(target)
+        else:
+            from urllib.parse import quote
+
+            await open_browser(f"https://www.google.com/search?q={quote(target)}")
+    except Exception as e:
+        log.error(f"Browse execution failed: {e}")
+
+
+async def execute_open_terminal() -> None:
+    """Execute an open-terminal action from an LLM-embedded [ACTION:OPEN_TERMINAL] tag."""
+    try:
+        await handle_open_terminal()
+    except Exception as e:
+        log.error(f"Open terminal failed: {e}")
 
 
 async def handle_show_recent() -> str:

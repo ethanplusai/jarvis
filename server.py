@@ -39,7 +39,12 @@ from pydantic import BaseModel
 
 from ab_testing import ABTester
 from action_handlers import (
-    handle_build,
+    execute_browse as _execute_browse,
+)
+from action_handlers import (
+    execute_open_terminal as _execute_open_terminal,
+)
+from action_handlers import (
     handle_open_terminal,
     handle_show_recent,
     recently_built,
@@ -262,27 +267,6 @@ async def scan_projects() -> list[dict]:
     return projects
 
 
-async def _execute_build(target: str):
-    """Execute a build action from an LLM-embedded [ACTION:BUILD] tag."""
-    try:
-        await handle_build(target)
-    except Exception as e:
-        log.error(f"Build execution failed: {e}")
-
-
-async def _execute_browse(target: str):
-    """Execute a browse action from an LLM-embedded [ACTION:BROWSE] tag."""
-    try:
-        if target.startswith("http") or "." in target.split()[0]:
-            await open_browser(target)
-        else:
-            from urllib.parse import quote
-
-            await open_browser(f"https://www.google.com/search?q={quote(target)}")
-    except Exception as e:
-        log.error(f"Browse execution failed: {e}")
-
-
 async def _execute_research(target: str, ws=None):
     """Execute research via claude -p in background. Opens report and speaks when done."""
     try:
@@ -397,14 +381,6 @@ end tell
         await asyncio.wait_for(proc.communicate(), timeout=5)
     except Exception:
         pass
-
-
-async def _execute_open_terminal():
-    """Execute an open-terminal action from an LLM-embedded [ACTION:OPEN_TERMINAL] tag."""
-    try:
-        await handle_open_terminal()
-    except Exception as e:
-        log.error(f"Open terminal failed: {e}")
 
 
 def _find_project_dir(project_name: str) -> str | None:
