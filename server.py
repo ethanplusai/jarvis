@@ -45,16 +45,6 @@ from dispatch import (
     self_work_and_notify as _self_work_and_notify,
 )
 from dispatch_registry import DispatchRegistry
-from embedded_actions import (
-    default_response_for as default_action_response,
-)
-from embedded_actions import (
-    dispatch as dispatch_embedded_action,
-)
-from embedded_actions import (
-    is_injected as is_action_injected,
-)
-from fast_action_handlers import handle_fast_action
 from fast_actions import detect_action_fast  # noqa: F401 — re-exported for tests
 from formatting import (
     apply_speech_corrections,  # noqa: F401 — re-exported for tests
@@ -96,6 +86,7 @@ from usage import (
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
 )
+from voice_chat_mode import handle_chat_message
 from voice_planning import handle_planning_message
 from voice_work_mode import handle_work_mode_message
 from work_mode import WorkSession, is_casual_question
@@ -522,61 +513,34 @@ async def voice_handler(ws: WebSocket):
 
                 # ── CHAT MODE: fast keyword detection + Haiku ──
                 else:
-                    action = detect_action_fast(user_text)
 
-                    if action:
-                        response_text = await handle_fast_action(
-                            action,
-                            ws=ws,
-                            history=history,
-                            voice_state=voice_state,
-                            dispatch_registry=dispatch_registry,
-                            lookup_and_report=_lookup_and_report,
-                            do_screen_lookup=_do_screen_lookup,
-                            do_calendar_lookup=_do_calendar_lookup,
-                            do_mail_lookup=_do_mail_lookup,
-                        )
-                    else:
-                        if not anthropic_client:
-                            response_text = "API key not configured."
-                        else:
-                            response_text = await generate_response(
-                                user_text,
-                                anthropic_client,
-                                task_manager,
-                                cached_projects,
-                                history,
-                                last_response=last_jarvis_response,
-                                session_summary=memory.summary,
-                            )
+                    async def _chat_generate(
+                        text,
+                        _ac=anthropic_client,
+                        _cp=cached_projects,
+                        **kwargs,
+                    ):
+                        return await generate_response(text, _ac, task_manager, _cp, history, **kwargs)
 
-                            # Check for action tags embedded in LLM response
-                            clean_response, embedded_action = extract_action(response_text)
-                            if embedded_action and is_action_injected(embedded_action, _ctx_cache):
-                                log.warning(
-                                    f"Blocked potentially injected action from untrusted context: "
-                                    f"[ACTION:{embedded_action['action'].upper()}]"
-                                )
-                                embedded_action = None
-                            if embedded_action:
-                                log.info(f"LLM embedded action: {embedded_action}")
-                                response_text = clean_response
-                                if not response_text.strip():
-                                    response_text = default_action_response(
-                                        embedded_action["action"], embedded_action["target"]
-                                    )
-                                await dispatch_embedded_action(
-                                    embedded_action,
-                                    ws=ws,
-                                    work_session=work_session,
-                                    history=history,
-                                    voice_state=voice_state,
-                                    dispatch_registry=dispatch_registry,
-                                    execute_prompt_project=_execute_prompt_project,
-                                    self_work_and_notify=self_work_and_notify,
-                                    lookup_and_report=_lookup_and_report,
-                                    do_screen_lookup=_do_screen_lookup,
-                                )
+                    response_text = await handle_chat_message(
+                        user_text,
+                        ws=ws,
+                        work_session=work_session,
+                        history=history,
+                        voice_state=voice_state,
+                        ctx_cache=_ctx_cache,
+                        anthropic_client=anthropic_client,
+                        dispatch_registry=dispatch_registry,
+                        last_jarvis_response=last_jarvis_response,
+                        session_summary=memory.summary,
+                        generate_response=_chat_generate,
+                        execute_prompt_project=_execute_prompt_project,
+                        self_work_and_notify=self_work_and_notify,
+                        lookup_and_report=_lookup_and_report,
+                        do_screen_lookup=_do_screen_lookup,
+                        do_calendar_lookup=_do_calendar_lookup,
+                        do_mail_lookup=_do_mail_lookup,
+                    )
 
                 # Update history + three-tier memory, schedule rolling summary refresh
                 memory.record(user_text, response_text, history)
