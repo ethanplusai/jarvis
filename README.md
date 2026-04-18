@@ -97,6 +97,62 @@ daemon to execute it. Agent reports come back through MC's inbox, and JARVIS spe
 - Mission Control UI: http://localhost:3000
 - JARVIS UI: http://localhost:5173
 
+**Setup:**
+
+```bash
+# 1. Clone Mission Control next to JARVIS
+git clone https://github.com/MeisnerDan/mission-control.git ~/IdeaProjects/mission-control
+cd ~/IdeaProjects/mission-control/mission-control
+
+# 2. Install dependencies
+pnpm install
+
+# 3. Copy env template — an API token will be auto-generated on first run
+cp .env.example .env
+```
+
+The `./jarvis` launcher will detect Mission Control at `~/IdeaProjects/mission-control/` and
+start it automatically alongside the JARVIS backend and frontend. It also starts MC's daemon
+process so tasks get dispatched to Claude Code.
+
+### MCP Server Configuration
+
+JARVIS spawns Claude Code sessions that can access MCP servers configured in a project-local
+`.mcp.json` file. This file is **gitignored** because it contains local paths — each machine
+needs its own.
+
+Create `.mcp.json` at the repo root with any MCP servers you want available:
+
+```json
+{
+  "mcpServers": {
+    "rick_mcp": {
+      "command": "/absolute/path/to/python",
+      "args": ["/absolute/path/to/your/mcp_server.py"]
+    }
+  }
+}
+```
+
+When JARVIS dispatches a Claude Code session from this directory, those MCP tools are
+automatically available. Mention the server by name in your prompt (e.g., "use the rick_mcp
+tools for this") and Claude will discover and invoke them.
+
+### Threat Model
+
+JARVIS is designed for **single-user, localhost-only** operation:
+
+- Server binds to `127.0.0.1` by default (set `--host 0.0.0.0` to expose, not recommended)
+- Bearer token auth regenerated on every startup, accessible only via same-origin `/auth/token`
+- CORS restricted to localhost origins
+- No rate limiting — anyone with the auth token has full API access
+- `ALLOW_DANGEROUS_PERMISSIONS=true` gives Claude Code full filesystem/shell access
+- `ALLOW_REMOTE_CONTROL=true` enables the `/api/restart` and `/api/fix-self` endpoints
+  (opt-in defense-in-depth even with valid auth)
+
+If you expose JARVIS beyond localhost, you are responsible for adding TLS, auth hardening,
+rate limiting, and network isolation.
+
 ## Configuration
 
 Edit your `.env` file:

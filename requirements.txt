@@ -6,3 +6,4 @@ pydantic==2.12.5
 websockets==16.0
 playwright==1.58.0
 pyyaml==6.0.3
+slowapi==0.1.9

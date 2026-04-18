@@ -1030,6 +1030,16 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="JARVIS Server", version="0.1.0", lifespan=lifespan)
 
+# Rate limiting — defense in depth. Single-user localhost means 60/min is generous.
+# If you expose JARVIS to a network, reduce this or add per-route limits.
+from slowapi import Limiter, _rate_limit_exceeded_handler  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+from slowapi.util import get_remote_address  # noqa: E402
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 _ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:8340",
