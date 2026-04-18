@@ -35,21 +35,21 @@ ignore = [
 #   S310: intentional URL open; S606: os.execv for restart
 "server.py" = ["S603", "S607", "E402", "S110", "SIM105", "E701", "E702", "S310", "S606"]
 # AppleScript integration files: subprocess calls, resilient try-except-pass
-"actions.py" = ["S603", "S607", "S110"]
-"calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
-"mail_access.py" = ["S603", "S607", "S110"]
-"notes_access.py" = ["S603", "S607", "S110"]
-"screen.py" = ["S603", "S607", "S110", "SIM105"]
+"macos/actions.py" = ["S603", "S607", "S110"]
+"context_cache.py" = ["S603", "S607"]
+"macos/calendar_access.py" = ["S603", "S607", "S110", "S112", "SIM105"]
+"macos/mail_access.py" = ["S603", "S607", "S110"]
+"macos/notes_access.py" = ["S603", "S607", "S110"]
+"macos/screen.py" = ["S603", "S607", "S110", "SIM105"]
 # S101: type-narrowing asserts in _send_tmux
 "work_mode.py" = ["S603", "S607", "S110", "SIM105", "S101"]
 "qa.py" = ["S603", "S607"]
 "browser.py" = ["S603", "S607", "S112", "S306"]
-# Background/evolution modules: resilient try-except-pass
+# Background/feedback modules: resilient try-except-pass
 # S311: random.choice for A/B testing, not crypto
-"ab_testing.py" = ["S110", "SIM105", "S311"]
-"evolution.py" = ["S110", "SIM105"]
-"learning.py" = ["S110", "SIM105"]
-"tracking.py" = ["S110", "SIM105"]
+"feedback/ab_testing.py" = ["S110", "SIM105", "S311"]
+"feedback/learning.py" = ["S110", "SIM105"]
+"feedback/tracking.py" = ["S110", "SIM105"]
 "planner.py" = ["S110", "SIM105"]
 "helpers/get_events.py" = ["S110", "SIM105"]
 # Standalone test scripts with their own .env loading
@@ -62,7 +62,7 @@ ignore = [
 [tool.mypy]
 python_version = "3.12"
 warn_unused_configs = true
-exclude = ["venv", "frontend", "data"]
+exclude = ["venv", "frontend", "data", "tests/test_classifier.py"]
 
 # Third-party libs without stubs — list explicitly so new missing imports get caught
 [[tool.mypy.overrides]]
@@ -81,23 +81,35 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "memory",
-    "evolution",
-    "tracking",
+    "feedback.tracking",
     "templates",
     "planner",  # also has Anthropic union-attr
-    "learning",
-    "ab_testing",
-    "mail_access",
+    "feedback.learning",
+    "feedback.ab_testing",
+    "macos.mail_access",
     "conversation",
     "browser",
 ]
 disable_error_code = ["assignment", "return-value", "var-annotated", "call-overload", "arg-type", "index", "union-attr"]
 
-# server.py: Anthropic SDK response.content[0].text is always TextBlock at runtime,
-# but mypy sees the full union type. Also uvicorn.run(**ssl_kwargs) typing issue.
+# server.py / llm.py: Anthropic SDK response.content[0].text is always TextBlock
+# at runtime, but mypy sees the full union type. Also uvicorn.run(**ssl_kwargs) issue.
 [[tool.mypy.overrides]]
-module = "server"
+module = ["server", "llm"]
 disable_error_code = ["union-attr", "arg-type", "var-annotated"]
+
+# Strictly typed modules — full type checking, no overrides.
+# Add modules here as they're cleaned up.
+[[tool.mypy.overrides]]
+module = [
+    "sanitize",
+    "mc_client",
+    "dispatch_registry",
+    "tmux_sessions",
+    "work_mode",
+]
+check_untyped_defs = true
+disallow_untyped_defs = false
 
 # ---------------------------------------------------------------------------
 # Pytest

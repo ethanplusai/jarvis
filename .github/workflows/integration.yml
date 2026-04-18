@@ -1,0 +1,73 @@
+name: Integration (Live Mission Control)
+
+# Catches schema drift between JARVIS and Mission Control.
+# Runs nightly at 9am UTC. Requires ANTHROPIC_API_KEY in repo secrets.
+# Manual trigger: Actions tab → Integration → Run workflow.
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: JARVIS ↔ Mission Control integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install JARVIS Python deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Clone Mission Control
+        run: |
+          git clone https://github.com/MeisnerDan/mission-control.git ~/mission-control
+          cd ~/mission-control/mission-control && pnpm install
+
+      - name: Configure Mission Control
+        run: |
+          cd ~/mission-control/mission-control
+          cp .env.example .env
+          # Ensure MC daemon can auth Claude Code (if this CI ever tries to spawn claude)
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
+
+      - name: Start Mission Control
+        run: |
+          cd ~/mission-control/mission-control
+          pnpm dev > /tmp/mc.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:3000/api/server-status > /dev/null 2>&1; then
+              echo "MC ready after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MC failed to start — last 50 log lines:"
+          tail -50 /tmp/mc.log
+          exit 1
+
+      - name: Run integration tests against live MC
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FISH_API_KEY: dummy-fish-key-not-used-in-integration-tests
+        run: python -m pytest tests/test_mc_integration.py -v -m requires_mc
+
+      - name: Upload MC logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-logs
+          path: /tmp/mc.log

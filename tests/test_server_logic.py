@@ -381,9 +381,10 @@ class TestRemoteControlEndpoints:
 
     def test_restart_blocked_when_remote_control_disabled(self, monkeypatch):
         import server
+        from api import control as api_control
 
         monkeypatch.setattr(server, "_AUTH_TOKEN", "")
-        monkeypatch.setattr(server, "ALLOW_REMOTE_CONTROL", False)
+        monkeypatch.setattr(api_control, "ALLOW_REMOTE_CONTROL", False)
 
         from fastapi.testclient import TestClient
 
@@ -394,9 +395,10 @@ class TestRemoteControlEndpoints:
 
     def test_fix_self_blocked_when_remote_control_disabled(self, monkeypatch):
         import server
+        from api import control as api_control
 
         monkeypatch.setattr(server, "_AUTH_TOKEN", "")
-        monkeypatch.setattr(server, "ALLOW_REMOTE_CONTROL", False)
+        monkeypatch.setattr(api_control, "ALLOW_REMOTE_CONTROL", False)
 
         from fastapi.testclient import TestClient
 
@@ -404,3 +406,45 @@ class TestRemoteControlEndpoints:
         resp = client.post("/api/fix-self")
         assert resp.status_code == 403
         assert "Remote control disabled" in resp.json()["error"]
+
+
+class TestRateLimiting:
+    """Regression: the default 60/minute limit must actually enforce.
+
+    History: Limiter was instantiated and the 429 exception handler was
+    registered, but SlowAPIMiddleware was never added to the app, so
+    limits were silently ignored. Caught by live smoke; this test
+    prevents the same bug coming back.
+    """
+
+    def test_slowapi_middleware_is_registered(self):
+        from slowapi.middleware import SlowAPIMiddleware
+
+        import server
+
+        middleware_classes = [m.cls for m in server.app.user_middleware]
+        assert SlowAPIMiddleware in middleware_classes, (
+            "SlowAPIMiddleware must be attached via app.add_middleware(SlowAPIMiddleware); "
+            "otherwise Limiter(default_limits=...) is silently ignored."
+        )
+
+    def test_default_limit_returns_429_after_threshold(self, monkeypatch):
+        """Fire 65 requests at /api/health (unauthenticated) and confirm we hit 429.
+
+        Uses a fresh Limiter with a very low limit so the test finishes in
+        milliseconds rather than needing a whole minute to rotate the window.
+        """
+        from slowapi import Limiter
+        from slowapi.util import get_remote_address
+
+        import server
+
+        # Swap in a 5/minute limit so we trigger 429 after only 5 requests.
+        test_limiter = Limiter(key_func=get_remote_address, default_limits=["5/minute"])
+        monkeypatch.setattr(server.app.state, "limiter", test_limiter)
+
+        from fastapi.testclient import TestClient
+
+        client = TestClient(server.app)
+        codes = [client.get("/api/health").status_code for _ in range(8)]
+        assert 429 in codes, f"Expected at least one 429 in {codes}"

@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from feedback.tracking import SuccessTracker
 from qa import MAX_RETRIES, QAAgent, QAResult
-from tracking import SuccessTracker
 
 
 @pytest.fixture
@@ -219,7 +219,7 @@ async def test_full_feedback_loop_mocked(tracker):
 
 def test_ab_tracking_with_retry():
     """A/B experiments correctly track retried tasks."""
-    from ab_testing import ABTester
+    from feedback.ab_testing import ABTester
 
     tester = ABTester(db_path=":memory:")
 

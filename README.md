@@ -97,6 +97,62 @@ daemon to execute it. Agent reports come back through MC's inbox, and JARVIS spe
 - Mission Control UI: http://localhost:3000
 - JARVIS UI: http://localhost:5173
 
+**Setup:**
+
+```bash
+# 1. Clone Mission Control next to JARVIS
+git clone https://github.com/MeisnerDan/mission-control.git ~/IdeaProjects/mission-control
+cd ~/IdeaProjects/mission-control/mission-control
+
+# 2. Install dependencies
+pnpm install
+
+# 3. Copy env template — an API token will be auto-generated on first run
+cp .env.example .env
+```
+
+The `./jarvis` launcher will detect Mission Control at `~/IdeaProjects/mission-control/` and
+start it automatically alongside the JARVIS backend and frontend. It also starts MC's daemon
+process so tasks get dispatched to Claude Code.
+
+### MCP Server Configuration
+
+JARVIS spawns Claude Code sessions that can access MCP servers configured in a project-local
+`.mcp.json` file. This file is **gitignored** because it contains local paths — each machine
+needs its own.
+
+Create `.mcp.json` at the repo root with any MCP servers you want available:
+
+```json
+{
+  "mcpServers": {
+    "rick_mcp": {
+      "command": "/absolute/path/to/python",
+      "args": ["/absolute/path/to/your/mcp_server.py"]
+    }
+  }
+}
+```
+
+When JARVIS dispatches a Claude Code session from this directory, those MCP tools are
+automatically available. Mention the server by name in your prompt (e.g., "use the rick_mcp
+tools for this") and Claude will discover and invoke them.
+
+### Threat Model
+
+JARVIS is designed for **single-user, localhost-only** operation:
+
+- Server binds to `127.0.0.1` by default (set `--host 0.0.0.0` to expose, not recommended)
+- Bearer token auth regenerated on every startup, accessible only via same-origin `/auth/token`
+- CORS restricted to localhost origins
+- No rate limiting — anyone with the auth token has full API access
+- `ALLOW_DANGEROUS_PERMISSIONS=true` gives Claude Code full filesystem/shell access
+- `ALLOW_REMOTE_CONTROL=true` enables the `/api/restart` and `/api/fix-self` endpoints
+  (opt-in defense-in-depth even with valid auth)
+
+If you expose JARVIS beyond localhost, you are responsible for adding TLS, auth hardening,
+rate limiting, and network isolation.
+
 ## Configuration
 
 Edit your `.env` file:
@@ -133,15 +189,15 @@ Microphone -> Web Speech API -> WebSocket -> FastAPI -> Claude (Haiku) -> Fish A
                                         (Calendar, Mail, Notes, Terminal)
 ```
 
-| Layer         | Technology                                  |
-|---------------|---------------------------------------------|
-| Backend       | FastAPI + Python (`server.py`, ~2300 lines) |
-| Frontend      | Vite + TypeScript + Three.js                |
-| Communication | WebSocket (JSON messages + binary audio)    |
-| AI (fast)     | Claude Haiku -- low-latency voice responses |
-| AI (deep)     | Claude Opus -- research and complex tasks   |
-| TTS           | Fish Audio with JARVIS voice model          |
-| System        | AppleScript for all macOS integrations      |
+| Layer         | Technology                                                                 |
+|---------------|----------------------------------------------------------------------------|
+| Backend       | FastAPI + Python — `server.py` (~640 lines) + `voice/`, `api/`, `macos/`, `feedback/` packages |
+| Frontend      | Vite + TypeScript + Three.js                                               |
+| Communication | WebSocket (JSON messages + binary audio)                                   |
+| AI (fast)     | Claude Haiku — low-latency voice responses                                 |
+| AI (deep)     | Claude Opus — research and complex tasks                                   |
+| TTS           | Fish Audio with JARVIS voice model                                         |
+| System        | AppleScript for all macOS integrations                                     |
 
 ## How the Voice Loop Works
 
@@ -158,19 +214,23 @@ Microphone -> Web Speech API -> WebSocket -> FastAPI -> Claude (Haiku) -> Fish A
 
 ## Key Files
 
-| File                    | Purpose                                              |
-|-------------------------|------------------------------------------------------|
-| `server.py`             | Main server -- WebSocket handler, LLM, action system |
-| `frontend/src/orb.ts`   | Three.js particle orb visualization                  |
-| `frontend/src/voice.ts` | Web Speech API + audio playback                      |
-| `frontend/src/main.ts`  | Frontend state machine                               |
-| `memory.py`             | SQLite memory system with FTS5 full-text search      |
-| `calendar_access.py`    | Apple Calendar integration via AppleScript           |
-| `mail_access.py`        | Apple Mail integration (read-only)                   |
-| `notes_access.py`       | Apple Notes integration                              |
-| `actions.py`            | System actions (Terminal, Chrome, Claude Code)       |
-| `browser.py`            | Playwright web automation                            |
-| `work_mode.py`          | Persistent Claude Code sessions                      |
+| File / Package                    | Purpose                                                                     |
+|-----------------------------------|-----------------------------------------------------------------------------|
+| `server.py`                       | FastAPI app, lifespan, WebSocket voice handler, app wiring                  |
+| `voice/`                          | Everything the voice handler calls — chat/work/planning mode helpers, fast action detection, embedded `[ACTION:*]` dispatch, background lookups, claude -p dispatch, TTS |
+| `api/`                            | REST router factories: `core`, `settings`, `control`                        |
+| `macos/`                          | AppleScript access: `calendar_access`, `mail_access`, `notes_access`, `screen`, `actions` |
+| `feedback/`                       | Task-outcome feedback loops: `SuccessTracker`, `ABTester`, `UsageLearner`   |
+| `llm.py`                          | Anthropic call + system prompt assembly                                     |
+| `planner.py`                      | Clarifying-question flow for complex tasks                                  |
+| `task_manager.py`                 | Background `claude -p` subprocess manager                                   |
+| `memory.py`                       | SQLite memory system with FTS5 full-text search                             |
+| `mc_client.py` / `mc_inbox.py`    | Mission Control REST client + inbox watcher                                 |
+| `work_mode.py`                    | Persistent Claude Code sessions (tmux)                                      |
+| `browser.py`                      | Playwright web automation                                                   |
+| `frontend/src/orb.ts`             | Three.js particle orb visualization                                         |
+| `frontend/src/voice.ts`           | Web Speech API + audio playback                                             |
+| `frontend/src/main.ts`            | Frontend state machine                                                      |
 | `planner.py`            | Multi-step task planning with smart questions        |
 
 ## Features in Detail
