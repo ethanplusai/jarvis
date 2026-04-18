@@ -31,9 +31,8 @@ from pathlib import Path
 
 import anthropic
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from ab_testing import ABTester
 from action_handlers import (
@@ -51,6 +50,7 @@ from actions import (
     open_browser,
 )
 from api_control import build_control_router
+from api_core import build_core_router
 from api_settings import build_settings_router
 from dispatch import (
     execute_prompt_project,
@@ -85,11 +85,8 @@ from mc_client import mc_client
 from memory import (
     create_note,
     extract_memories,
-    get_important_memories,
-    get_open_tasks,
     remember,
 )
-from models import TaskRequest
 from notes_access import create_apple_note, read_note
 from planner import BYPASS_PHRASES, TaskPlanner
 from qa import QAAgent
@@ -99,19 +96,10 @@ from task_manager import ClaudeTaskManager
 from tracking import SuccessTracker
 from tts import synthesize_speech
 from usage import (
-    SESSION_START as _session_start,
-)
-from usage import (
-    SESSION_TOKENS as _session_tokens,
-)
-from usage import (
     append_usage_entry as _append_usage_entry,  # noqa: F401
 )
 from usage import (
     cost_from_tokens as _cost_from_tokens,  # noqa: F401
-)
-from usage import (
-    get_usage_for_period as _get_usage_for_period,
 )
 from usage import (
     get_usage_summary,
@@ -505,101 +493,16 @@ async def get_auth_token():
     return {"token": _AUTH_TOKEN}
 
 
-# -- REST Endpoints --------------------------------------------------------
+# -- REST Endpoints — see api_core.py --------------------------------------
 
 
-@app.get("/api/health")
-async def health():
-    return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
-
-
-@app.get("/api/tts-test", dependencies=[Depends(require_auth)])
-async def tts_test():
-    """Generate a test audio clip for debugging."""
-    audio = await synthesize_speech("Testing audio, sir.")
-    if audio:
-        return {"audio": base64.b64encode(audio).decode()}
-    return {"audio": None, "error": "TTS failed"}
-
-
-@app.get("/api/usage", dependencies=[Depends(require_auth)])
-async def api_usage():
-    uptime = int(time.time() - _session_start)
-    today = _get_usage_for_period(86400)
-    week = _get_usage_for_period(86400 * 7)
-    month = _get_usage_for_period(86400 * 30)
-    all_time = _get_usage_for_period(None)
-    return {
-        "session": {**_session_tokens, "uptime_seconds": uptime},
-        "today": {**today, "cost_usd": round(_cost_from_tokens(today["input_tokens"], today["output_tokens"]), 4)},
-        "week": {**week, "cost_usd": round(_cost_from_tokens(week["input_tokens"], week["output_tokens"]), 4)},
-        "month": {**month, "cost_usd": round(_cost_from_tokens(month["input_tokens"], month["output_tokens"]), 4)},
-        "all_time": {
-            **all_time,
-            "cost_usd": round(_cost_from_tokens(all_time["input_tokens"], all_time["output_tokens"]), 4),
-        },
-    }
-
-
-@app.get("/api/tasks", dependencies=[Depends(require_auth)])
-async def api_list_tasks():
-    tasks = await task_manager.list_tasks()
-    return {"tasks": [t.to_dict() for t in tasks]}
-
-
-@app.get("/api/tasks/{task_id}", dependencies=[Depends(require_auth)])
-async def api_get_task(task_id: str):
-    task = await task_manager.get_status(task_id)
-    if not task:
-        return JSONResponse(status_code=404, content={"error": "Task not found"})
-    return {"task": task.to_dict()}
-
-
-@app.post("/api/tasks", dependencies=[Depends(require_auth)])
-async def api_create_task(req: TaskRequest):
-    try:
-        task_id = await task_manager.spawn(req.prompt, req.working_dir)
-        return {"task_id": task_id, "status": "spawned"}
-    except RuntimeError as e:
-        return JSONResponse(status_code=429, content={"error": str(e)})
-
-
-@app.delete("/api/tasks/{task_id}", dependencies=[Depends(require_auth)])
-async def api_cancel_task(task_id: str):
-    cancelled = await task_manager.cancel(task_id)
-    if not cancelled:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "Task not found or not cancellable"},
-        )
-    return {"task_id": task_id, "status": "cancelled"}
-
-
-@app.get("/api/projects", dependencies=[Depends(require_auth)])
-async def api_list_projects():
+async def _refresh_projects() -> list[dict]:
     global cached_projects
     cached_projects = await scan_projects()
-    return {"projects": cached_projects}
+    return cached_projects
 
 
-@app.get("/api/sessions", dependencies=[Depends(require_auth)])
-async def api_list_sessions():
-    sessions = await session_manager.list_sessions()
-    return {"sessions": sessions}
-
-
-@app.get("/api/memory", dependencies=[Depends(require_auth)])
-async def api_memory():
-    memories = get_important_memories(limit=20)
-    tasks = get_open_tasks()
-    return {"memories": memories, "tasks": tasks}
-
-
-@app.get("/api/dispatches", dependencies=[Depends(require_auth)])
-async def api_dispatches():
-    active = dispatch_registry.get_active()
-    recent = dispatch_registry.get_recent(limit=10)
-    return {"active": active, "recent": recent}
+app.include_router(build_core_router(require_auth, task_manager, dispatch_registry, _refresh_projects))
 
 
 # -- Fast Action Detection (no LLM call) -----------------------------------
