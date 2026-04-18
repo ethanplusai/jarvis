@@ -88,3 +88,30 @@ async def generate_response(
     except Exception as e:
         log.error(f"LLM error: {e}")
         return "Apologies, sir. I'm having trouble connecting to my language systems."
+
+
+async def update_session_summary(
+    old_summary: str,
+    rotated_messages: list[dict],
+    client: anthropic.AsyncAnthropic,
+) -> str:
+    """Background Haiku call to update the rolling session summary."""
+    prompt = f"""Update this conversation summary to include the new messages.
+
+Current summary: {old_summary or "(start of conversation)"}
+
+New messages to incorporate:
+{chr(10).join(f"{m['role']}: {m['content'][:200]}" for m in rotated_messages)}
+
+Write an updated summary in 2-4 sentences capturing the key topics, decisions, and context. Be concise."""
+
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        log.warning(f"Summary update failed: {e}")
+        return old_summary

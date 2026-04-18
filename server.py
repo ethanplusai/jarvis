@@ -70,7 +70,12 @@ from formatting import (
     strip_markdown_for_tts,
 )
 from learning import UsageLearner
-from llm import generate_response as _llm_generate_response
+from llm import (
+    generate_response as _llm_generate_response,
+)
+from llm import (
+    update_session_summary as _update_session_summary,
+)
 from lookups import (
     do_calendar_lookup,
     do_mail_lookup,
@@ -81,6 +86,7 @@ from lookups import (
     lookup_and_report as _lookup_and_report,
 )
 from mc_client import mc_client
+from mc_inbox import watch_inbox
 from memory import (
     create_note,
     extract_memories,
@@ -223,38 +229,7 @@ _last_greeting_time: float = 0
 _AUTH_TOKEN: str = ""
 
 
-async def _mc_inbox_watcher():
-    """Poll Mission Control inbox for new agent reports and notify the user."""
-    seen_ids: set[str] = set()
-    while True:
-        try:
-            await asyncio.sleep(15)
-            messages = await mc_client.list_inbox(agent="me", status="unread", limit=20)
-            for msg in messages:
-                msg_id = msg.get("id")
-                if not msg_id or msg_id in seen_ids:
-                    continue
-                seen_ids.add(msg_id)
-                msg_type = msg.get("type", "update")
-                sender = msg.get("from", "system")
-                subject = msg.get("subject", "(no subject)")
-                if msg_type == "report":
-                    log.info(f"[MC inbox] {sender} finished: {subject}")
-                    notification = f"Sir, {sender} finished: {subject}"
-                    await task_manager._notify(
-                        {"type": "mc_inbox", "from": sender, "subject": subject, "body": notification}
-                    )
-                elif msg_type == "question":
-                    log.info(f"[MC inbox] {sender} is asking: {subject}")
-                    await task_manager._notify(
-                        {"type": "mc_inbox", "from": sender, "subject": subject, "body": msg.get("body", "")[:200]}
-                    )
-                # Mark as read so we don't re-notify
-                await mc_client.mark_inbox_read(msg_id)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            log.debug(f"Inbox watcher error: {e}")
+# MC inbox watcher — see mc_inbox.watch_inbox.
 
 
 @asynccontextmanager
@@ -286,7 +261,7 @@ async def lifespan(application: FastAPI):
         log.info("Mission Control not reachable — tasks will use fallback dispatch")
 
     # Start MC inbox watcher (notifies user when MC agents finish tasks)
-    inbox_task = asyncio.create_task(_mc_inbox_watcher())
+    inbox_task = asyncio.create_task(watch_inbox(task_manager._notify))
 
     log.info("JARVIS server starting")
 
@@ -377,36 +352,6 @@ async def _do_mail_lookup() -> str:
 
 async def _do_screen_lookup() -> str:
     return await do_screen_lookup(anthropic_client)
-
-
-# -- Session Summary (Three-Tier Memory) -----------------------------------
-
-
-async def _update_session_summary(
-    old_summary: str,
-    rotated_messages: list[dict],
-    client: anthropic.AsyncAnthropic,
-) -> str:
-    """Background Haiku call to update the rolling session summary."""
-    prompt = f"""Update this conversation summary to include the new messages.
-
-Current summary: {old_summary or "(start of conversation)"}
-
-New messages to incorporate:
-{chr(10).join(f"{m['role']}: {m['content'][:200]}" for m in rotated_messages)}
-
-Write an updated summary in 2-4 sentences capturing the key topics, decisions, and context. Be concise."""
-
-    try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        log.warning(f"Summary update failed: {e}")
-        return old_summary  # Keep old summary on failure
 
 
 # -- WebSocket Voice Handler -----------------------------------------------
