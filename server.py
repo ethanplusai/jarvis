@@ -39,10 +39,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ab_testing import ABTester
+from action_handlers import (
+    handle_build,
+    handle_open_terminal,
+    handle_show_recent,
+    recently_built,
+)
 from actions import (
     _generate_project_name,
     open_browser,
-    open_terminal,
 )
 from calendar_access import (
     format_events_for_context,
@@ -176,7 +181,6 @@ task_manager = ClaudeTaskManager(
 )
 anthropic_client: anthropic.AsyncAnthropic | None = None
 cached_projects: list[dict] = []
-recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
 dispatch_registry = DispatchRegistry()
 
 # Background context cache — never blocks responses
@@ -929,70 +933,8 @@ def _scan_projects_sync() -> list[dict]:
 
 
 # -- Action Handlers -------------------------------------------------------
-
-
-async def handle_open_terminal() -> str:
-    result = await open_terminal(f"claude{DANGEROUS_FLAG}")
-    return result["confirmation"]
-
-
-async def handle_build(target: str) -> str:
-    name = _generate_project_name(target)
-    path = str(Path.home() / "Desktop" / name)
-    os.makedirs(path, exist_ok=True)
-
-    # Write CLAUDE.md with clear instructions
-    claude_md = Path(path) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{target}\n\nBuild this completely. If web app, make index.html work standalone.\n")
-
-    # Write prompt to a file, then pipe it to claude -p
-    # This avoids all shell escaping issues
-    prompt_file = Path(path) / ".jarvis_prompt.txt"
-    prompt_file.write_text(target)
-
-    script = (
-        'tell application "Terminal"\n'
-        "    activate\n"
-        f'    do script "cd {escape_shell_in_applescript(path)} && cat .jarvis_prompt.txt | claude -p{DANGEROUS_FLAG}"\n'
-        "end tell"
-    )
-    await asyncio.create_subprocess_exec(
-        "osascript",
-        "-e",
-        script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    recently_built.append({"name": name, "path": path, "time": time.time()})
-    return f"On it, sir. Claude Code is working in {name}."
-
-
-async def handle_show_recent() -> str:
-    if not recently_built:
-        return "Nothing built recently, sir."
-    last = recently_built[-1]
-    project_path = Path(last["path"])
-
-    # Try to find the best file to open
-    for name in ["report.html", "index.html"]:
-        f = project_path / name
-        if f.exists():
-            await open_browser(f"file://{f}")
-            return f"Opened {name} from {last['name']}, sir."
-
-    # Try any HTML file
-    html_files = list(project_path.glob("*.html"))
-    if html_files:
-        await open_browser(f"file://{html_files[0]}")
-        return f"Opened {html_files[0].name} from {last['name']}, sir."
-
-    # Fall back to opening the folder in Finder
-    script = f'tell application "Finder"\nactivate\nopen POSIX file "{last["path"]}"\nend tell'
-    await asyncio.create_subprocess_exec(
-        "osascript", "-e", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    return f"Opened the {last['name']} folder in Finder, sir."
+# handle_open_terminal / handle_build / handle_show_recent live in
+# action_handlers.py — imported at top of this module.
 
 
 # ---------------------------------------------------------------------------
