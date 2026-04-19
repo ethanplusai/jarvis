@@ -7,3 +7,18 @@ websockets==16.0
 playwright==1.58.0
 pyyaml==6.0.3
 slowapi==0.1.9
+
+# --- Voice recognition (resemblyzer) ---------------------------------------
+# Resemblyzer pulls librosa → numba → llvmlite → torch. On macOS x86_64 +
+# Python 3.12, the latest llvmlite has no wheel (tries to compile against
+# LLVM from source). Pinning to the last versions that ship prebuilt wheels
+# for this platform. torch 2.2.2 was compiled against numpy 1.x ABI, so
+# numpy<2 is required. webrtcvad (resemblyzer dep) uses the deprecated
+# pkg_resources API that setuptools>=81 removed, so setuptools<80.
+resemblyzer==0.1.4
+llvmlite==0.43.0
+numba==0.60.0
+librosa==0.10.2.post1
+numpy<2
+setuptools<80
+python-multipart==0.0.20   # FastAPI UploadFile — needed by /api/voice/enroll

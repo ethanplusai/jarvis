@@ -31,7 +31,7 @@ import anthropic
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import build_control_router, build_core_router, build_settings_router
+from api import build_control_router, build_core_router, build_settings_router, build_voice_router
 from context_cache import start_context_refresh
 from dispatch_registry import DispatchRegistry
 from feedback import ABTester, SuccessTracker, UsageLearner
@@ -557,6 +557,14 @@ app.include_router(build_settings_router(require_auth, FISH_VOICE_ID))
 
 
 app.include_router(build_control_router(require_auth, __file__))
+
+
+# ---------------------------------------------------------------------------
+# Voice ID endpoints (enroll, verify, status) — see api/voice.py
+# ---------------------------------------------------------------------------
+
+
+app.include_router(build_voice_router(require_auth))
 
 
 # ---------------------------------------------------------------------------
