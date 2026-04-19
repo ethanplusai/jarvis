@@ -50,6 +50,8 @@ ignore = [
 "feedback/ab_testing.py" = ["S110", "SIM105", "S311"]
 "feedback/learning.py" = ["S110", "SIM105"]
 "feedback/tracking.py" = ["S110", "SIM105"]
+# FastAPI's idiomatic dependency pattern (File(...), Form(...)) trips B008
+"api/voice.py" = ["B008"]
 "planner.py" = ["S110", "SIM105"]
 "helpers/get_events.py" = ["S110", "SIM105"]
 # Standalone test scripts with their own .env loading
@@ -73,6 +75,9 @@ module = [
     "uvicorn",
     "playwright.*",
     "yaml",
+    "resemblyzer",
+    "soundfile",
+    "librosa",
 ]
 ignore_missing_imports = true
 
