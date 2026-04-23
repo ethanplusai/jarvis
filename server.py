@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -1683,6 +1684,48 @@ return windowList
     log.info("Context refresh thread started")
 
 
+# Global registry of active WebSocket sessions — used by signal handler for clean shutdown
+_active_sessions: dict[str, dict] = {}
+
+
+async def _save_session(sid: str) -> None:
+    """Generate and persist a session summary. Called on clean disconnect and signal shutdown."""
+    data = _active_sessions.get(sid)
+    if not data:
+        return
+    buf = data.get("buffer", [])
+    client = data.get("client")
+    rolling_summary = data.get("summary", "")
+    msg_count = len(buf) // 2
+    if msg_count == 0:
+        return
+    final_summary = rolling_summary
+    if client:
+        try:
+            recent = buf[-30:]
+            convo_text = "\n".join(
+                f"{'User' if m['role'] == 'user' else 'JARVIS'}: {m['content'][:200]}"
+                for m in recent
+            )
+            resp = await client.messages.create(
+                model=FAST_MODEL,
+                max_tokens=250,
+                system=(
+                    "Summarise this JARVIS conversation in 2-3 sentences. "
+                    "Cover: main topics discussed, decisions made, tasks or projects started, "
+                    "anything personal the user shared. Be specific — names, numbers, and details matter. "
+                    "Write in third person past tense."
+                ),
+                messages=[{"role": "user", "content": convo_text}],
+            )
+            final_summary = resp.content[0].text.strip()
+        except Exception as e:
+            log.warning(f"Signal shutdown summary failed: {e}")
+    end_session(sid, final_summary, msg_count)
+    _active_sessions.pop(sid, None)
+    log.info(f"Session {sid} saved ({msg_count} exchanges)")
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global anthropic_client, cached_projects
@@ -1691,6 +1734,18 @@ async def lifespan(application: FastAPI):
     else:
         log.warning("ANTHROPIC_API_KEY not set — LLM features disabled")
     cached_projects = []
+
+    # Signal handlers — save all active sessions before process exits
+    loop = asyncio.get_event_loop()
+
+    async def _graceful_shutdown(signame: str) -> None:
+        log.info(f"Received {signame} — saving {len(_active_sessions)} active session(s)")
+        await asyncio.gather(*[_save_session(sid) for sid in list(_active_sessions)], return_exceptions=True)
+        log.info("All sessions saved. Shutting down.")
+        loop.stop()
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(_sig, lambda s=_sig.name: asyncio.create_task(_graceful_shutdown(s)))
 
     # Start context refresh in a separate thread (never touches event loop)
     _refresh_context_sync()
@@ -2392,6 +2447,13 @@ async def voice_handler(ws: WebSocket):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     start_session(session_id)
 
+    # Register with global session registry so signal handlers can save on hard kill
+    _active_sessions[session_id] = {
+        "buffer": session_buffer,
+        "client": anthropic_client,
+        "summary": session_summary,
+    }
+
     # Load cross-session memory once on connect — injected into every response
     prior_context = build_session_context()
 
@@ -2940,6 +3002,9 @@ async def voice_handler(ws: WebSocket):
                                 session_summary, rotated, anthropic_client
                             )
                             summary_update_pending = False
+                            # Keep registry in sync so signal handler has latest summary
+                            if session_id in _active_sessions:
+                                _active_sessions[session_id]["summary"] = session_summary
                         asyncio.create_task(_do_summary())
                     else:
                         summary_update_pending = False
@@ -3012,6 +3077,9 @@ async def voice_handler(ws: WebSocket):
             end_session(session_id, final_summary, msg_count)
         elif msg_count > 0:
             end_session(session_id, session_summary, msg_count)
+
+        # Deregister from global registry — session is saved, no longer needs signal protection
+        _active_sessions.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
