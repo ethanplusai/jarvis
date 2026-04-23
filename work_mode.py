@@ -53,13 +53,18 @@ class WorkSession:
         self._active = True
         self._message_count = 0
         self._status = "idle"
+        self._save_session()
         log.info(f"Work mode started: {self._project_name} ({working_dir})")
 
-    async def send(self, user_text: str) -> str:
+    async def send(self, user_text: str, memory_context: str = "") -> str:
         """Send a message to claude -p and get the full response.
 
         First message in a session: fresh claude -p
         Subsequent messages: claude -p --continue (resumes last session in dir)
+
+        Args:
+            user_text: The prompt/instruction to send.
+            memory_context: Optional memory/context preamble injected before the prompt.
         """
         claude_path = shutil.which("claude")
         if not claude_path:
@@ -77,6 +82,18 @@ class WorkSession:
 
         self._status = "working"
 
+        # Prepend memory context if provided, separated clearly so Claude Code
+        # treats it as background knowledge, not an instruction to repeat.
+        if memory_context:
+            full_prompt = (
+                "<!-- JARVIS CONTEXT: background knowledge for this session -->\n"
+                f"{memory_context}\n"
+                "<!-- END JARVIS CONTEXT -->\n\n"
+                f"{user_text}"
+            )
+        else:
+            full_prompt = user_text
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -86,18 +103,21 @@ class WorkSession:
                 cwd=self._working_dir,
             )
 
+            # Increased from 300s: complex builds (npm install + webpack + tests)
+            # routinely exceed 5 minutes. 15 minutes covers the vast majority.
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=user_text.encode()),
-                timeout=300,
+                process.communicate(input=full_prompt.encode("utf-8", errors="replace")),
+                timeout=900,
             )
 
-            response = stdout.decode().strip()
+            response = stdout.decode("utf-8", errors="replace").strip()
             self._message_count += 1
+            self._save_session()
             self._status = "done"
 
             if process.returncode != 0:
-                error = stderr.decode().strip()[:200]
-                log.error(f"claude -p error: {error}")
+                error = stderr.decode("utf-8", errors="replace").strip()[:200]
+                log.error(f"claude -p error (rc={process.returncode}): {error}")
                 self._status = "error"
                 return f"Hit a problem, sir: {error}"
 
@@ -105,11 +125,11 @@ class WorkSession:
             return response
 
         except asyncio.TimeoutError:
-            log.error("claude -p timed out after 300s")
+            log.error("claude -p timed out after 900s")
             self._status = "timeout"
             return "That's taking longer than expected, sir. The operation timed out."
         except Exception as e:
-            log.error(f"Work mode error: {e}")
+            log.error(f"Work mode error: {e}", exc_info=True)
             self._status = "error"
             return f"Something went wrong, sir: {str(e)[:100]}"
 
@@ -121,6 +141,7 @@ class WorkSession:
         self._project_name = None
         self._message_count = 0
         self._status = "idle"
+        self._clear_session()
         log.info(f"Work mode ended for {project}")
 
     def _save_session(self):

@@ -20,8 +20,7 @@ interface StatusResponse {
   uptime_seconds: number;
   env_keys_set: {
     anthropic: boolean;
-    fish_audio: boolean;
-    fish_voice_id: boolean;
+    edge_tts_voice: string;
     user_name: string;
   };
 }
@@ -39,7 +38,7 @@ interface PreferencesResponse {
 let panelEl: HTMLElement | null = null;
 let isOpen = false;
 let isFirstTimeSetup = false;
-let setupStep = 0; // 0=anthropic, 1=fish, 2=name, 3=done
+let setupStep = 0; // 0=anthropic, 1=name, 2=done
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -92,19 +91,18 @@ function buildPanelHTML(): string {
           </div>
 
           <div class="settings-field">
-            <label>Fish Audio API Key</label>
+            <label>Voice</label>
             <div class="settings-input-row">
-              <input type="password" id="input-fish-key" placeholder="Fish Audio key..." />
-              <button class="settings-btn" id="btn-test-fish">Test</button>
-              <span class="status-dot" id="status-fish"></span>
-            </div>
-          </div>
-
-          <div class="settings-field">
-            <label>Fish Voice ID</label>
-            <div class="settings-input-row">
-              <input type="text" id="input-fish-voice-id" placeholder="612b878b113047d9a770c069c8b4fdfe" />
-              <button class="settings-btn" id="btn-save-voice-id">Save</button>
+              <select id="input-edge-voice">
+                <option value="en-GB-RyanNeural">Ryan (British Male) — default</option>
+                <option value="en-GB-SoniaNeural">Sonia (British Female)</option>
+                <option value="en-GB-ThomasNeural">Thomas (British Male)</option>
+                <option value="en-US-GuyNeural">Guy (American Male)</option>
+                <option value="en-US-JennyNeural">Jenny (American Female)</option>
+                <option value="en-AU-WilliamNeural">William (Australian Male)</option>
+              </select>
+              <button class="settings-btn" id="btn-test-tts">Test</button>
+              <span class="status-dot" id="status-tts"></span>
             </div>
           </div>
 
@@ -216,7 +214,12 @@ async function loadStatus() {
 
     // API key status dots
     setDotStatus("status-anthropic", status.env_keys_set.anthropic ? "green" : "red");
-    setDotStatus("status-fish", status.env_keys_set.fish_audio ? "green" : "red");
+
+    // Pre-select current voice
+    const voiceEl = document.getElementById("input-edge-voice") as HTMLSelectElement;
+    if (voiceEl && status.env_keys_set.edge_tts_voice) {
+      voiceEl.value = status.env_keys_set.edge_tts_voice;
+    }
 
     // System info
     const memEl = document.getElementById("sysinfo-memory");
@@ -258,23 +261,15 @@ function wireEvents() {
   // Save keys
   document.getElementById("btn-save-keys")?.addEventListener("click", async () => {
     const anthropicKey = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
-    const fishKey = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
+    const voice = (document.getElementById("input-edge-voice") as HTMLSelectElement).value;
 
     if (anthropicKey) {
       await apiPost("/api/settings/keys", { key_name: "ANTHROPIC_API_KEY", key_value: anthropicKey });
     }
-    if (fishKey) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_API_KEY", key_value: fishKey });
+    if (voice) {
+      await apiPost("/api/settings/keys", { key_name: "EDGE_TTS_VOICE", key_value: voice });
     }
     await loadStatus();
-  });
-
-  // Save voice ID
-  document.getElementById("btn-save-voice-id")?.addEventListener("click", async () => {
-    const voiceId = (document.getElementById("input-fish-voice-id") as HTMLInputElement).value.trim();
-    if (voiceId) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_VOICE_ID", key_value: voiceId });
-    }
   });
 
   // Test Anthropic
@@ -289,15 +284,19 @@ function wireEvents() {
     }
   });
 
-  // Test Fish
-  document.getElementById("btn-test-fish")?.addEventListener("click", async () => {
-    setDotStatus("status-fish", "yellow");
-    const key = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
+  // Test TTS
+  document.getElementById("btn-test-tts")?.addEventListener("click", async () => {
+    // Save selected voice first, then test
+    const voice = (document.getElementById("input-edge-voice") as HTMLSelectElement).value;
+    if (voice) {
+      await apiPost("/api/settings/keys", { key_name: "EDGE_TTS_VOICE", key_value: voice });
+    }
+    setDotStatus("status-tts", "yellow");
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-fish", { key_value: key || undefined });
-      setDotStatus("status-fish", result.valid ? "green" : "red");
+      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-tts", {});
+      setDotStatus("status-tts", result.valid ? "green" : "red");
     } catch {
-      setDotStatus("status-fish", "red");
+      setDotStatus("status-tts", "red");
     }
   });
 
@@ -338,24 +337,22 @@ function showSetupStep(step: number) {
     const el = document.getElementById(id);
     if (!el) return;
     if (step === 0 && i === 0) el.style.display = "";
-    else if (step === 1 && i === 0) el.style.display = "";
-    else if (step === 2 && i === 2) el.style.display = "";
-    else if (step === 3) el.style.display = "";
+    else if (step === 1 && i === 2) el.style.display = "";
+    else if (step === 2) el.style.display = "";
     else el.style.display = "none";
   });
 
   const nextBtn = document.getElementById("btn-setup-next");
   if (nextBtn) {
-    if (step === 0) nextBtn.textContent = "Next: Test Keys";
-    else if (step === 1) nextBtn.textContent = "Next: Set Your Name";
-    else if (step === 2) nextBtn.textContent = "Finish Setup";
+    if (step === 0) nextBtn.textContent = "Next: Set Your Name";
+    else if (step === 1) nextBtn.textContent = "Finish Setup";
     else nextBtn.style.display = "none";
   }
 }
 
 async function advanceSetup() {
   setupStep++;
-  if (setupStep >= 3) {
+  if (setupStep >= 2) {
     // Done — save everything and close
     isFirstTimeSetup = false;
     const welcome = document.getElementById("settings-welcome");

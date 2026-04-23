@@ -15,9 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import os
+
 import anthropic
 
 from templates import TEMPLATES, get_template
+
+# Honour the same env vars as server.py so models stay in sync
+FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "claude-haiku-4-5-20251001")
 
 log = logging.getLogger("jarvis.planner")
 
@@ -129,7 +134,7 @@ async def _classify_planning_mode_llm(
     """Use Haiku to classify request and identify missing info."""
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=FAST_MODEL,
             max_tokens=400,
             system=(
                 "You analyze development requests to decide if they need planning.\n"
@@ -310,6 +315,18 @@ class Plan:
         if self.current_question_index < len(self.pending_questions):
             return self.pending_questions[self.current_question_index]
         return None
+
+    def to_dict(self) -> dict:
+        """Serialize plan to a structured dict for blueprint storage / sub-agent passing."""
+        return {
+            "task_type": self.task_type,
+            "original_request": self.original_request,
+            "project": self.project,
+            "project_path": self.project_path,
+            "answers": self.answers,
+            "confirmed": self.confirmed,
+            "skipped": self.skipped,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -614,8 +631,13 @@ class TaskPlanner:
         summary = " ".join(parts) + ". Shall I proceed, sir?"
         return summary
 
-    async def build_prompt(self) -> str:
-        """Build the structured claude -p prompt from the finalized plan."""
+    async def build_prompt(self, memory_context: str = "") -> str:
+        """Build the structured claude -p prompt from the finalized plan.
+
+        Args:
+            memory_context: Optional JARVIS memory context injected before instructions
+                            so Claude Code has user preferences / past decisions available.
+        """
         plan = self.active_plan
         if not plan:
             return ""
@@ -659,7 +681,42 @@ class TaskPlanner:
         if context_section:
             prompt += "\n\n" + context_section
 
+        # Prepend structured blueprint as a JSON block so sub-agents can parse it
+        blueprint_json = json.dumps(plan.to_dict(), indent=2)
+        blueprint_header = (
+            "<!-- JARVIS BLUEPRINT\n"
+            f"{blueprint_json}\n"
+            "END BLUEPRINT -->\n\n"
+        )
+        prompt = blueprint_header + prompt
+
+        # Prepend memory context if JARVIS has relevant memories for this task
+        if memory_context:
+            prompt = (
+                "<!-- JARVIS CONTEXT: user preferences and past decisions -->\n"
+                f"{memory_context}\n"
+                "<!-- END JARVIS CONTEXT -->\n\n"
+            ) + prompt
+
         return prompt
+
+    def write_blueprint(self, project_path: str) -> Optional[str]:
+        """Write the current plan as a JSON blueprint file in the project directory.
+
+        Returns the file path on success, None on failure.
+        This lets sub-agents read structured plan data independently.
+        """
+        plan = self.active_plan
+        if not plan:
+            return None
+        try:
+            bp_path = Path(project_path) / ".jarvis_blueprint.json"
+            bp_path.write_text(json.dumps(plan.to_dict(), indent=2))
+            log.info(f"Blueprint written to {bp_path}")
+            return str(bp_path)
+        except Exception as e:
+            log.warning(f"Failed to write blueprint: {e}")
+            return None
 
     def get_working_dir(self) -> str:
         """Get the working directory for the current plan."""
@@ -677,7 +734,7 @@ class TaskPlanner:
         """Use Haiku to classify request type and extract known info."""
         try:
             response = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=FAST_MODEL,
                 max_tokens=300,
                 system=(
                     "Classify this development request. Respond with JSON only, no markdown.\n"

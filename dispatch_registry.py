@@ -5,6 +5,7 @@ Persists to SQLite so JARVIS always knows what he's working on,
 what just finished, and what the user is likely referring to.
 """
 
+import json
 import logging
 import sqlite3
 import time
@@ -32,6 +33,7 @@ def init_dispatch_db():
             project_path TEXT NOT NULL,
             original_prompt TEXT NOT NULL,
             refined_prompt TEXT DEFAULT '',
+            blueprint TEXT DEFAULT '',
             status TEXT DEFAULT 'pending',
             claude_response TEXT DEFAULT '',
             summary TEXT DEFAULT '',
@@ -42,6 +44,12 @@ def init_dispatch_db():
         CREATE INDEX IF NOT EXISTS idx_dispatch_status ON dispatches(status);
         CREATE INDEX IF NOT EXISTS idx_dispatch_updated ON dispatches(updated_at DESC);
     """)
+    # Migrate existing tables that predate the blueprint column
+    try:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN blueprint TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
     conn.close()
 
 
@@ -73,7 +81,7 @@ class DispatchRegistry:
             conn.execute(
                 "UPDATE dispatches SET status=?, claude_response=?, summary=?, updated_at=?, "
                 "completed_at=? WHERE id=?",
-                (status, response[:5000], summary or "", now,
+                (status, response[:10000], summary or "", now,
                  now if status in ("completed", "failed", "timeout") else None,
                  dispatch_id)
             )
@@ -84,6 +92,17 @@ class DispatchRegistry:
             )
         conn.commit()
         conn.close()
+
+    def update_blueprint(self, dispatch_id: int, blueprint: dict):
+        """Store the structured plan/blueprint JSON for a dispatch."""
+        conn = _get_db()
+        conn.execute(
+            "UPDATE dispatches SET blueprint=?, updated_at=? WHERE id=?",
+            (json.dumps(blueprint), time.time(), dispatch_id)
+        )
+        conn.commit()
+        conn.close()
+        log.debug(f"Blueprint stored for dispatch #{dispatch_id}")
 
     def get_most_recent(self) -> dict | None:
         """Get the most recently updated dispatch."""

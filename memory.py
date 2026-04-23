@@ -12,10 +12,13 @@ so JARVIS gets smarter over time.
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "claude-haiku-4-5-20251001")
 
 log = logging.getLogger("jarvis.memory")
 
@@ -83,6 +86,28 @@ def init_db():
         CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(
             title, content, topic,
             content='notes', content_rowid='id'
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
+            content, session_id,
+            content='conversations', content_rowid='id'
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            summary TEXT DEFAULT '',
+            message_count INTEGER DEFAULT 0
         );
     """)
     conn.close()
@@ -317,12 +342,13 @@ def get_notes_by_topic(topic: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def build_memory_context(user_message: str) -> str:
-    """Build relevant context from memories, tasks, and notes for the LLM.
+    """Build relevant context from memories, tasks, and conversation history for the LLM.
 
-    Searches for relevant memories based on what the user is talking about.
+    Searches for relevant memories and past exchanges based on what the user is saying.
     Fast — runs FTS queries, no heavy computation.
     """
     parts = []
+    relevant = []
 
     # Always include: open high-priority tasks
     high_tasks = [t for t in get_open_tasks() if t["priority"] == "high"]
@@ -334,18 +360,33 @@ def build_memory_context(user_message: str) -> str:
 
     # Search memories relevant to what user is saying
     if len(user_message) > 5:
-        relevant = recall(user_message, limit=3)
+        relevant = recall(user_message, limit=4)
         if relevant:
             mem_lines = [f"  - [{m['type']}] {m['content']}" for m in relevant]
             parts.append("RELEVANT MEMORIES:\n" + "\n".join(mem_lines))
 
     # Recent important memories (always available)
-    important = get_important_memories(limit=3)
+    important = get_important_memories(limit=4)
     if important:
-        imp_lines = [f"  - {m['content']}" for m in important
-                     if not any(m["content"] == r["content"] for r in (relevant if 'relevant' in dir() else []))]
+        seen = {m["content"] for m in relevant}
+        imp_lines = [f"  - {m['content']}" for m in important if m["content"] not in seen]
         if imp_lines:
-            parts.append("KEY FACTS:\n" + "\n".join(imp_lines[:3]))
+            parts.append("KEY FACTS:\n" + "\n".join(imp_lines[:4]))
+
+    # Search past conversations for relevant exchanges
+    if len(user_message) > 10:
+        past = search_conversations(user_message, limit=3)
+        if past:
+            seen_content = {m["content"] for m in relevant}
+            past_lines = []
+            for c in past:
+                snippet = c["content"][:120].replace("\n", " ")
+                if snippet not in seen_content:
+                    dt = datetime.fromtimestamp(c["timestamp"]).strftime("%d %b")
+                    who = "You" if c["role"] == "user" else "JARVIS"
+                    past_lines.append(f"  - [{dt}] {who}: {snippet}")
+            if past_lines:
+                parts.append("RELEVANT PAST EXCHANGES:\n" + "\n".join(past_lines))
 
     return "\n\n".join(parts) if parts else ""
 
@@ -413,14 +454,23 @@ async def extract_memories(user_text: str, jarvis_response: str, anthropic_clien
 
     try:
         response = await anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            model=FAST_MODEL,
+            max_tokens=400,
             system=(
-                "Extract facts worth remembering from this conversation. "
-                "Only extract CONCRETE facts: preferences, decisions, names, dates, plans, goals. "
-                "NOT opinions, greetings, or casual chat. "
-                "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10}] "
-                "Return [] if nothing worth remembering. Be very selective."
+                "You are a memory extraction engine for JARVIS, an AI assistant. "
+                "Extract every fact worth remembering from this conversation exchange. "
+                "Be thorough — capture:\n"
+                "- Personal facts: name, location, job, family, finances, health\n"
+                "- Preferences: likes, dislikes, habits, routines, communication style\n"
+                "- Projects: what's being built, tech stack, status, goals\n"
+                "- Decisions: choices made, approaches agreed on\n"
+                "- Goals & plans: short and long-term intentions\n"
+                "- People mentioned: names, roles, relationships\n"
+                "- Recurring topics: anything the user cares deeply about\n"
+                "Do NOT extract greetings, filler, or things already universally known. "
+                "Return a JSON array: [{\"type\": \"fact|preference|project|person|decision|goal\", "
+                "\"content\": \"concise statement of the fact\", \"importance\": 1-10}]. "
+                "Return [] only if truly nothing notable was said. Importance 8-10 for personal/financial/health facts."
             ),
             messages=[{"role": "user", "content": f"User: {user_text}\nJARVIS: {jarvis_response}"}],
         )
@@ -444,6 +494,133 @@ async def extract_memories(user_text: str, jarvis_response: str, anthropic_clien
         log.debug(f"Memory extraction failed: {e}")
 
     return []
+
+
+# ---------------------------------------------------------------------------
+# Conversation log — every exchange persisted across sessions
+# ---------------------------------------------------------------------------
+
+def log_message(session_id: str, role: str, content: str) -> None:
+    """Append a single message to the persistent conversation log."""
+    conn = _get_db()
+    cur = conn.execute(
+        "INSERT INTO conversations (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+        (session_id, role, content, time.time())
+    )
+    conn.execute(
+        "INSERT INTO conversation_fts (rowid, content, session_id) VALUES (?,?,?)",
+        (cur.lastrowid, content, session_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def search_conversations(query: str, limit: int = 5) -> list[dict]:
+    """Full-text search across all logged conversation messages."""
+    fts_query = _sanitize_fts_query(query)
+    if not fts_query:
+        return []
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT c.session_id, c.role, c.content, c.timestamp "
+            "FROM conversation_fts f "
+            "JOIN conversations c ON c.id = f.rowid "
+            "WHERE conversation_fts MATCH ? "
+            "ORDER BY c.timestamp DESC LIMIT ?",
+            (fts_query, limit)
+        ).fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Session tracking — summaries persisted across server restarts
+# ---------------------------------------------------------------------------
+
+def start_session(session_id: str) -> None:
+    """Record the start of a new JARVIS session."""
+    conn = _get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions (session_id, started_at) VALUES (?,?)",
+        (session_id, time.time())
+    )
+    conn.commit()
+    conn.close()
+    log.info(f"Session started: {session_id}")
+
+
+def end_session(session_id: str, summary: str = "", message_count: int = 0) -> None:
+    """Record session end with a Haiku-generated summary."""
+    conn = _get_db()
+    conn.execute(
+        "UPDATE sessions SET ended_at=?, summary=?, message_count=? WHERE session_id=?",
+        (time.time(), summary, message_count, session_id)
+    )
+    conn.commit()
+    conn.close()
+    log.info(f"Session saved: {session_id} ({message_count} exchanges)")
+
+
+def get_recent_sessions(limit: int = 5) -> list[dict]:
+    """Return the most recent sessions that have a summary (most recent first)."""
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT session_id, started_at, ended_at, summary, message_count "
+        "FROM sessions WHERE summary != '' AND summary IS NOT NULL "
+        "ORDER BY started_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def build_session_context() -> str:
+    """Build a cross-session memory block from recent past session summaries.
+
+    Called once per WebSocket connection so JARVIS remembers previous conversations.
+    """
+    sessions = get_recent_sessions(limit=5)
+    if not sessions:
+        return ""
+
+    lines = []
+    for s in sessions:
+        if not s.get("summary"):
+            continue
+        dt = datetime.fromtimestamp(s["started_at"]).strftime("%a %d %b")
+        count = s.get("message_count") or 0
+        suffix = f" ({count} exchanges)" if count else ""
+        lines.append(f"[{dt}{suffix}] {s['summary']}")
+
+    if not lines:
+        return ""
+
+    return "PREVIOUS SESSIONS (most recent first):\n" + "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Maintenance
+# ---------------------------------------------------------------------------
+
+def prune_old_conversations(days: int = 60) -> int:
+    """Delete conversation log entries older than `days` days. Returns rows deleted."""
+    cutoff = time.time() - days * 86400
+    conn = _get_db()
+    # Remove FTS entries first
+    conn.execute(
+        "DELETE FROM conversation_fts WHERE rowid IN "
+        "(SELECT id FROM conversations WHERE timestamp < ?)", (cutoff,)
+    )
+    cur = conn.execute("DELETE FROM conversations WHERE timestamp < ?", (cutoff,))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        log.info(f"Pruned {deleted} conversation entries older than {days} days")
+    return deleted
 
 
 # Initialize on import

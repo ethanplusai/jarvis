@@ -18,7 +18,7 @@ _mail_launched = False
 
 
 async def _ensure_mail_running():
-    """Launch Mail.app if not already running."""
+    """Check if Mail.app is already running — does not auto-launch it."""
     global _mail_launched
     if _mail_launched:
         return
@@ -37,18 +37,7 @@ async def _ensure_mail_running():
     except Exception:
         pass
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "open", "-a", "Mail", "-g",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=5)
-        await asyncio.sleep(2)
-        _mail_launched = True
-        log.info("Mail.app launched")
-    except Exception as e:
-        log.warning(f"Failed to launch Mail: {e}")
+    # Auto-launch disabled — Mail is only used if already open
 
 
 async def _run_mail_script(script: str, timeout: float = 20) -> str:
