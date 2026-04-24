@@ -6,6 +6,7 @@ Each function returns {"success": bool, "confirmation": str}.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -113,7 +114,7 @@ async def open_terminal(command: str = "") -> dict:
     }
 
 
-async def open_browser(url: str, browser: str = "chrome") -> dict:
+async def open_browser(url: str, browser: str = "firefox") -> dict:
     """Open URL in user's browser (Chrome or Firefox)."""
     escaped_url = url.replace('"', '\\"')
 
@@ -166,10 +167,11 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
     claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
 
     # Launch claude interactive — it reads CLAUDE.md on its own
+    escaped_dir = project_dir.replace('"', '\\"')
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {project_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "cd \\"{escaped_dir}\\" && claude --dangerously-skip-permissions"\n'
         "end tell"
     )
     proc = await asyncio.create_subprocess_exec(
@@ -275,6 +277,136 @@ return "OK"
         return {"success": False, "confirmation": "Something went wrong reaching that terminal, sir."}
 
 
+async def close_tab() -> dict:
+    """Close the active tab in Google Chrome via AppleScript.
+
+    Guards against closing the JARVIS interface tab (localhost:5173/5174).
+    If the front window is JARVIS itself, targets the next available window.
+    """
+    script = '''
+tell application "Google Chrome"
+    if (count of windows) = 0 then return "NO_WINDOW"
+
+    set targetWindow to missing value
+    set activeURL to ""
+
+    -- Try front window first
+    set w to front window
+    set activeURL to URL of active tab of w
+
+    -- If active tab is JARVIS itself, find another window
+    if activeURL contains "localhost:5173" or activeURL contains "localhost:5174" then
+        repeat with i from 1 to count of windows
+            set candidate to item i of windows
+            set candidateURL to URL of active tab of candidate
+            if candidateURL does not contain "localhost:5173" and candidateURL does not contain "localhost:5174" then
+                set targetWindow to candidate
+                exit repeat
+            end if
+        end repeat
+        if targetWindow is missing value then
+            return "IS_JARVIS"
+        end if
+    else
+        set targetWindow to w
+    end if
+
+    -- Guard: don't close last tab in last window
+    if (count of tabs of targetWindow) = 1 and (count of windows) = 1 then
+        return "LAST_TAB"
+    end if
+
+    close active tab of targetWindow
+    return "OK"
+end tell
+'''
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        result = stdout.decode().strip()
+
+        if result == "OK":
+            return {"success": True, "confirmation": "Tab closed, sir."}
+        elif result == "IS_JARVIS":
+            return {"success": False, "confirmation": "That's our interface tab, sir. I won't close that one."}
+        elif result == "LAST_TAB":
+            return {"success": False, "confirmation": "That's the last tab open, sir. Closing it would shut Chrome entirely."}
+        elif result == "NO_WINDOW":
+            return {"success": False, "confirmation": "Chrome doesn't appear to have any windows open, sir."}
+        else:
+            log.error(f"close_tab unexpected result: {result}, stderr: {stderr.decode()[:200]}")
+            return {"success": False, "confirmation": "Couldn't close that tab, sir."}
+    except asyncio.TimeoutError:
+        return {"success": False, "confirmation": "Close tab timed out, sir."}
+    except Exception as e:
+        log.error(f"close_tab failed: {e}")
+        return {"success": False, "confirmation": "Couldn't close that tab, sir."}
+
+
+async def click_element(target: str) -> dict:
+    """Click an element in Chrome's active tab via JavaScript injection.
+
+    target: CSS selector (e.g. '#submit-btn') or visible text (e.g. 'Sign in').
+    Tries CSS selector first, falls back to matching visible text in links/buttons.
+    """
+    # JS uses single-quoted strings so embedding in AppleScript double-quoted string
+    # only requires escaping double quotes and backslashes in the target value.
+    js_target = target.replace("\\", "\\\\").replace("'", "\\'")
+    js_target_lower = js_target.lower()
+
+    js = (
+        "(function(){"
+        f"var el=document.querySelector('{js_target}');"
+        "if(!el){"
+        "var all=document.querySelectorAll('a,button,[role=button],input[type=submit],[onclick]');"
+        "for(var i=0;i<all.length;i++){"
+        f"if(all[i].textContent.trim().toLowerCase().indexOf('{js_target_lower}')>=0){{"
+        "el=all[i];break;"
+        "}}"   # closes inner if + for loop
+        "}"    # closes if(!el)
+        "if(el){el.click();return 'clicked';}"
+        "return 'not_found';"
+        "})()"
+    )
+
+    # Escape double quotes for embedding in AppleScript string literal
+    js_escaped = js.replace('"', '\\"')
+
+    script = (
+        'tell application "Google Chrome"\n'
+        f'    set res to execute javascript "{js_escaped}" in active tab of front window\n'
+        '    return res\n'
+        'end tell'
+    )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        result = stdout.decode().strip()
+        success = proc.returncode == 0 and result == "clicked"
+        if result == "not_found":
+            log.warning(f"click_element: '{target}' not found on page")
+        elif not success:
+            log.error(f"click_element failed: {stderr.decode()[:200]}")
+        return {
+            "success": success,
+            "confirmation": "Done, sir." if success else f"Couldn't find '{target}' on the page, sir.",
+        }
+    except asyncio.TimeoutError:
+        return {"success": False, "confirmation": "Click operation timed out, sir."}
+    except Exception as e:
+        log.error(f"click_element error: {e}")
+        return {"success": False, "confirmation": "Something went wrong with the click, sir."}
+
+
 async def get_chrome_tab_info() -> dict:
     """Read the current Chrome tab's title and URL via AppleScript."""
     script = (
@@ -324,7 +456,7 @@ async def monitor_build(project_dir: str, ws=None, synthesize_fn=None) -> None:
                             encoded = base64.b64encode(audio_bytes).decode()
                             await ws.send_json({"type": "status", "state": "speaking"})
                             await ws.send_json({"type": "audio", "data": encoded, "text": msg})
-                            await ws.send_json({"type": "status", "state": "idle"})
+                            # No "idle" send — frontend audioPlayer.onFinished handles it.
                     except Exception as e:
                         log.warning(f"Build notification failed: {e}")
                 return

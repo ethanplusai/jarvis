@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -33,13 +34,15 @@ from pathlib import Path
 from typing import Optional
 
 import anthropic
+import edge_tts
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
+from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, close_tab, click_element
+import system_control
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
@@ -48,6 +51,8 @@ from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
     create_note, search_notes, get_tasks_for_date, build_memory_context,
     format_tasks_for_voice, extract_memories, get_important_memories,
+    log_message, start_session, end_session, build_session_context,
+    prune_old_conversations,
 )
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
 from dispatch_registry import DispatchRegistry
@@ -61,11 +66,20 @@ log = logging.getLogger("jarvis")
 # ---------------------------------------------------------------------------
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-FISH_API_KEY = os.getenv("FISH_API_KEY", "")
-FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
-FISH_API_URL = "https://api.fish.audio/v1/tts"
+EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "en-GB-RyanNeural")  # British male, suits JARVIS
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Model names — override via .env if Anthropic renames them
+# e.g. JARVIS_FAST_MODEL=claude-haiku-4-5-20251001
+FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "claude-haiku-4-5-20251001")
+SMART_MODEL = os.getenv("JARVIS_SMART_MODEL", "claude-opus-4-6")
+
+# Local LLM via LM Studio (OpenAI-compatible). Set LOCAL_LLM_MODEL in .env to enable.
+# e.g. LOCAL_LLM_MODEL=gemma-3-4b-it-qat
+# Leave empty to use Anthropic for all fast responses.
+LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://localhost:1234/v1")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -95,7 +109,7 @@ CONVERSATION STYLE:
 - When you don't know something: "I'm afraid I don't have that information, sir" not "I don't know"
 
 SELF-AWARENESS:
-You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code is Python (FastAPI server, WebSocket voice, Fish Audio TTS, Anthropic API). You were built by {user_name}. If asked about yourself, your code, how you work, or your line count — use [ACTION:PROMPT_PROJECT] to check the jarvis project. You have full access to your own source code.
+You ARE the JARVIS project at {project_dir} on {user_name}'s computer. Your code is Python (FastAPI server, WebSocket voice, Edge TTS, Anthropic API). You were built by {user_name}. If asked about yourself, your code, how you work, or your line count — use [ACTION:PROMPT_PROJECT] to check the jarvis project. You have full access to your own source code.
 
 YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT NOW):
 - You CAN open Terminal.app via AppleScript
@@ -111,6 +125,13 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN manage tasks — create, complete, and list to-do items with priorities and due dates
 - You CAN help plan {user_name}'s day — combine calendar events, tasks, and priorities into an organized plan
 - You CAN remember facts about {user_name} — preferences, decisions, goals. Use [ACTION:REMEMBER] to store important info.
+- You CAN close Chrome tabs and click page elements via JavaScript — use [ACTION:CLOSE_TAB] and [ACTION:CLICK].
+- You CAN control Chrome: open new tabs, close windows, navigate back/forward, reload, get current tab info.
+- You CAN switch focus to any running app, hide apps, minimise/maximise windows, snap windows to left or right half.
+- You CAN trigger keyboard shortcuts: copy, paste, undo, redo, select all, save, take a screenshot.
+- You CAN scroll the front window up or down.
+- You CAN control system volume: set level, mute, unmute, query current level.
+- You CAN open folders in Finder, reveal files in Finder, and move files to the Trash (not permanent delete).
 
 DAY PLANNING:
 When {user_name} asks to plan his day or schedule, DO NOT dispatch to a project. Instead:
@@ -132,13 +153,15 @@ When {user_name} wants to BUILD something new:
 - NEVER hallucinate progress. If the build is still running, say "Still working on it, sir" — don't make up details about what's happening.
 - NEVER guess localhost ports. Check the DISPATCHES section for the actual URL. If a dispatch says "Running at http://localhost:5174" — use THAT URL, not a guess.
 - When asked to "pull it up" or "show me" — use [ACTION:BROWSE] with the URL from DISPATCHES. Do NOT dispatch to the project again just to find the URL.
+- "pull up [anything]" is a universal Firefox command. It means: open a new page in Firefox and search for or navigate to whatever follows. Examples: "pull up the weather forecast in Ireland", "pull up the mathematical symbol for pi", "pull up BBC News", "pull up flights to Lisbon" — all go straight to Firefox. Never ask for confirmation. Never treat it as an app-switch unless it's a bare 1-2 word app name with no articles (e.g. "pull up Spotify").
+- Firefox is the default browser. Use Firefox for all [ACTION:BROWSE] actions unless the user specifically says Chrome.
 IMPORTANT: Actions like opening Terminal, Chrome, or building projects are handled AUTOMATICALLY by your system — you do NOT need to describe doing them. If the user asks you to build something or search something, your system will handle the execution separately. In your response, just TALK — have a conversation. Don't say "I'll build that now" or "Claude Code is working on..." unless your system has actually triggered the action.
 If the user asks you to do something you genuinely can't do, say "I'm afraid that's beyond my current reach, sir." Don't fake executing actions.
 
 YOUR INTERFACE:
 The user interacts with you through a web browser showing a particle orb visualization that reacts to your voice. The interface has these controls:
 - **Three-dot menu** (top right): contains Settings, Restart Server, and Fix Yourself options
-- **Settings panel**: Opens from the menu. Users can enter API keys (Anthropic, Fish Audio), test connections, set their name and preferences, and see system status (calendar, mail, notes connectivity). Keys are saved to the .env file.
+- **Settings panel**: Opens from the menu. Users can enter their Anthropic API key, choose a voice, set their name and preferences, and see system status (calendar, mail, notes connectivity). Settings are saved to the .env file.
 - **Mute button**: Toggles your listening on/off. When muted, you can't hear the user. They click it again to unmute.
 - **Restart Server**: Restarts your backend process. Useful if something seems stuck.
 - **Fix Yourself**: Opens Claude Code in your own project directory so you can debug and fix issues in your own code.
@@ -152,9 +175,26 @@ SPEECH-TO-TEXT CORRECTIONS (the user speaks, speech recognition may mishear):
 - "clock code" = "Claude Code"
 
 RESPONSE LENGTH — THIS IS CRITICAL:
-ONE sentence is ideal. TWO is the maximum for the spoken part. Never three.
+For COMMANDS, SIMPLE QUESTIONS, and CONFIRMATIONS: one sentence. Two maximum.
+For IDEATION, PLANNING, and OPEN-ENDED DISCUSSION: up to five sentences.
+  Use this structure: (1) Mirror back what you understood — one sentence.
+  (2) Surface two or three possible directions or considerations — one sentence each.
+  (3) Close with a question that helps the user choose their path.
+  Example: "So the idea is a real-time portfolio dashboard with live price feeds — solid concept, sir.
+  You could go client-side with a public API proxy for simplicity, server-side with scheduled syncs
+  for reliability, or WebSocket streaming if real-time is non-negotiable.
+  The first two ship in a day; the third takes longer but impresses.
+  Which matters more — speed to launch or live data, sir?"
 No markdown, no bullet points, no code blocks in voice responses.
 Action tags at the end do NOT count toward your sentence limit.
+
+IDEATION MODE — when {user_name} is thinking through an idea out loud:
+- He has just given you a full thought (the input will be longer and exploratory)
+- Do NOT immediately dispatch a build or execute — confirm understanding first
+- Your job is to be a thinking partner: reflect, surface options, invite direction
+- One sentence confirming understanding, two or three sentences exploring avenues, one closing question
+- Never jump to "I'll build that now" until the user explicitly says proceed or confirms a direction
+- The goal is to get the idea out, shaped, and agreed on — THEN execute
 
 BANNED PHRASES — NEVER USE THESE:
 - "Absolutely" / "Absolutely right"
@@ -178,13 +218,13 @@ INSTEAD SAY:
 - "Consider it done."
 - "Done, sir."
 - "Terminal is open."
-- "Pulled that up in Chrome."
+- "Pulled that up in Firefox."
 
 ACTION SYSTEM:
 When you decide the user needs something DONE (not just discussed), include an action tag in your response:
-- [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
+- [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use ONLY when user EXPLICITLY asks to see/look at/describe the screen ("look at my screen", "what do you see", "what's on my screen"). NEVER use [ACTION:SCREEN] for opening apps, switching windows, or any non-visual request.
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
-- [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
+- [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Firefox (default browser)
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
 - [ACTION:OPEN_TERMINAL] — when user just wants a fresh Claude Code terminal with no specific project
 CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects.
@@ -203,6 +243,50 @@ CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're
 - [ACTION:CREATE_NOTE] title ||| body — create a new Apple Note. For saving plans, ideas, lists.
   "save that as a note" → [ACTION:CREATE_NOTE] Day Plan March 19 ||| Morning: client calls. Afternoon: TikTok dashboard. Evening: JARVIS improvements.
 - [ACTION:READ_NOTE] title search — read an existing Apple Note by title keyword.
+- [ACTION:CLOSE_TAB] — close the active Chrome tab. Use when user says "close this tab", "close the tab", "close that", etc.
+- [ACTION:CLICK] css_selector — click an element in the active Chrome tab by CSS selector. Use when user says "click the submit button", "click sign in", "click that link", etc. Generate a CSS selector from context (e.g. "click sign in" → [ACTION:CLICK] button[type=submit], "click the login link" → [ACTION:CLICK] a.login). Prefer attribute selectors without quotes: button[type=submit] not button[type="submit"].
+
+BROWSER CONTROL:
+- [ACTION:OPEN_TAB] url — open a new Chrome tab at the given URL (or blank if no URL).
+- [ACTION:CLOSE_WINDOW] — close the front Chrome window. ASK CONFIRMATION first: "Shall I close that window, sir?"
+- [ACTION:BROWSER_BACK] — go back in Chrome.
+- [ACTION:BROWSER_FORWARD] — go forward in Chrome.
+- [ACTION:RELOAD] — reload the current Chrome tab.
+- [ACTION:GET_TAB] — get the current tab title and URL. Use when user asks "what site is this", "what page am I on", etc.
+
+APP & WINDOW CONTROL:
+- [ACTION:SWITCH_APP] AppName — bring an app to the foreground and unminimise it. e.g. "switch to Slack" → [ACTION:SWITCH_APP] Slack, "open Firefox" → [ACTION:SWITCH_APP] Firefox, "pull up Spotify" → [ACTION:SWITCH_APP] Spotify. Use this for ANY request to open, switch to, or bring up an app — do NOT use [ACTION:SCREEN] for these.
+- [ACTION:QUIT_APP] AppName — quit an app. ALWAYS ask confirmation first: "Shall I quit Slack, sir?"
+- [ACTION:HIDE_APP] AppName — hide an app (Cmd+H equivalent).
+- [ACTION:MINIMIZE_WINDOW] — minimise the front window.
+- [ACTION:MAXIMIZE_WINDOW] — maximise / enter full-screen the front window.
+- [ACTION:MOVE_WINDOW] left|right — snap the front window to the left or right half of the screen.
+
+KEYBOARD & EDITING:
+- [ACTION:COPY] — copy the current selection (Cmd+C).
+- [ACTION:PASTE] — paste from clipboard (Cmd+V).
+- [ACTION:UNDO] — undo last action (Cmd+Z).
+- [ACTION:REDO] — redo (Cmd+Shift+Z).
+- [ACTION:SELECT_ALL] — select all (Cmd+A).
+- [ACTION:SAVE] — save the current document (Cmd+S).
+- [ACTION:SCREENSHOT] — capture the full screen to ~/Desktop.
+- [ACTION:SCROLL] up|down — scroll the front window.
+
+VOLUME:
+- [ACTION:SET_VOLUME] 0-100 — set system volume. e.g. "set volume to 50" → [ACTION:SET_VOLUME] 50
+- [ACTION:MUTE] — mute system audio.
+- [ACTION:UNMUTE] — unmute system audio.
+- [ACTION:GET_VOLUME] — report current volume level.
+
+FINDER / FILES:
+- [ACTION:OPEN_FOLDER] /path/to/folder — open a folder in Finder.
+- [ACTION:TRASH_FILE] /path/to/file — move a file to Trash (NOT permanent). ALWAYS ask confirmation: "Move that to Trash, shall I, sir?"
+- [ACTION:REVEAL_FILE] /path/to/file — reveal a file in Finder.
+
+SAFETY RULES FOR DESTRUCTIVE ACTIONS:
+- QUIT_APP, CLOSE_WINDOW, TRASH_FILE are DESTRUCTIVE. Always say what you're about to do and ask "shall I proceed, sir?" in your spoken response WITHOUT the action tag. Only include the action tag when the user has confirmed.
+- Never use TRASH_FILE for system files, app bundles, or anything outside ~/Desktop, ~/Documents, ~/Downloads.
+- Never use QUIT_APP for critical system processes.
 
 You use Claude Code as your tool to build, research, and write code — but YOU are the one doing the work. Never say "Claude Code did X" or "Claude Code is asking" — say "I built X", "I'm checking on that", "I found X". You ARE the intelligence. Claude Code is just your hands.
 
@@ -262,6 +346,28 @@ async def fetch_weather() -> str:
         log.warning(f"Weather fetch failed: {e}")
     _cached_weather = None
     return "Weather data unavailable."
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def _escape_applescript_string(s: str) -> str:
+    """Properly escape a string for embedding inside an AppleScript double-quoted string.
+
+    AppleScript's `do script` receives a shell command.  The escaping has two
+    layers: first make the string safe for the AppleScript string literal, then
+    the result is passed to the shell — but `do script` handles shell quoting
+    for us, so we only need to escape backslashes and double-quotes here.
+    Newlines and tabs are replaced with spaces so the shell command stays on
+    one line (multi-line `do script` arguments behave unpredictably).
+    """
+    s = s.replace("\\", "\\\\")   # backslash must come first
+    s = s.replace('"', '\\"')      # double-quote
+    s = s.replace("\n", " ")       # newline → space
+    s = s.replace("\r", " ")       # carriage return → space
+    s = s.replace("\t", " ")       # tab → space
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -392,10 +498,11 @@ class ClaudeTaskManager:
         prompt_file.write_text(task.prompt)
 
         # Open Terminal.app with claude running in the project directory
+        escaped_work_dir = _escape_applescript_string(work_dir)
         applescript = f'''
         tell application "Terminal"
             activate
-            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p --dangerously-skip-permissions | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
+            set newTab to do script "cd \\"{escaped_work_dir}\\" && cat .jarvis_prompt.md | claude -p --dangerously-skip-permissions | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
         end tell
         '''
 
@@ -564,42 +671,45 @@ class ClaudeTaskManager:
 # ---------------------------------------------------------------------------
 
 async def scan_projects() -> list[dict]:
-    """Quick scan of ~/Desktop for git repos (depth 1)."""
+    """Scan ~/Desktop and ~/ (home) for git repos (depth 1)."""
     projects = []
-    desktop = DESKTOP_PATH
+    seen = set()
+    scan_roots = [DESKTOP_PATH, Path.home()]
 
-    if not desktop.exists():
-        return projects
-
-    try:
-        for entry in sorted(desktop.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            git_dir = entry / ".git"
-            if git_dir.exists():
-                branch = "unknown"
-                head_file = git_dir / "HEAD"
-                try:
-                    head_content = head_file.read_text().strip()
-                    if head_content.startswith("ref: refs/heads/"):
-                        branch = head_content.replace("ref: refs/heads/", "")
-                except Exception:
-                    pass
-
-                projects.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "branch": branch,
-                })
-    except PermissionError:
-        pass
+    for root in scan_roots:
+        if not root.exists():
+            continue
+        try:
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                if str(entry) in seen:
+                    continue
+                git_dir = entry / ".git"
+                if git_dir.exists():
+                    seen.add(str(entry))
+                    branch = "unknown"
+                    head_file = git_dir / "HEAD"
+                    try:
+                        head_content = head_file.read_text().strip()
+                        if head_content.startswith("ref: refs/heads/"):
+                            branch = head_content.replace("ref: refs/heads/", "")
+                    except Exception:
+                        pass
+                    projects.append({
+                        "name": entry.name,
+                        "path": str(entry),
+                        "branch": branch,
+                    })
+        except PermissionError:
+            pass
 
     return projects
 
 
 def format_projects_for_prompt(projects: list[dict]) -> str:
     if not projects:
-        return "No projects found on Desktop."
+        return "No projects found."
     lines = []
     for p in projects:
         lines.append(f"- {p['name']} ({p['branch']}) @ {p['path']}")
@@ -643,7 +753,7 @@ async def classify_intent(text: str, client: anthropic.AsyncAnthropic) -> dict:
     """
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=FAST_MODEL,
             max_tokens=100,
             system=(
                 "Classify this voice command. The user is talking to JARVIS, an AI assistant that can:\n"
@@ -738,7 +848,12 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|CLOSE_TAB|CLICK'
+        r'|OPEN_TAB|CLOSE_WINDOW|BROWSER_BACK|BROWSER_FORWARD|RELOAD|GET_TAB'
+        r'|SWITCH_APP|QUIT_APP|HIDE_APP|MINIMIZE_WINDOW|MAXIMIZE_WINDOW|MOVE_WINDOW'
+        r'|COPY|PASTE|UNDO|REDO|SELECT_ALL|SAVE|SCREENSHOT|SCROLL'
+        r'|SET_VOLUME|MUTE|UNMUTE|GET_VOLUME'
+        r'|OPEN_FOLDER|TRASH_FILE|REVEAL_FILE)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -821,11 +936,13 @@ async def _execute_research(target: str, ws=None):
             try:
                 notify_text = f"Research is complete, sir. Report is open in your browser."
                 audio = await synthesize_speech(notify_text)
+                await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": notify_text})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {notify_text}")
+                    # Root-cause fix: no premature "idle" — frontend handles it on playback end.
+                else:
+                    await ws.send_json({"type": "text", "text": notify_text})
+                log.info(f"JARVIS: {notify_text}")
             except Exception:
                 pass  # WebSocket might be gone
 
@@ -833,9 +950,12 @@ async def _execute_research(target: str, ws=None):
         log.error("Research timed out after 5 minutes")
         if ws:
             try:
-                audio = await synthesize_speech("Research timed out, sir. It was taking too long.")
+                timeout_text = "Research timed out, sir. It was taking too long."
+                audio = await synthesize_speech(timeout_text)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": "Research timed out, sir."})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": timeout_text})
+                else:
+                    await ws.send_json({"type": "text", "text": timeout_text})
             except Exception:
                 pass
     except Exception as e:
@@ -875,15 +995,36 @@ async def _execute_open_terminal():
         log.error(f"Open terminal failed: {e}")
 
 
+async def _execute_close_tab():
+    """Execute a close-tab action from an LLM-embedded [ACTION:CLOSE_TAB] tag."""
+    try:
+        result = await close_tab()
+        log.info(f"close_tab: {result}")
+    except Exception as e:
+        log.error(f"close_tab execution failed: {e}")
+
+
+async def _execute_click(selector: str):
+    """Execute a click action from an LLM-embedded [ACTION:CLICK] tag."""
+    try:
+        result = await click_element(selector)
+        log.info(f"click_element '{selector}': {result}")
+    except Exception as e:
+        log.error(f"click_element execution failed: {e}")
+
+
 def _find_project_dir(project_name: str) -> str | None:
-    """Find a project directory by name from cached projects or Desktop."""
+    """Find a project directory by name from cached projects, ~/Desktop, or ~/."""
     for p in cached_projects:
         if project_name.lower() in p.get("name", "").lower():
             return p.get("path")
-    desktop = Path.home() / "Desktop"
-    for d in desktop.iterdir():
-        if d.is_dir() and project_name.lower() in d.name.lower():
-            return str(d)
+    for root in [Path.home() / "Desktop", Path.home()]:
+        try:
+            for d in root.iterdir():
+                if d.is_dir() and project_name.lower() in d.name.lower():
+                    return str(d)
+        except Exception:
+            pass
     return None
 
 
@@ -903,10 +1044,13 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
         if not project_dir:
             msg = f"Couldn't find the {project_name} project directory, sir."
             audio = await synthesize_speech(msg)
-            if audio and ws:
+            if ws:
                 try:
                     await ws.send_json({"type": "status", "state": "speaking"})
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                    else:
+                        await ws.send_json({"type": "text", "text": msg})
                 except Exception:
                     pass
             return
@@ -921,18 +1065,24 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
         log.info(f"Dispatching to {project_name} in {project_dir}: {prompt[:80]}")
         dispatch_registry.update_status(dispatch_id, "building")
 
+        # Inject relevant JARVIS memories so Claude Code has user context
+        memory_ctx = build_memory_context(prompt)
+
         # Run claude -p in background
-        full_response = await dispatch.send(prompt)
+        full_response = await dispatch.send(prompt, memory_context=memory_ctx)
         await dispatch.stop()
 
-        # Auto-open any localhost URLs from response
+        # Auto-open any localhost URLs from response.
+        # Prefer the explicit RUNNING_AT=<url> marker; fall back to first localhost URL.
+        # Always use group(0) to avoid IndexError when the fallback regex has no capture group.
         import re as _re
-        # Check for the explicit RUNNING_AT marker first
         running_match = _re.search(r'RUNNING_AT=(https?://localhost:\d+)', full_response or "")
-        if not running_match:
-            running_match = _re.search(r'https?://localhost:\d+', full_response or "")
         if running_match:
-            url = running_match.group(1) if running_match.lastindex else running_match.group(0)
+            url = running_match.group(1)  # captured group inside RUNNING_AT=
+        else:
+            fb_match = _re.search(r'https?://localhost:\d+', full_response or "")
+            url = fb_match.group(0) if fb_match else None
+        if url:
             asyncio.create_task(_execute_browse(url))
             log.info(f"Auto-opening {url}")
             # Store URL in dispatch
@@ -948,7 +1098,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
             if anthropic_client:
                 try:
                     summary = await anthropic_client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                        model=FAST_MODEL,
                         max_tokens=150,
                         system=(
                             "You are JARVIS reporting back on what you found or built in a project. "
@@ -999,9 +1149,12 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
         try:
             msg = f"Had trouble connecting to {project_name}, sir."
             audio = await synthesize_speech(msg)
-            if audio and ws:
+            if ws:
                 await ws.send_json({"type": "status", "state": "speaking"})
-                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                if audio:
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                else:
+                    await ws.send_json({"type": "text", "text": msg})
         except Exception:
             pass
 
@@ -1009,14 +1162,15 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
 async def self_work_and_notify(session: WorkSession, prompt: str, ws):
     """Run claude -p in background and notify via voice when done."""
     try:
-        full_response = await session.send(prompt)
+        memory_ctx = build_memory_context(prompt)
+        full_response = await session.send(prompt, memory_context=memory_ctx)
         log.info(f"Background work complete ({len(full_response)} chars)")
 
         # Summarize and speak
         if anthropic_client and full_response:
             try:
                 summary = await anthropic_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=FAST_MODEL,
                     max_tokens=100,
                     system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
                     messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
@@ -1027,11 +1181,13 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
 
             try:
                 audio = await synthesize_speech(msg)
+                await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {msg}")
+                    # Root-cause fix: no premature "idle" — frontend handles it on playback end.
+                else:
+                    await ws.send_json({"type": "text", "text": msg})
+                log.info(f"JARVIS: {msg}")
             except Exception:
                 pass
     except Exception as e:
@@ -1043,39 +1199,206 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (Edge TTS — free, no API key needed)
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
-        return None
-
+    """Generate speech audio from text using Microsoft Edge TTS (free)."""
+    import io
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
+        communicate = edge_tts.Communicate(text, EDGE_TTS_VOICE)
+        audio_data = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.write(chunk["data"])
+        audio_data.seek(0)
+        result = audio_data.read()
+        if result:
+            _session_tokens["tts_calls"] += 1
+            _append_usage_entry(0, 0, "tts")
+            return result
+        return None
     except Exception as e:
         log.error(f"TTS error: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Local LLM (LM Studio)
+# ---------------------------------------------------------------------------
+
+_LOCAL_SYSTEM_TEMPLATE = """\
+You are JARVIS — Tony Stark's AI assistant. British, dry, precise. Address the user as "sir".
+
+PERSONALITY: Economy of language. Never filler. Never "Absolutely", "Great question", "Of course".
+Say: "Will do, sir." / "Right away, sir." / "Done, sir." / "Understood."
+
+RESPONSE LENGTH — CRITICAL:
+- Commands / simple requests: ONE sentence max.
+- Discussion / planning: up to four sentences.
+- No markdown, no bullet points. Voice only.
+
+TIME: {current_time}
+{weather_info}
+
+SCREEN: {screen_context}
+SCHEDULE: {calendar_context}
+TASKS: {active_tasks}
+
+ACTION TAGS — append ONE at end of response when needed:
+[ACTION:SWITCH_APP] AppName — open/focus an app ("open Firefox" → [ACTION:SWITCH_APP] Firefox)
+[ACTION:SCREEN] — ONLY when user explicitly asks to see/describe the screen
+[ACTION:BROWSE] url — open a URL or search in Chrome
+[ACTION:BUILD] description — build a project with Claude Code
+[ACTION:PROMPT_PROJECT] name ||| prompt — work on an existing project
+[ACTION:ADD_TASK] priority ||| title ||| desc ||| due — create a task
+[ACTION:REMEMBER] content — store a fact
+[ACTION:MINIMIZE_WINDOW] / [ACTION:MAXIMIZE_WINDOW] / [ACTION:SCREENSHOT]
+[ACTION:SET_VOLUME] 0-100 / [ACTION:MUTE] / [ACTION:UNMUTE]
+[ACTION:SWITCH_APP] / [ACTION:HIDE_APP] / [ACTION:QUIT_APP] AppName
+[ACTION:SCROLL] up|down / [ACTION:COPY] / [ACTION:PASTE] / [ACTION:SAVE]
+NEVER use [ACTION:SCREEN] for app switching. NEVER emit action tags in casual chat.
+
+{recent_responses}"""
+
+
+def _build_local_system(
+    current_time: str,
+    weather_info: str,
+    screen_context: str,
+    calendar_context: str,
+    active_tasks: str,
+    recent_responses: str,
+) -> str:
+    recent_block = ""
+    if recent_responses:
+        recent_block = f"YOUR RECENT RESPONSES (do NOT repeat):\n{recent_responses}"
+    return _LOCAL_SYSTEM_TEMPLATE.format(
+        current_time=current_time,
+        weather_info=weather_info,
+        screen_context=screen_context or "Not checked yet.",
+        calendar_context=calendar_context,
+        active_tasks=active_tasks,
+        recent_responses=recent_block,
+    )
+
+
+_local_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_local_http_client() -> httpx.AsyncClient:
+    global _local_http_client
+    if _local_http_client is None or _local_http_client.is_closed:
+        _local_http_client = httpx.AsyncClient(timeout=10.0)
+    return _local_http_client
+
+
+async def _local_generate(system: str, messages: list[dict], max_tokens: int = 150) -> str | None:
+    """Call LM Studio's OpenAI-compatible API. Returns None if disabled or unreachable."""
+    if not LOCAL_LLM_MODEL:
+        return None
+    try:
+        payload = {
+            "model": LOCAL_LLM_MODEL,
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "messages": [{"role": "system", "content": system}] + messages,
+        }
+        r = await _get_local_http_client().post(f"{LOCAL_LLM_URL}/chat/completions", json=payload)
+        if r.status_code == 200:
+            text = r.json()["choices"][0]["message"]["content"]
+            log.debug(f"[local-llm] response: {text[:80]}")
+            return text
+        log.warning(f"[local-llm] HTTP {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        log.debug(f"[local-llm] unavailable: {e}")
+    return None
+
+
+import re as _re_tts
+
+_SENTENCE_END = _re_tts.compile(r'(?<=[.!?])\s+(?=[A-Z\[])|(?<=\.)$')
+_ACTION_TAG = _re_tts.compile(r'\[ACTION:')
+
+
+async def _local_stream_sentences(system: str, messages: list[dict], max_tokens: int = 150):
+    """Stream local LLM and yield speakable sentences as they complete.
+
+    Yields (sentence, is_last) tuples. Stops yielding spoken text once an
+    [ACTION:...] tag starts — the caller handles the tag separately.
+    Full response is available as the final yield with is_last=True and
+    sentence='' (just signals end, full_text returned separately).
+    """
+    if not LOCAL_LLM_MODEL:
+        return
+    payload = {
+        "model": LOCAL_LLM_MODEL,
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+        "stream": True,
+        "messages": [{"role": "system", "content": system}] + messages,
+    }
+    full_text = ""
+    buf = ""
+    try:
+        async with _get_local_http_client().stream(
+            "POST", f"{LOCAL_LLM_URL}/chat/completions", json=payload, timeout=10.0
+        ) as resp:
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data)["choices"][0]["delta"].get("content", "")
+                except Exception:
+                    continue
+                full_text += delta
+                buf += delta
+
+                # Stop speaking once an action tag begins
+                if _ACTION_TAG.search(buf):
+                    speak_part = buf[:_ACTION_TAG.search(buf).start()].strip()
+                    if speak_part:
+                        yield speak_part, False
+                    buf = ""
+                    # Drain the rest silently
+                    async for rest_line in resp.aiter_lines():
+                        if not rest_line.startswith("data: "):
+                            continue
+                        rest_data = rest_line[6:]
+                        if rest_data.strip() == "[DONE]":
+                            break
+                        try:
+                            full_text += json.loads(rest_data)["choices"][0]["delta"].get("content", "")
+                        except Exception:
+                            pass
+                    break
+
+                # Emit complete sentences
+                parts = _SENTENCE_END.split(buf)
+                if len(parts) > 1:
+                    for sentence in parts[:-1]:
+                        sentence = sentence.strip()
+                        if sentence:
+                            yield sentence, False
+                    buf = parts[-1]
+
+        # Emit any remaining text
+        remainder = buf.strip()
+        if remainder and not _ACTION_TAG.search(remainder):
+            yield remainder, False
+
+    except Exception as e:
+        log.debug(f"[local-llm stream] error: {e}")
+
+    yield "", True  # sentinel — signals stream done, caller reads full_text via closure
+    # Stash full_text so caller can extract action tags
+    _local_stream_sentences._last_full_text = full_text
+
+
+_local_stream_sentences._last_full_text = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1090,6 +1413,7 @@ async def generate_response(
     conversation_history: list[dict],
     last_response: str = "",
     session_summary: str = "",
+    prior_context: str = "",
 ) -> str:
     """Generate a JARVIS response using Anthropic API."""
     now = datetime.now()
@@ -1126,25 +1450,51 @@ async def generate_response(
     if memory_ctx:
         system += f"\n\nJARVIS MEMORY:\n{memory_ctx}"
 
+    # Cross-session persistent memory — what happened in previous sessions
+    if prior_context:
+        system += f"\n\nLONG-TERM MEMORY:\n{prior_context}"
+
     # Three-tier memory — inject rolling summary of earlier conversation
     if session_summary:
         system += f"\n\nSESSION CONTEXT (earlier in this conversation):\n{session_summary}"
 
-    # Self-awareness — remind JARVIS of last response to avoid repetition
-    if last_response:
-        system += f'\n\nYOUR LAST RESPONSE (do not repeat this):\n"{last_response[:150]}"'
+    # Self-awareness — include recent JARVIS responses to prevent repetition
+    recent_assistant = [m["content"] for m in conversation_history[-10:] if m.get("role") == "assistant"]
+    if recent_assistant:
+        system += "\n\nYOUR RECENT RESPONSES (do NOT repeat or paraphrase these — vary your wording and do not re-open with the same greeting):\n"
+        for r in recent_assistant[-3:]:
+            system += f'- "{r[:200]}"\n'
 
     # Use conversation history — keep the last 20 messages for context
     # (older conversation is captured in session_summary)
     messages = conversation_history[-20:]
+    # API requires messages start with user role — drop any leading assistant turns
+    while messages and messages[0].get("role") == "assistant":
+        messages = messages[1:]
     # If the last message isn't the current user text, add it
     if not messages or messages[-1].get("content") != text:
         messages = messages + [{"role": "user", "content": text}]
 
+    # Try local LLM first — slim system prompt keeps prefill fast
+    recent_assistant = [m["content"] for m in conversation_history[-10:] if m.get("role") == "assistant"]
+    recent_str = "".join(f'- "{r[:150]}"\n' for r in recent_assistant[-3:])
+    local_system = _build_local_system(
+        current_time=current_time,
+        weather_info=weather_info,
+        screen_context=screen_ctx or "",
+        calendar_context=calendar_ctx,
+        active_tasks=task_mgr.get_active_tasks_summary(),
+        recent_responses=recent_str,
+    )
+    local_result = await _local_generate(local_system, messages[-6:], max_tokens=150)
+    if local_result is not None:
+        return local_result
+
+    # Fall back to Anthropic Haiku
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=250,  # Extra room for [ACTION:X] tags
+            model=FAST_MODEL,
+            max_tokens=400,  # Room for ideation/discussion responses
             system=system,
             messages=messages,
         )
@@ -1319,11 +1669,11 @@ return windowList
             # Weather — refresh every loop (30s is fine, API is fast)
             try:
                 import urllib.request, json as _json
-                url = "https://api.open-meteo.com/v1/forecast?latitude=27.77&longitude=-82.64&current=temperature_2m,weathercode&temperature_unit=fahrenheit"
+                url = "https://api.open-meteo.com/v1/forecast?latitude=52.64&longitude=-1.14&current=temperature_2m,weathercode&temperature_unit=celsius"
                 with urllib.request.urlopen(url, timeout=3) as resp:
                     d = _json.loads(resp.read()).get("current", {})
                     temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
+                    _ctx_cache["weather"] = f"Current weather in Leicester, UK: {temp}°C"
             except Exception:
                 pass
 
@@ -1334,6 +1684,48 @@ return windowList
     log.info("Context refresh thread started")
 
 
+# Global registry of active WebSocket sessions — used by signal handler for clean shutdown
+_active_sessions: dict[str, dict] = {}
+
+
+async def _save_session(sid: str) -> None:
+    """Generate and persist a session summary. Called on clean disconnect and signal shutdown."""
+    data = _active_sessions.get(sid)
+    if not data:
+        return
+    buf = data.get("buffer", [])
+    client = data.get("client")
+    rolling_summary = data.get("summary", "")
+    msg_count = len(buf) // 2
+    if msg_count == 0:
+        return
+    final_summary = rolling_summary
+    if client:
+        try:
+            recent = buf[-30:]
+            convo_text = "\n".join(
+                f"{'User' if m['role'] == 'user' else 'JARVIS'}: {m['content'][:200]}"
+                for m in recent
+            )
+            resp = await client.messages.create(
+                model=FAST_MODEL,
+                max_tokens=250,
+                system=(
+                    "Summarise this JARVIS conversation in 2-3 sentences. "
+                    "Cover: main topics discussed, decisions made, tasks or projects started, "
+                    "anything personal the user shared. Be specific — names, numbers, and details matter. "
+                    "Write in third person past tense."
+                ),
+                messages=[{"role": "user", "content": convo_text}],
+            )
+            final_summary = resp.content[0].text.strip()
+        except Exception as e:
+            log.warning(f"Signal shutdown summary failed: {e}")
+    end_session(sid, final_summary, msg_count)
+    _active_sessions.pop(sid, None)
+    log.info(f"Session {sid} saved ({msg_count} exchanges)")
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global anthropic_client, cached_projects
@@ -1342,6 +1734,18 @@ async def lifespan(application: FastAPI):
     else:
         log.warning("ANTHROPIC_API_KEY not set — LLM features disabled")
     cached_projects = []
+
+    # Signal handlers — save all active sessions before process exits
+    loop = asyncio.get_event_loop()
+
+    async def _graceful_shutdown(signame: str) -> None:
+        log.info(f"Received {signame} — saving {len(_active_sessions)} active session(s)")
+        await asyncio.gather(*[_save_session(sid) for sid in list(_active_sessions)], return_exceptions=True)
+        log.info("All sessions saved. Shutting down.")
+        loop.stop()
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(_sig, lambda s=_sig.name: asyncio.create_task(_graceful_shutdown(s)))
 
     # Start context refresh in a separate thread (never touches event loop)
     _refresh_context_sync()
@@ -1437,15 +1841,18 @@ async def api_list_projects():
 # -- Fast Action Detection (no LLM call) -----------------------------------
 
 def _scan_projects_sync() -> list[dict]:
-    """Synchronous Desktop scan — runs in executor."""
+    """Synchronous scan of ~/Desktop and ~/ — runs in executor."""
     projects = []
-    desktop = Path.home() / "Desktop"
-    try:
-        for entry in desktop.iterdir():
-            if entry.is_dir() and not entry.name.startswith("."):
-                projects.append({"name": entry.name, "path": str(entry), "branch": ""})
-    except Exception:
-        pass
+    seen = set()
+    for root in [Path.home() / "Desktop", Path.home()]:
+        try:
+            for entry in root.iterdir():
+                if entry.is_dir() and not entry.name.startswith(".") and str(entry) not in seen:
+                    if (entry / ".git").exists():
+                        seen.add(str(entry))
+                        projects.append({"name": entry.name, "path": str(entry), "branch": ""})
+        except Exception:
+            pass
     return projects
 
 
@@ -1468,9 +1875,100 @@ def detect_action_fast(text: str) -> dict | None:
                              "what's running on my", "whats running on my", "check my screen"]):
         return {"action": "describe_screen"}
 
+    # Chrome — close tab
+    if any(p in t for p in ["close this tab", "close the tab", "close tab", "shut this tab",
+                             "close current tab", "close active tab"]):
+        return {"action": "close_tab"}
+
+    # Chrome — close window
+    if any(p in t for p in ["close chrome window", "close this window", "close the window",
+                             "shut chrome", "close browser window"]):
+        return {"action": "close_window"}
+
+    # Chrome — navigation
+    if any(p in t for p in ["go back", "browser back", "previous page"]):
+        return {"action": "browser_back"}
+    if any(p in t for p in ["go forward", "browser forward", "next page"]):
+        return {"action": "browser_forward"}
+    if any(p in t for p in ["reload", "refresh page", "refresh this", "refresh the page"]):
+        return {"action": "reload"}
+    if any(p in t for p in ["what tab is this", "what page is this", "current tab", "what site is this",
+                             "what url is this", "get tab info"]):
+        return {"action": "get_tab"}
+
+    # Window control
+    if any(p in t for p in ["minimize", "minimise", "minimize window", "minimise window"]):
+        return {"action": "minimize_window"}
+    if any(p in t for p in ["maximize", "maximise", "full screen", "fullscreen"]):
+        return {"action": "maximize_window"}
+    if any(p in t for p in ["snap left", "move window left", "window left", "left half"]):
+        return {"action": "move_window", "target": "left"}
+    if any(p in t for p in ["snap right", "move window right", "window right", "right half"]):
+        return {"action": "move_window", "target": "right"}
+
+    # Keyboard shortcuts
+    if any(p in t for p in ["take a screenshot", "screenshot", "capture screen"]):
+        return {"action": "screenshot"}
+    if any(p in t for p in ["save this", "save the file", "save document", "save that"]):
+        return {"action": "save"}
+    if any(p in t for p in ["scroll down", "scroll up"]):
+        direction = "down" if "down" in t else "up"
+        return {"action": "scroll", "target": direction}
+
+    # Volume
+    if any(p in t for p in ["mute", "mute audio", "silence", "quiet"]):
+        return {"action": "mute"}
+    if any(p in t for p in ["unmute", "unmute audio", "un mute"]):
+        return {"action": "unmute"}
+    if any(p in t for p in ["volume up", "louder", "turn it up", "increase volume"]):
+        return {"action": "set_volume", "target": "70"}
+    if any(p in t for p in ["volume down", "quieter", "turn it down", "lower volume", "turn down the volume"]):
+        return {"action": "set_volume", "target": "30"}
+    if any(p in t for p in ["what's the volume", "whats the volume", "volume level",
+                             "how loud", "current volume"]):
+        return {"action": "get_volume"}
+
     # Terminal / Claude Code — explicit open requests
     if any(w in t for w in ["open claude", "start claude", "launch claude", "run claude"]):
         return {"action": "open_terminal"}
+
+    # "pull up" = universal Firefox command. Anything after it is a web search/URL.
+    # Exception: bare 1-2 word app names with no articles/prepositions → app switch instead.
+    if t.startswith("pull up "):
+        _query = t[len("pull up "):].strip()
+        _words = _query.split()
+        _articles = {"the", "a", "an", "for", "in", "of", "from", "to", "my", "this", "that", "some", "how", "what", "where", "who", "why"}
+        _looks_like_app = (
+            _query
+            and len(_words) <= 2
+            and not (_articles & set(w.lower() for w in _words))
+            and not re.search(r'\.(com|io|org|net|co|ai|app|dev)(\s|$)', _query)
+        )
+        if _looks_like_app:
+            return {"action": "switch_app", "target": _query.title()}
+        from urllib.parse import quote as _quote
+        return {"action": "browse", "target": f"https://www.google.com/search?q={_quote(_query)}"}
+
+    # App switching — "open Firefox", "switch to Slack", "launch Spotify", etc.
+    # Fast-path these so the LLM never confuses them with screen/browse requests.
+    _SWITCH_VERBS = ("open ", "switch to ", "launch ", "bring up ", "focus ", "show me ")
+    for _verb in _SWITCH_VERBS:
+        if t.startswith(_verb):
+            _app_candidate = t[len(_verb):].strip()
+            # Skip URLs, search phrases, and already-handled Claude/terminal commands
+            if (
+                _app_candidate
+                and len(_app_candidate.split()) <= 3
+                and not re.search(r'\.(com|io|org|net|co|ai|app|dev)(\s|$)', _app_candidate)
+                and "claude" not in _app_candidate
+                and "terminal" not in _app_candidate
+                and "tab" not in _app_candidate
+                and "window" not in _app_candidate
+                and "website" not in _app_candidate
+                and "browser" not in _app_candidate
+            ):
+                return {"action": "switch_app", "target": _app_candidate.title()}
+            break
 
     # Show recent build
     if any(w in t for w in ["show me what you built", "pull up what you made", "open what you built"]):
@@ -1520,6 +2018,43 @@ def detect_action_fast(text: str) -> dict | None:
 
 # -- Action Handlers -------------------------------------------------------
 
+def _write_project_claude_md(path: str, target: str, plan=None, memory_ctx: str = "") -> None:
+    """Write a rich CLAUDE.md to a new project directory."""
+    lines = ["# JARVIS Project Brief\n\n"]
+
+    lines.append("## Task\n\n")
+    lines.append(target.strip() + "\n")
+
+    if plan:
+        bp = plan.to_dict()
+        answers = bp.get("answers", {})
+        if answers.get("tech_stack"):
+            lines.append(f"\n## Tech Stack\n\n{answers['tech_stack']}\n")
+        if answers.get("design"):
+            lines.append(f"\n## Design\n\n{answers['design']}\n")
+        if answers.get("details"):
+            lines.append(f"\n## Requirements\n\n{answers['details']}\n")
+        lines.append(f"\n## Blueprint\n\n```json\n{json.dumps(bp, indent=2)}\n```\n")
+
+    if memory_ctx.strip():
+        lines.append(f"\n## User Context\n\n{memory_ctx.strip()}\n")
+
+    lines.append(
+        "\n## Build Instructions\n\n"
+        "- BUILD THIS NOW. Do not ask clarifying questions.\n"
+        "- Use your best judgment for any design/architecture decisions.\n"
+        "- Write complete, working code files — not plans or specs.\n"
+        "- If it's a web app: use React + Vite + Tailwind unless tech stack is specified above.\n"
+        "- Make it look polished and professional. Modern UI, clean layout.\n"
+        "- Use realistic mock data, not placeholder Lorem Ipsum.\n"
+        "- Ensure it runs with a single command (npm run dev or similar).\n"
+        "- After building, start the dev server and verify the app loads without errors.\n"
+        "- IMPORTANT: Your LAST line of output MUST be exactly: RUNNING_AT=http://localhost:PORT\n"
+    )
+
+    Path(path, "CLAUDE.md").write_text("".join(lines))
+
+
 async def handle_open_terminal() -> str:
     result = await open_terminal("claude --dangerously-skip-permissions")
     return result["confirmation"]
@@ -1530,26 +2065,30 @@ async def handle_build(target: str) -> str:
     path = str(Path.home() / "Desktop" / name)
     os.makedirs(path, exist_ok=True)
 
-    # Write CLAUDE.md with clear instructions
-    claude_md = Path(path) / "CLAUDE.md"
-    claude_md.write_text(f"# Task\n\n{target}\n\nBuild this completely. If web app, make index.html work standalone.\n")
+    memory_ctx = build_memory_context(target)
+    _write_project_claude_md(path, target, plan=None, memory_ctx=memory_ctx)
 
     # Write prompt to a file, then pipe it to claude -p
     # This avoids all shell escaping issues
     prompt_file = Path(path) / ".jarvis_prompt.txt"
     prompt_file.write_text(target)
 
+    escaped_path = _escape_applescript_string(path)
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p --dangerously-skip-permissions"\n'
+        f'    do script "cd \\"{escaped_path}\\" && cat .jarvis_prompt.txt | claude -p --dangerously-skip-permissions"\n'
         "end tell"
     )
-    await asyncio.create_subprocess_exec(
+    proc = await asyncio.create_subprocess_exec(
         "osascript", "-e", script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        log.error(f"handle_build: Terminal spawn failed: {stderr.decode()[:200]}")
+        return f"Had trouble opening Terminal for {name}, sir."
 
     recently_built.append({"name": name, "path": path, "time": time.time()})
     return f"On it, sir. Claude Code is working in {name}."
@@ -1610,9 +2149,12 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
 
         _active_lookups[lookup_id]["status"] = "done"
 
-        # Speak the result — skip audio if user spoke recently to avoid collision
-        if voice_state and time.time() - voice_state["last_user_time"] < 3:
-            log.info(f"Skipping lookup audio for {lookup_type} — user spoke recently")
+        # Speak the result — skip audio if user or JARVIS spoke very recently
+        _now = time.time()
+        _user_gap = _now - voice_state.get("last_user_time", 0) if voice_state else 99
+        _jarvis_gap = _now - voice_state.get("last_jarvis_time", 0) if voice_state else 99
+        if _user_gap < 3 or _jarvis_gap < 2:
+            log.info(f"Skipping lookup audio for {lookup_type} — collision guard (user_gap={_user_gap:.1f}s, jarvis_gap={_jarvis_gap:.1f}s)")
             # Result is still stored in history below
         else:
             tts = strip_markdown_for_tts(result_text)
@@ -1620,10 +2162,11 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
+                    # Root-cause fix: do NOT send "idle" — frontend audioPlayer.onFinished handles it.
                 else:
                     await ws.send_json({"type": "text", "text": result_text})
-                await ws.send_json({"type": "status", "state": "idle"})
+                    # Text fallback: frontend utterance.onend handles idle transition.
             except Exception:
                 pass
 
@@ -1640,8 +2183,10 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             audio = await synthesize_speech(fallback)
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
-            await ws.send_json({"type": "status", "state": "idle"})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
+                # Root-cause fix: no premature "idle" — frontend handles it on playback end.
+            else:
+                await ws.send_json({"type": "text", "text": fallback})
         except Exception:
             pass
     except Exception as e:
@@ -1725,7 +2270,7 @@ async def handle_browse(text: str, target: str) -> str:
     import re
     from urllib.parse import quote
 
-    browser = "firefox" if "firefox" in text.lower() else "chrome"
+    browser = "chrome" if "chrome" in text.lower() else "firefox"
     combined = text.lower()
 
     # 1. Try to find a URL or domain in the text
@@ -1777,7 +2322,7 @@ async def handle_research(text: str, target: str, client: anthropic.AsyncAnthrop
     """Deep research with Opus — write results to HTML, open in browser."""
     try:
         research_response = await client.messages.create(
-            model="claude-opus-4-6",
+            model=SMART_MODEL,
             max_tokens=2000,
             system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
             messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
@@ -1813,7 +2358,7 @@ blockquote {{ border-left: 3px solid #0ea5e9; margin-left: 0; padding-left: 16px
 
         # Short voice summary via Haiku
         summary = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=FAST_MODEL,
             max_tokens=80,
             system="Summarize this research in ONE sentence for voice. No markdown.",
             messages=[{"role": "user", "content": research_text[:2000]}],
@@ -1846,7 +2391,7 @@ Write an updated summary in 2-4 sentences capturing the key topics, decisions, a
 
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=FAST_MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -1882,8 +2427,12 @@ async def voice_handler(ws: WebSocket):
     _current_response_id = 0
     _cancel_response = False
 
-    # Audio collision prevention — track when user last spoke
-    voice_state = {"last_user_time": 0.0}
+    # Audio collision prevention — track when user last spoke and when JARVIS last spoke
+    voice_state = {"last_user_time": 0.0, "last_jarvis_time": 0.0}
+
+    # Transcript deduplication — ignore identical consecutive transcripts within 5s
+    last_transcript_text = ""
+    last_transcript_time = 0.0
 
     # Self-awareness — track last spoken response to avoid repetition
     last_jarvis_response = ""
@@ -1893,6 +2442,23 @@ async def voice_handler(ws: WebSocket):
     session_summary: str = ""  # Rolling summary of older conversation
     summary_update_pending: bool = False
     messages_since_last_summary: int = 0
+
+    # Persistent session identity — survives across server restarts
+    session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    start_session(session_id)
+
+    # Register with global session registry so signal handlers can save on hard kill
+    _active_sessions[session_id] = {
+        "buffer": session_buffer,
+        "client": anthropic_client,
+        "summary": session_summary,
+    }
+
+    # Load cross-session memory once on connect — injected into every response
+    prior_context = build_session_context()
+
+    # Prune conversation log older than 60 days (runs quickly, fire-and-forget)
+    prune_old_conversations(days=60)
 
     log.info("Voice WebSocket connected")
 
@@ -1916,13 +2482,21 @@ async def voice_handler(ws: WebSocket):
             async def _send_greeting():
                 try:
                     audio_bytes = await synthesize_speech(greeting)
+                    await ws.send_json({"type": "status", "state": "speaking"})
                     if audio_bytes:
                         encoded = base64.b64encode(audio_bytes).decode()
-                        await ws.send_json({"type": "status", "state": "speaking"})
                         await ws.send_json({"type": "audio", "data": encoded, "text": greeting})
-                        history.append({"role": "assistant", "content": greeting})
-                        log.info(f"JARVIS: {greeting}")
-                        await ws.send_json({"type": "status", "state": "idle"})
+                        # Root-cause fix: do NOT send "idle" here. The frontend's
+                        # audioPlayer.onFinished handler transitions to idle once the
+                        # audio buffer actually finishes playing. Sending "idle" early
+                        # was resuming the mic before the greeting audio had even decoded,
+                        # which let the microphone pick up the greeting itself and start
+                        # the feedback loop.
+                    else:
+                        await ws.send_json({"type": "text", "text": greeting})
+                        # Text-only fallback: the frontend's utterance.onend handles idle.
+                    history.append({"role": "assistant", "content": greeting})
+                    log.info(f"JARVIS: {greeting}")
                 except Exception as e:
                     log.warning(f"Greeting failed: {e}")
 
@@ -1949,7 +2523,7 @@ async def voice_handler(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
                     await ws.send_json({"type": "text", "text": response_text})
                 continue
@@ -1960,6 +2534,14 @@ async def voice_handler(ws: WebSocket):
             user_text = apply_speech_corrections(msg.get("text", "").strip())
             if not user_text:
                 continue
+
+            # Deduplicate — skip if this is the same transcript we just processed
+            now_ts = time.time()
+            if user_text == last_transcript_text and (now_ts - last_transcript_time) < 5.0:
+                log.info(f"Skipping duplicate transcript: {user_text[:60]}")
+                continue
+            last_transcript_text = user_text
+            last_transcript_time = now_ts
 
             # Cancel any in-flight response
             _current_response_id += 1
@@ -2000,12 +2582,21 @@ async def voice_handler(ws: WebSocket):
                             for q in plan.pending_questions[plan.current_question_index:]:
                                 if q.get("default") is not None and q["key"] not in plan.answers:
                                     plan.answers[q["key"]] = q["default"]
-                        prompt = await planner.build_prompt()
+                        memory_ctx = build_memory_context(user_text)
+                        prompt = await planner.build_prompt(memory_context=memory_ctx)
                         name = _generate_project_name(prompt)
                         path = str(Path.home() / "Desktop" / name)
                         os.makedirs(path, exist_ok=True)
-                        Path(path, "CLAUDE.md").write_text(prompt)
+                        _write_project_claude_md(
+                            path,
+                            planner.active_plan.original_request if planner.active_plan else user_text,
+                            plan=planner.active_plan,
+                            memory_ctx=memory_ctx,
+                        )
+                        planner.write_blueprint(path)
                         did = dispatch_registry.register(name, path, prompt[:200])
+                        if planner.active_plan:
+                            dispatch_registry.update_blueprint(did, planner.active_plan.to_dict())
                         asyncio.create_task(_execute_prompt_project(name, prompt, work_session, ws, dispatch_id=did, history=history, voice_state=voice_state))
                         planner.reset()
                         response_text = "Building it now, sir."
@@ -2013,12 +2604,21 @@ async def voice_handler(ws: WebSocket):
                         # Confirmation phase
                         result = await planner.handle_confirmation(user_text)
                         if result["confirmed"]:
-                            prompt = await planner.build_prompt()
+                            memory_ctx = build_memory_context(user_text)
+                            prompt = await planner.build_prompt(memory_context=memory_ctx)
                             name = _generate_project_name(prompt)
                             path = str(Path.home() / "Desktop" / name)
                             os.makedirs(path, exist_ok=True)
-                            Path(path, "CLAUDE.md").write_text(prompt)
+                            _write_project_claude_md(
+                                path,
+                                planner.active_plan.original_request if planner.active_plan else user_text,
+                                plan=planner.active_plan,
+                                memory_ctx=memory_ctx,
+                            )
+                            planner.write_blueprint(path)
                             did = dispatch_registry.register(name, path, prompt[:200])
+                            if planner.active_plan:
+                                dispatch_registry.update_blueprint(did, planner.active_plan.to_dict())
                             asyncio.create_task(_execute_prompt_project(name, prompt, work_session, ws, dispatch_id=did, history=history, voice_state=voice_state))
                             planner.reset()
                             response_text = "On it, sir."
@@ -2050,6 +2650,7 @@ async def voice_handler(ws: WebSocket):
                             cached_projects, history,
                             last_response=last_jarvis_response,
                             session_summary=session_summary,
+                            prior_context=prior_context,
                         )
                     else:
                         # Send to claude -p (full power)
@@ -2086,7 +2687,7 @@ async def voice_handler(ws: WebSocket):
                         if full_response and anthropic_client:
                             try:
                                 summary = await anthropic_client.messages.create(
-                                    model="claude-haiku-4-5-20251001",
+                                    model=FAST_MODEL,
                                     max_tokens=100,
                                     system=(
                                         f"You are JARVIS reporting to the user ({USER_NAME}). Summarize what happened in 1-2 sentences. "
@@ -2143,18 +2744,74 @@ async def voice_handler(ws: WebSocket):
                             response_text = format_tasks_for_voice(tasks)
                         elif action["action"] == "check_usage":
                             response_text = get_usage_summary()
+                        elif action["action"] == "close_tab":
+                            result = await close_tab()
+                            response_text = result["confirmation"]
+                        # ── NEW SYSTEM CONTROL ACTIONS (fast path) ──
+                        elif action["action"] in (
+                            "close_window", "browser_back", "browser_forward", "reload",
+                            "get_tab", "minimize_window", "maximize_window", "screenshot",
+                            "save", "mute", "unmute", "get_volume",
+                        ):
+                            result = await system_control.dispatch(action["action"], "")
+                            response_text = result["confirmation"]
+                        elif action["action"] in ("move_window", "scroll", "set_volume"):
+                            tgt = action.get("target", "")
+                            result = await system_control.dispatch(action["action"], tgt)
+                            response_text = result["confirmation"]
                         else:
                             response_text = "Understood, sir."
                     else:
                         if not anthropic_client:
                             response_text = "API key not configured."
                         else:
-                            response_text = await generate_response(
-                                user_text, anthropic_client, task_manager,
-                                cached_projects, history,
-                                last_response=last_jarvis_response,
-                                session_summary=session_summary,
-                            )
+                            # ── Streaming local LLM path (low latency) ──
+                            _streaming_spoken = False
+                            if LOCAL_LLM_MODEL:
+                                try:
+                                    _now = datetime.now()
+                                    _ct = _now.strftime("%A, %B %d, %Y at %I:%M %p")
+                                    _recent = [m["content"] for m in history[-10:] if m.get("role") == "assistant"]
+                                    _recent_str = "".join(f'- "{r[:150]}"\n' for r in _recent[-3:])
+                                    _lsys = _build_local_system(
+                                        current_time=_ct,
+                                        weather_info=_ctx_cache.get("weather", ""),
+                                        screen_context=_ctx_cache["screen"],
+                                        calendar_context=_ctx_cache["calendar"],
+                                        active_tasks=task_manager.get_active_tasks_summary(),
+                                        recent_responses=_recent_str,
+                                    )
+                                    _lmsgs = history[-6:]
+                                    while _lmsgs and _lmsgs[0].get("role") == "assistant":
+                                        _lmsgs = _lmsgs[1:]
+                                    if not _lmsgs or _lmsgs[-1].get("content") != user_text:
+                                        _lmsgs = _lmsgs + [{"role": "user", "content": user_text}]
+
+                                    _spoken_parts: list[str] = []
+                                    async for _sentence, _is_last in _local_stream_sentences(_lsys, _lmsgs):
+                                        if _is_last:
+                                            response_text = _local_stream_sentences._last_full_text or " ".join(_spoken_parts)
+                                            break
+                                        _tts_text = strip_markdown_for_tts(_sentence)
+                                        if _tts_text:
+                                            _audio = await synthesize_speech(_tts_text)
+                                            if _audio:
+                                                await ws.send_json({"type": "status", "state": "speaking"})
+                                                await ws.send_json({"type": "audio", "data": base64.b64encode(_audio).decode(), "text": _sentence})
+                                                _streaming_spoken = True
+                                            _spoken_parts.append(_sentence)
+                                except Exception as _e:
+                                    log.warning(f"[local-llm stream] fell back to Anthropic: {_e}")
+                                    _streaming_spoken = False
+
+                            if not _streaming_spoken:
+                                response_text = await generate_response(
+                                    user_text, anthropic_client, task_manager,
+                                    cached_projects, history,
+                                    last_response=last_jarvis_response,
+                                    session_summary=session_summary,
+                                    prior_context=prior_context,
+                                )
 
                             # Check for action tags embedded in LLM response
                             clean_response, embedded_action = extract_action(response_text)
@@ -2171,6 +2828,10 @@ async def voice_handler(ws: WebSocket):
                                         response_text = "On it, sir."
                                     elif action_type == "research":
                                         response_text = "Looking into that now, sir."
+                                    elif action_type == "close_tab":
+                                        response_text = "Closing that tab, sir."
+                                    elif action_type == "click":
+                                        response_text = "Done, sir."
                                     else:
                                         response_text = "Right away, sir."
 
@@ -2280,13 +2941,40 @@ async def voice_handler(ws: WebSocket):
                                         else:
                                             msg = f"Couldn't find a note matching '{search_term}', sir."
                                         audio = await synthesize_speech(strip_markdown_for_tts(msg))
-                                        if audio and _ws:
+                                        if _ws:
                                             try:
                                                 await _ws.send_json({"type": "status", "state": "speaking"})
-                                                await _ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                                                if audio:
+                                                    await _ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                                                else:
+                                                    await _ws.send_json({"type": "text", "text": msg})
                                             except Exception:
                                                 pass
                                     asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
+                                elif embedded_action["action"] == "close_tab":
+                                    result = await close_tab()
+                                    log.info(f"close_tab: {result}")
+                                    if not response_text.strip():
+                                        response_text = result["confirmation"]
+                                elif embedded_action["action"] == "click":
+                                    selector = embedded_action["target"].strip()
+                                    result = await click_element(selector)
+                                    log.info(f"click '{selector}': {result}")
+                                elif embedded_action["action"] in (
+                                    # ── System Control actions via LLM tag ──
+                                    "open_tab", "close_window", "browser_back", "browser_forward",
+                                    "reload", "get_tab", "switch_app", "quit_app", "hide_app",
+                                    "minimize_window", "maximize_window", "move_window",
+                                    "copy", "paste", "undo", "redo", "select_all", "save",
+                                    "screenshot", "scroll", "set_volume", "mute", "unmute",
+                                    "get_volume", "open_folder", "trash_file", "reveal_file",
+                                ):
+                                    sc_action = embedded_action["action"]
+                                    sc_target = embedded_action["target"].strip()
+                                    result = await system_control.dispatch(sc_action, sc_target)
+                                    log.info(f"system_control {sc_action}: {result}")
+                                    if not response_text.strip():
+                                        response_text = result["confirmation"]
 
                 # Update history
                 history.append({"role": "user", "content": user_text})
@@ -2295,6 +2983,10 @@ async def voice_handler(ws: WebSocket):
                 # Three-tier memory: also track in session buffer
                 session_buffer.append({"role": "user", "content": user_text})
                 session_buffer.append({"role": "assistant", "content": response_text})
+
+                # Persist every exchange to the conversation log
+                log_message(session_id, "user", user_text)
+                log_message(session_id, "jarvis", response_text)
 
                 # Check if rolling summary needs updating
                 messages_since_last_summary += 1
@@ -2310,6 +3002,9 @@ async def voice_handler(ws: WebSocket):
                                 session_summary, rotated, anthropic_client
                             )
                             summary_update_pending = False
+                            # Keep registry in sync so signal handler has latest summary
+                            if session_id in _active_sessions:
+                                _active_sessions[session_id]["summary"] = session_summary
                         asyncio.create_task(_do_summary())
                     else:
                         summary_update_pending = False
@@ -2318,17 +3013,21 @@ async def voice_handler(ws: WebSocket):
                 if anthropic_client and len(user_text) > 15:
                     asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
 
-                # TTS
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
-                    await ws.send_json({"type": "status", "state": "idle"})
+                # TTS — skip if streaming already sent audio sentence-by-sentence
+                _already_spoken = locals().get("_streaming_spoken", False)
+                if not _already_spoken:
+                    tts = strip_markdown_for_tts(response_text)
+                    await ws.send_json({"type": "status", "state": "speaking"})
+                    audio = await synthesize_speech(tts)
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+                    else:
+                        await ws.send_json({"type": "text", "text": response_text})
+                    # Do NOT send "idle" status here either — it would beat the speech
+                    # synthesis start and open the mic while the browser is still speaking.
                 log.info(f"JARVIS: {response_text}")
                 last_jarvis_response = response_text
+                voice_state["last_jarvis_time"] = time.time()
 
             except Exception as e:
                 log.error(f"Error: {e}", exc_info=True)
@@ -2349,6 +3048,38 @@ async def voice_handler(ws: WebSocket):
         log.error(f"WebSocket error: {e}", exc_info=True)
     finally:
         task_manager.unregister_websocket(ws)
+
+        # Persist session summary so JARVIS remembers this conversation next time
+        msg_count = len(session_buffer) // 2
+        if msg_count > 0 and anthropic_client:
+            try:
+                # Summarise the session using Haiku
+                recent = session_buffer[-30:]  # Cap at last 30 messages
+                convo_text = "\n".join(
+                    f"{'User' if m['role'] == 'user' else 'JARVIS'}: {m['content'][:200]}"
+                    for m in recent
+                )
+                summary_resp = await anthropic_client.messages.create(
+                    model=FAST_MODEL,
+                    max_tokens=250,
+                    system=(
+                        "Summarise this JARVIS conversation in 2-3 sentences. "
+                        "Cover: main topics discussed, decisions made, tasks or projects started, "
+                        "anything personal the user shared. Be specific — names, numbers, and details matter. "
+                        "Write in third person past tense."
+                    ),
+                    messages=[{"role": "user", "content": convo_text}],
+                )
+                final_summary = summary_resp.content[0].text.strip()
+            except Exception as e:
+                log.warning(f"Session summary generation failed: {e}")
+                final_summary = session_summary  # Fall back to rolling summary
+            end_session(session_id, final_summary, msg_count)
+        elif msg_count > 0:
+            end_session(session_id, session_summary, msg_count)
+
+        # Deregister from global registry — session is saved, no longer needs signal protection
+        _active_sessions.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -2413,7 +3144,7 @@ class PreferencesUpdate(BaseModel):
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "EDGE_TTS_VOICE", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2426,29 +3157,17 @@ async def api_test_anthropic(body: KeyTest):
         return {"valid": False, "error": "No key provided"}
     try:
         client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
+        await client.messages.create(model=FAST_MODEL, max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
         return {"valid": True}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
-@app.post("/api/settings/test-fish")
-async def api_test_fish(body: KeyTest):
-    key = body.key_value or os.getenv("FISH_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
+@app.post("/api/settings/test-tts")
+async def api_test_tts():
+    """Test Edge TTS by synthesizing a short phrase."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://api.fish.audio/v1/tts",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"text": "test", "reference_id": FISH_VOICE_ID},
-            )
-            if resp.status_code in (200, 201):
-                return {"valid": True}
-            elif resp.status_code == 401:
-                return {"valid": False, "error": "Invalid API key"}
-            else:
-                return {"valid": False, "error": f"HTTP {resp.status_code}"}
+        result = await synthesize_speech("JARVIS online.")
+        return {"valid": bool(result)}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
@@ -2480,8 +3199,7 @@ async def api_settings_status():
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
             "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
-            "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
+            "edge_tts_voice": env_dict.get("EDGE_TTS_VOICE", EDGE_TTS_VOICE),
             "user_name": env_dict.get("USER_NAME", ""),
         },
     }
@@ -2524,17 +3242,19 @@ async def api_fix_self():
     jarvis_dir = str(Path(__file__).parent)
     # The work_session is per-WebSocket, so we set a flag that the handler picks up
     # For now, also open Terminal so user can see
+    escaped_jarvis_dir = jarvis_dir.replace('"', '\\"')
     script = (
         'tell application "Terminal"\n'
         '    activate\n'
-        f'    do script "cd {jarvis_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "cd \\"{escaped_jarvis_dir}\\" && claude --dangerously-skip-permissions"\n'
         'end tell'
     )
-    await asyncio.create_subprocess_exec(
+    proc = await asyncio.create_subprocess_exec(
         "osascript", "-e", script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    await proc.communicate()
     log.info("Work mode: JARVIS repo opened for self-improvement")
     return {"status": "work_mode_active", "path": jarvis_dir}
 

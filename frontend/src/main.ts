@@ -82,14 +82,19 @@ function transition(newState: State) {
 
 const voiceInput = createVoiceInput(
   (text: string) => {
-    // Cancel any current JARVIS response before sending new input
+    // Full thought received — cancel any current JARVIS response and send
     audioPlayer.stop();
-    // User spoke — send transcript
     socket.send({ type: "transcript", text, isFinal: true });
+    statusEl.textContent = "";
     transition("thinking");
   },
   (msg: string) => {
     showError(msg);
+  },
+  (partial: string) => {
+    // Accumulating — still listening, show word count as subtle cue
+    const words = partial.trim().split(/\s+/).length;
+    statusEl.textContent = words >= 3 ? "listening..." : "";
   }
 );
 
@@ -98,7 +103,10 @@ const voiceInput = createVoiceInput(
 // ---------------------------------------------------------------------------
 
 audioPlayer.onFinished(() => {
-  transition("idle");
+  // Debounce before resuming the mic — wait for room echo to clear.
+  // 300ms was not enough for some environments; 1000ms prevents JARVIS's own
+  // voice being captured and re-sent as the next user message.
+  setTimeout(() => transition("idle"), 1000);
 });
 
 // ---------------------------------------------------------------------------
@@ -117,9 +125,18 @@ socket.onMessage((msg) => {
       }
       audioPlayer.enqueue(audioData);
     } else {
-      // TTS failed — no audio but still need to return to idle
-      console.warn("[audio] no data received, returning to idle");
-      transition("idle");
+      // TTS failed — fall back to browser speech synthesis
+      const fallbackText = msg.text as string;
+      console.warn("[audio] no data received, falling back to speechSynthesis");
+      if (fallbackText) {
+        transition("speaking");
+        const utterance = new SpeechSynthesisUtterance(fallbackText);
+        utterance.onend = () => transition("idle");
+        utterance.onerror = () => transition("idle");
+        speechSynthesis.speak(utterance);
+      } else {
+        transition("idle");
+      }
     }
     // Log text for debugging
     if (msg.text) console.log("[JARVIS]", msg.text);
@@ -135,8 +152,16 @@ socket.onMessage((msg) => {
       transition("idle");
     }
   } else if (type === "text") {
-    // Text fallback when TTS fails
-    console.log("[JARVIS]", msg.text);
+    // Text fallback when TTS fails — use browser speech synthesis
+    const text = msg.text as string;
+    console.log("[JARVIS]", text);
+    if (text) {
+      transition("speaking");
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.onend = () => transition("idle");
+      utterance.onerror = () => transition("idle");
+      speechSynthesis.speak(utterance);
+    }
   } else if (type === "task_spawned") {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {
@@ -148,25 +173,36 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
-// Start listening after a brief delay for the orb to render
-setTimeout(() => {
+// Chrome requires a user gesture before granting microphone to a new origin.
+// We defer voice start until first click/key so the permission dialog shows.
+let voiceStarted = false;
+
+function activateVoice() {
+  if (voiceStarted) return;
+  voiceStarted = true;
+  statusEl.textContent = "";
   voiceInput.start();
   transition("listening");
-}, 1000);
+}
 
-// Resume AudioContext on ANY user interaction (browser autoplay policy)
+// Resume AudioContext, warm up speechSynthesis, and kick off voice on first gesture
 function ensureAudioContext() {
   const ctx = audioPlayer.getAnalyser().context as AudioContext;
   if (ctx.state === "suspended") {
     ctx.resume().then(() => console.log("[audio] context resumed"));
   }
+  // Warm up speechSynthesis — Chrome blocks it until first user gesture
+  if (speechSynthesis.paused) speechSynthesis.resume();
+  const warmup = new SpeechSynthesisUtterance("");
+  speechSynthesis.speak(warmup);
+  activateVoice();
 }
 document.addEventListener("click", ensureAudioContext);
 document.addEventListener("touchstart", ensureAudioContext);
 document.addEventListener("keydown", ensureAudioContext, { once: true });
 
-// Try to resume audio context on load
-ensureAudioContext();
+// Show a tap hint until the user interacts
+statusEl.textContent = "tap to activate";
 
 // ---------------------------------------------------------------------------
 // UI Controls

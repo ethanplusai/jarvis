@@ -45,22 +45,21 @@ end tell
 
 
 async def _ensure_calendar_running():
-    """Launch Calendar.app if not already running."""
+    """Check if Calendar.app is already running — does not auto-launch it."""
     global _calendar_launched
     if _calendar_launched:
         return
+    check = 'tell application "System Events" to return (name of every application process) contains "Calendar"'
     try:
         proc = await asyncio.create_subprocess_exec(
-            "open", "-a", "Calendar", "-g",
+            "osascript", "-e", check,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await asyncio.wait_for(proc.communicate(), timeout=5)
-        await asyncio.sleep(2)
-        _calendar_launched = True
-        log.info("Calendar.app launched")
-    except Exception as e:
-        log.warning(f"Failed to launch Calendar: {e}")
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3)
+        _calendar_launched = "true" in stdout.decode().lower()
+    except Exception:
+        pass
 
 
 async def _fetch_calendar_events(cal_name: str, timeout: float = 12.0) -> list[dict]:

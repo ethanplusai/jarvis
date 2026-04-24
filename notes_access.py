@@ -41,11 +41,17 @@ tell application "Notes"
     set limit to count of allNotes
     if limit > {count} then set limit to {count}
     repeat with i from 1 to limit
-        set n to item i of allNotes
-        set nName to name of n
-        set nDate to creation date of n as string
-        set nFolder to name of container of n
-        set output to output & nName & "|||" & nDate & "|||" & nFolder & linefeed
+        try
+            set n to item i of allNotes
+            set nName to name of n
+            set nDate to creation date of n as string
+            try
+                set nFolder to name of container of n
+            on error
+                set nFolder to "Notes"
+            end try
+            set output to output & nName & "|||" & nDate & "|||" & nFolder & linefeed
+        end try
     end repeat
     return output
 end tell

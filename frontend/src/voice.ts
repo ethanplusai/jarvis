@@ -18,7 +18,8 @@ declare const webkitSpeechRecognition: any;
 
 export function createVoiceInput(
   onTranscript: (text: string) => void,
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  onAccumulating?: (partial: string) => void,
 ): VoiceInput {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const SR = (window as any).SpeechRecognition || (typeof webkitSpeechRecognition !== "undefined" ? webkitSpeechRecognition : null);
@@ -35,11 +36,49 @@ export function createVoiceInput(
   let shouldListen = false;
   let paused = false;
 
+  // ── Adaptive send debounce ──────────────────────────────────────────────────
+  // The Web Speech API fires isFinal on every natural pause, which is too eager.
+  // Instead we accumulate final segments and wait for silence before sending.
+  // The wait scales with how much has been said: short phrases get a fast response,
+  // longer thoughts get full space to finish.
+  let pendingText = "";
+  let sendTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function adaptiveDelay(wordCount: number): number {
+    if (wordCount < 5)  return 1800; // quick question — respond in ~2 s
+    if (wordCount < 15) return 2500; // normal sentence
+    return 3200;                      // longer thought — give it full room
+  }
+
+  function flush() {
+    sendTimer = null;
+    const text = pendingText.trim();
+    pendingText = "";
+    if (text) onTranscript(text);
+  }
+
+  function cancelPending() {
+    if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+    pendingText = "";
+  }
+  // ───────────────────────────────────────────────────────────────────────────
+
   recognition.onresult = (event: any) => {
+    // Guard: recognition.stop() during pause flushes a late final result —
+    // without this, JARVIS's own TTS would re-enter as the next user message.
+    if (paused) return;
+
     for (let i = event.resultIndex; i < event.results.length; i++) {
       if (event.results[i].isFinal) {
         const text = event.results[i][0].transcript.trim();
-        if (text) onTranscript(text);
+        if (!text) continue;
+
+        // Accumulate and reset the silence timer
+        pendingText = pendingText ? pendingText + " " + text : text;
+        onAccumulating?.(pendingText);
+
+        if (sendTimer) clearTimeout(sendTimer);
+        sendTimer = setTimeout(flush, adaptiveDelay(pendingText.split(/\s+/).length));
       }
     }
   };
@@ -80,10 +119,13 @@ export function createVoiceInput(
     stop() {
       shouldListen = false;
       paused = false;
+      cancelPending();
       recognition.stop();
     },
     pause() {
       paused = true;
+      // Discard accumulated text — JARVIS is about to speak, not listen
+      cancelPending();
       recognition.stop();
     },
     resume() {
