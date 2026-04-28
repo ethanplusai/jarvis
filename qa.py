@@ -7,6 +7,7 @@ Spawns a claude -p subprocess to check completed work, auto-retries on failure.
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Optional
@@ -14,6 +15,8 @@ from typing import Optional
 log = logging.getLogger("jarvis.qa")
 
 MAX_RETRIES = 3
+
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -45,10 +48,11 @@ class QAAgent:
         )
 
         try:
+            cmd = ["claude", "-p", "--output-format", "text"]
+            if _SKIP_PERMISSIONS:
+                cmd.append("--dangerously-skip-permissions")
             process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -133,10 +137,11 @@ class QAAgent:
         )
 
         try:
+            cmd = ["claude", "-p", "--output-format", "text"]
+            if _SKIP_PERMISSIONS:
+                cmd.append("--dangerously-skip-permissions")
             process = await asyncio.create_subprocess_exec(
-                "claude", "-p",
-                "--output-format", "text",
-                "--dangerously-skip-permissions",
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

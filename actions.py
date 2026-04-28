@@ -17,6 +17,8 @@ log = logging.getLogger("jarvis.actions")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
+
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
     """Temporarily set the front Terminal window to Ocean theme, then revert.
@@ -80,10 +82,15 @@ async def _revert_terminal_theme(profile_name: str):
         pass
 
 
+def _applescript_escape(s: str) -> str:
+    """Escape a string for safe embedding in an AppleScript double-quoted string."""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
+
+
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
     if command:
-        escaped = command.replace('"', '\\"')
+        escaped = _applescript_escape(command)
         script = (
             'tell application "Terminal"\n'
             "    activate\n"
@@ -158,18 +165,18 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
     """Open Terminal, cd to project dir, run Claude Code interactively.
 
     Writes the prompt to CLAUDE.md (which claude reads automatically on startup)
-    then launches claude in interactive mode with --dangerously-skip-permissions.
+    then launches claude in interactive mode.
     No prompt escaping needed — CLAUDE.md handles context delivery.
     """
-    # Write prompt to CLAUDE.md — claude reads this automatically
     claude_md = Path(project_dir) / "CLAUDE.md"
     claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
 
-    # Launch claude interactive — it reads CLAUDE.md on its own
+    skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    escaped_dir = _applescript_escape(project_dir)
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {project_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "cd {escaped_dir} && claude{skip_flag}"\n'
         "end tell"
     )
     proc = await asyncio.create_subprocess_exec(
@@ -197,8 +204,8 @@ async def prompt_existing_terminal(project_name: str, prompt: str) -> dict:
     Uses System Events keystroke to type into an active Claude Code session
     rather than `do script` which would open a new shell.
     """
-    escaped_name = project_name.replace('"', '\\"')
-    escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_name = _applescript_escape(project_name)
+    escaped_prompt = _applescript_escape(prompt)
 
     # Single atomic script: find window, focus it, type into it
     script = f'''
@@ -345,7 +352,8 @@ async def execute_action(intent: dict, projects: list = None) -> dict:
     target = intent.get("target", "")
 
     if action == "open_terminal":
-        result = await open_terminal("claude --dangerously-skip-permissions")
+        claude_cmd = "claude --dangerously-skip-permissions" if _SKIP_PERMISSIONS else "claude"
+        result = await open_terminal(claude_cmd)
         result["project_dir"] = None
         return result
 
