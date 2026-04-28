@@ -12,10 +12,13 @@ JARVIS reads the responses via subprocess, summarizes, and reports back.
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
 log = logging.getLogger("jarvis.work_mode")
+
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
 
 SESSION_FILE = Path(__file__).parent / "data" / "active_session.json"
 
@@ -65,11 +68,9 @@ class WorkSession:
         if not claude_path:
             return "Claude CLI not found on this system."
 
-        cmd = [
-            claude_path, "-p",
-            "--output-format", "text",
-            "--dangerously-skip-permissions",
-        ]
+        cmd = [claude_path, "-p", "--output-format", "text"]
+        if _SKIP_PERMISSIONS:
+            cmd.append("--dangerously-skip-permissions")
 
         # Use --continue for subsequent messages to maintain context
         if self._message_count > 0:

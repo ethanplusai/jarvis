@@ -66,6 +66,7 @@ FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -392,10 +393,11 @@ class ClaudeTaskManager:
         prompt_file.write_text(task.prompt)
 
         # Open Terminal.app with claude running in the project directory
+        skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
         applescript = f'''
         tell application "Terminal"
             activate
-            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p --dangerously-skip-permissions | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
+            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p{skip_flag} | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
         end tell
         '''
 
@@ -786,8 +788,11 @@ async def _execute_research(target: str, ws=None):
 
         log.info(f"Research started via claude -p in {path}")
 
+        cmd = ["claude", "-p", "--output-format", "text"]
+        if _SKIP_PERMISSIONS:
+            cmd.append("--dangerously-skip-permissions")
         process = await asyncio.create_subprocess_exec(
-            "claude", "-p", "--output-format", "text", "--dangerously-skip-permissions",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1521,7 +1526,8 @@ def detect_action_fast(text: str) -> dict | None:
 # -- Action Handlers -------------------------------------------------------
 
 async def handle_open_terminal() -> str:
-    result = await open_terminal("claude --dangerously-skip-permissions")
+    claude_cmd = "claude --dangerously-skip-permissions" if _SKIP_PERMISSIONS else "claude"
+    result = await open_terminal(claude_cmd)
     return result["confirmation"]
 
 
@@ -1539,10 +1545,11 @@ async def handle_build(target: str) -> str:
     prompt_file = Path(path) / ".jarvis_prompt.txt"
     prompt_file.write_text(target)
 
+    skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p --dangerously-skip-permissions"\n'
+        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p{skip_flag}"\n'
         "end tell"
     )
     await asyncio.create_subprocess_exec(
@@ -2524,10 +2531,11 @@ async def api_fix_self():
     jarvis_dir = str(Path(__file__).parent)
     # The work_session is per-WebSocket, so we set a flag that the handler picks up
     # For now, also open Terminal so user can see
+    skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
     script = (
         'tell application "Terminal"\n'
         '    activate\n'
-        f'    do script "cd {jarvis_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "cd {jarvis_dir} && claude{skip_flag}"\n'
         'end tell'
     )
     await asyncio.create_subprocess_exec(
