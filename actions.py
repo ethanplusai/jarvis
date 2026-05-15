@@ -17,7 +17,7 @@ log = logging.getLogger("jarvis.actions")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
-_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):

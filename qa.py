@@ -16,7 +16,7 @@ log = logging.getLogger("jarvis.qa")
 
 MAX_RETRIES = 3
 
-_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
 
 @dataclass
