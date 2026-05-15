@@ -203,8 +203,13 @@ class JarvisBrowser:
             await page.wait_for_timeout(1000)  # let rendering settle
 
             if not path:
-                tmp = tempfile.mktemp(suffix=".png", prefix="jarvis_screenshot_")
-                path = tmp
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".png",
+                    prefix="jarvis_screenshot_",
+                    delete=False,
+                )
+                path = tmp.name
+                tmp.close()
 
             await page.screenshot(path=path, full_page=True)
             log.info(f"Screenshot saved: {path}")

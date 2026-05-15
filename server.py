@@ -10,9 +10,11 @@ Handles:
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -34,7 +36,7 @@ from typing import Optional
 
 import anthropic
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -67,8 +69,69 @@ FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "").lower() in ("1", "true", "yes")
+JARVIS_API_TOKEN = os.getenv("JARVIS_API_TOKEN", "").strip()
+
+_LOCALHOST_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+_PUBLIC_API_PATHS = {"/api/health"}
 
 DESKTOP_PATH = Path.home() / "Desktop"
+
+
+def _configured_cors_origins() -> list[str]:
+    """Return explicit CORS origins from env; localhost is handled by regex."""
+    raw = os.getenv("JARVIS_CORS_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """True for local clients; TestClient reports itself as ``testclient``."""
+    if not host:
+        return False
+    host = host.split("%", 1)[0].strip("[]").lower()
+    if host in {"localhost", "testclient"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def _token_is_valid(token: str | None) -> bool:
+    return bool(
+        JARVIS_API_TOKEN
+        and token
+        and secrets.compare_digest(token, JARVIS_API_TOKEN)
+    )
+
+
+def _request_token(headers, query_params=None) -> str:
+    token = headers.get("x-jarvis-api-token", "").strip()
+    if not token:
+        token = _extract_bearer_token(headers.get("authorization"))
+    if not token and query_params is not None:
+        token = (query_params.get("token") or "").strip()
+    return token
+
+
+def _http_request_is_trusted(request: Request) -> bool:
+    if _is_loopback_host(request.client.host if request.client else None):
+        return True
+    return _token_is_valid(_request_token(request.headers))
+
+
+def _websocket_request_is_trusted(ws: WebSocket) -> bool:
+    if _is_loopback_host(ws.client.host if ws.client else None):
+        return True
+    return _token_is_valid(_request_token(ws.headers, ws.query_params))
 
 JARVIS_SYSTEM_PROMPT = """\
 You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_name}'s AI assistant, modeled precisely after Tony Stark's AI from the MCU films.
@@ -1428,11 +1491,31 @@ app = FastAPI(title="JARVIS Server", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_configured_cors_origins(),
+    allow_origin_regex=_LOCALHOST_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def restrict_remote_api_access(request: Request, call_next):
+    """Protect local-control API routes from unauthenticated LAN access."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        if not _http_request_is_trusted(request):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": (
+                        "JARVIS control APIs are limited to localhost. "
+                        "Set JARVIS_API_TOKEN and send it as a Bearer token "
+                        "or X-JARVIS-API-Token for remote access."
+                    )
+                },
+            )
+    return await call_next(request)
 
 
 # -- REST Endpoints --------------------------------------------------------
@@ -1950,6 +2033,10 @@ async def voice_handler(ws: WebSocket):
         {"type": "task_spawned", "task_id": "...", "prompt": "..."}
         {"type": "task_complete", "task_id": "...", "summary": "..."}
     """
+    if not _websocket_request_is_trusted(ws):
+        await ws.close(code=1008, reason="JARVIS voice socket is limited to localhost")
+        return
+
     await ws.accept()
     task_manager.register_websocket(ws)
     history: list[dict] = []
@@ -2460,6 +2547,7 @@ def _read_env() -> tuple[list[str], dict[str, str]]:
 
 def _write_env_key(key: str, value: str) -> None:
     """Update a single key in .env, preserving comments and order."""
+    value = value.replace("\r", "").replace("\n", "")
     lines, _ = _read_env()
     found = False
     new_lines = []
@@ -2590,7 +2678,7 @@ async def api_restart():
     log.info("Restart requested — shutting down in 2 seconds")
     async def _restart():
         await asyncio.sleep(2)
-        cmd = [sys.executable, __file__, "--port", "8340", "--host", "0.0.0.0"]
+        cmd = [sys.executable, __file__, "--port", "8340", "--host", "127.0.0.1"]
         os.execv(sys.executable, cmd)
     asyncio.create_task(_restart())
     return {"status": "restarting"}
@@ -2645,7 +2733,7 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="JARVIS Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host")
     parser.add_argument("--port", type=int, default=8340, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on changes")
     parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem")
