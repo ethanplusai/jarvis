@@ -98,6 +98,22 @@ USER_NAME=Tony
 CALENDAR_ACCOUNTS=you@gmail.com,work@company.com
 ```
 
+## Local Access & Security
+
+JARVIS can open terminals, start Claude Code sessions, restart itself, and update API keys, so the server is intentionally local-first. By default `python server.py` listens on `127.0.0.1` and the control API/WebSocket reject non-local clients.
+
+If you deliberately expose JARVIS beyond your machine, set a long random token and send it as `Authorization: Bearer <token>` or `X-JARVIS-API-Token`. Browser WebSocket clients can pass the same token as `/ws/voice?token=<token>`:
+
+```env
+JARVIS_API_TOKEN=generate-a-long-random-token
+```
+
+Localhost browser origins are allowed automatically for development. To allow additional trusted cross-origin frontends, set:
+
+```env
+JARVIS_CORS_ORIGINS=https://trusted.example.com
+```
+
 ## Architecture
 
 ```
