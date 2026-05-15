@@ -82,7 +82,7 @@ async def _revert_terminal_theme(profile_name: str):
         pass
 
 
-def _applescript_escape(s: str) -> str:
+def applescript_escape(s: str) -> str:
     """Escape a string for safe embedding in an AppleScript double-quoted string."""
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
 
@@ -90,7 +90,7 @@ def _applescript_escape(s: str) -> str:
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
     if command:
-        escaped = _applescript_escape(command)
+        escaped = applescript_escape(command)
         script = (
             'tell application "Terminal"\n'
             "    activate\n"
@@ -172,7 +172,7 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
     claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
 
     skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
-    escaped_dir = _applescript_escape(project_dir)
+    escaped_dir = applescript_escape(project_dir)
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
@@ -204,8 +204,8 @@ async def prompt_existing_terminal(project_name: str, prompt: str) -> dict:
     Uses System Events keystroke to type into an active Claude Code session
     rather than `do script` which would open a new shell.
     """
-    escaped_name = _applescript_escape(project_name)
-    escaped_prompt = _applescript_escape(prompt)
+    escaped_name = applescript_escape(project_name)
+    escaped_prompt = applescript_escape(prompt)
 
     # Single atomic script: find window, focus it, type into it
     script = f'''

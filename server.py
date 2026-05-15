@@ -39,7 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
+from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
@@ -394,10 +394,11 @@ class ClaudeTaskManager:
 
         # Open Terminal.app with claude running in the project directory
         skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+        escaped_work_dir = applescript_escape(work_dir)
         applescript = f'''
         tell application "Terminal"
             activate
-            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p{skip_flag} | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
+            set newTab to do script "cd {escaped_work_dir} && cat .jarvis_prompt.md | claude -p{skip_flag} | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
         end tell
         '''
 
@@ -849,7 +850,7 @@ async def _execute_research(target: str, ws=None):
 
 async def _focus_terminal_window(project_name: str):
     """Bring a Terminal window matching the project name to front."""
-    escaped = project_name.replace('"', '\\"')
+    escaped = applescript_escape(project_name)
     script = f'''
 tell application "Terminal"
     repeat with w in windows
@@ -1546,10 +1547,11 @@ async def handle_build(target: str) -> str:
     prompt_file.write_text(target)
 
     skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    escaped_path = applescript_escape(path)
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p{skip_flag}"\n'
+        f'    do script "cd {escaped_path} && cat .jarvis_prompt.txt | claude -p{skip_flag}"\n'
         "end tell"
     )
     await asyncio.create_subprocess_exec(
@@ -1582,7 +1584,8 @@ async def handle_show_recent() -> str:
         return f"Opened {html_files[0].name} from {last['name']}, sir."
 
     # Fall back to opening the folder in Finder
-    script = f'tell application "Finder"\nactivate\nopen POSIX file "{last["path"]}"\nend tell'
+    escaped_last_path = applescript_escape(last["path"])
+    script = f'tell application "Finder"\nactivate\nopen POSIX file "{escaped_last_path}"\nend tell'
     await asyncio.create_subprocess_exec("osascript", "-e", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     return f"Opened the {last['name']} folder in Finder, sir."
 
@@ -2532,10 +2535,11 @@ async def api_fix_self():
     # The work_session is per-WebSocket, so we set a flag that the handler picks up
     # For now, also open Terminal so user can see
     skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    escaped_jarvis_dir = applescript_escape(jarvis_dir)
     script = (
         'tell application "Terminal"\n'
         '    activate\n'
-        f'    do script "cd {jarvis_dir} && claude{skip_flag}"\n'
+        f'    do script "cd {escaped_jarvis_dir} && claude{skip_flag}"\n'
         'end tell'
     )
     await asyncio.create_subprocess_exec(
