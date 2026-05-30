@@ -277,12 +277,12 @@ function wireEvents() {
     }
   });
 
-  // Test Anthropic
+  // Test Ollama (local LLM)
   document.getElementById("btn-test-anthropic")?.addEventListener("click", async () => {
     setDotStatus("status-anthropic", "yellow");
     const key = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-anthropic", { key_value: key || undefined });
+      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-ollama", { key_value: key || undefined });
       setDotStatus("status-anthropic", result.valid ? "green" : "red");
     } catch {
       setDotStatus("status-anthropic", "red");

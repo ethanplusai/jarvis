@@ -36,6 +36,7 @@ from typing import Optional
 
 import anthropic
 import httpx
+from openai import AsyncOpenAI
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -1299,13 +1300,12 @@ def _cost_from_tokens(input_t: int, output_t: int) -> float:
 
 
 def track_usage(response):
-    def track_usage(response):
-        """Track token usage from an API response."""
-        if hasattr(response, "usage") and response.usage:
-            inp = getattr(response.usage, "input_tokens", None) or getattr(response.usage, "prompt_tokens", 0)
-            out = getattr(response.usage, "output_tokens", None) or getattr(response.usage, "completion_tokens", 0)
-        else:
-            inp = out = 0
+    """Track token usage from an API response."""
+    if hasattr(response, "usage") and response.usage:
+        inp = getattr(response.usage, "input_tokens", None) or getattr(response.usage, "prompt_tokens", 0)
+        out = getattr(response.usage, "output_tokens", None) or getattr(response.usage, "completion_tokens", 0)
+    else:
+        inp = out = 0
     _session_tokens["input"] += inp
     _session_tokens["output"] += out
     _session_tokens["api_calls"] += 1
@@ -2503,21 +2503,21 @@ async def api_settings_keys(body: KeyUpdate):
     _write_env_key(body.key_name, body.key_value)
     return {"success": True}
 
-@app.post("/api/settings/test-anthropic")
-async def api_test_anthropic(body: KeyTest):
-        try:
-            client = AsyncOpenAI(
-                base_url="http://localhost:11434/v1",
-                api_key="ollama"
-            )
-            await client.chat.completions.create(
-                model="gemma3:27b",
-                max_tokens=10,
-                messages=[{"role": "user", "content": "Hi"}]
-            )
-            return {"valid": True}
-        except Exception as e:
-            return {"valid": False, "error": str(e)[:200]}
+@app.post("/api/settings/test-ollama")
+async def api_test_ollama(body: KeyTest):
+    try:
+        client = AsyncOpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+        )
+        await client.chat.completions.create(
+            model="gemma3:27b",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+        return {"valid": True}
+    except Exception as e:
+        return {"valid": False, "error": str(e)[:200]}
 
 @app.post("/api/settings/test-fish")
 async def api_test_fish(body: KeyTest):
