@@ -1,3 +1,5 @@
+
+
 """
 JARVIS Server — Voice AI + Development Orchestration
 
@@ -1297,9 +1299,13 @@ def _cost_from_tokens(input_t: int, output_t: int) -> float:
 
 
 def track_usage(response):
-    """Track token usage from an Anthropic API response."""
-    inp = getattr(response.usage, "input_tokens", 0) if hasattr(response, "usage") else 0
-    out = getattr(response.usage, "output_tokens", 0) if hasattr(response, "usage") else 0
+    def track_usage(response):
+        """Track token usage from an API response."""
+        if hasattr(response, "usage") and response.usage:
+            inp = getattr(response.usage, "input_tokens", None) or getattr(response.usage, "prompt_tokens", 0)
+            out = getattr(response.usage, "output_tokens", None) or getattr(response.usage, "completion_tokens", 0)
+        else:
+            inp = out = 0
     _session_tokens["input"] += inp
     _session_tokens["output"] += out
     _session_tokens["api_calls"] += 1
@@ -2499,15 +2505,19 @@ async def api_settings_keys(body: KeyUpdate):
 
 @app.post("/api/settings/test-anthropic")
 async def api_test_anthropic(body: KeyTest):
-    key = body.key_value or os.getenv("ANTHROPIC_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
-    try:
-        client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
-        return {"valid": True}
-    except Exception as e:
-        return {"valid": False, "error": str(e)[:200]}
+        try:
+            client = AsyncOpenAI(
+                base_url="http://localhost:11434/v1",
+                api_key="ollama"
+            )
+            await client.chat.completions.create(
+                model="gemma3:27b",
+                max_tokens=10,
+                messages=[{"role": "user", "content": "Hi"}]
+            )
+            return {"valid": True}
+        except Exception as e:
+            return {"valid": False, "error": str(e)[:200]}
 
 @app.post("/api/settings/test-fish")
 async def api_test_fish(body: KeyTest):
@@ -2679,3 +2689,4 @@ if __name__ == "__main__":
         log_level="info",
         **ssl_kwargs,
     )
+   
