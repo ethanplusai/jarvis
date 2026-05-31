@@ -1,6 +1,10 @@
 # Environment
 .env
 .env.local
+.env.save
+
+# Runtime logs / pids (start_jarvis.sh)
+.run/
 
 # Dependencies
 node_modules/
