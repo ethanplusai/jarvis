@@ -8,6 +8,7 @@
 import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer } from "./voice";
 import { createSocket } from "./ws";
+import { captureCameraFrame } from "./camera";
 import { openSettings, checkFirstTimeSetup } from "./settings";
 import "./style.css";
 
@@ -137,6 +138,20 @@ socket.onMessage((msg) => {
   } else if (type === "text") {
     // Text fallback when TTS fails
     console.log("[JARVIS]", msg.text);
+  } else if (type === "capture_camera") {
+    // Server wants a single webcam frame. Capture one, release the camera,
+    // and send it back tagged with the same request_id.
+    const requestId = msg.request_id as string;
+    console.log("[camera] capture requested", requestId);
+    captureCameraFrame()
+      .then((data) => {
+        socket.send({ type: "camera_frame", request_id: requestId, data });
+        if (!data) showError("Camera unavailable or blocked.");
+      })
+      .catch((e) => {
+        console.error("[camera] error", e);
+        socket.send({ type: "camera_frame", request_id: requestId, data: null });
+      });
   } else if (type === "task_spawned") {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {

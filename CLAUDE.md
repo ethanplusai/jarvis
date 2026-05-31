@@ -86,7 +86,9 @@ These are NOT shared; confirm which one a module uses before touching persistenc
 ## Conventions
 - JARVIS personality: British butler, dry wit, economy of language
 - Max 1-2 sentences per voice response
-- Action tags: [ACTION:BUILD], [ACTION:BROWSE], [ACTION:RESEARCH], etc.
+- Action tags: [ACTION:BUILD], [ACTION:BROWSE], [ACTION:RESEARCH], [ACTION:SCREEN], [ACTION:CAMERA], [ACTION:SENTIMENT], etc.
+- Market sentiment ([ACTION:SENTIMENT] / `_do_sentiment_lookup`): runs the external kukapay `market-sentiment` skill analyzer as a subprocess and speaks a one-line mood score. The script lives outside the repo at `~/bybit-mcp/.agents/skills/market-sentiment/scripts/sentiment_analyzer.py` and needs `requests`, so it's invoked with `SENTIMENT_PYTHON` (defaults to the bybit-mcp venv). Override both via `SENTIMENT_PYTHON` / `SENTIMENT_SCRIPT` env vars. News-based only — never present as trading advice.
+- Camera (`camera.py`): on-demand single-frame webcam vision. The frame lives in the browser, so the backend requests it over the WebSocket (`{"type":"capture_camera"}`) and the frontend (`frontend/src/camera.ts`) captures one JPEG, **releases the camera immediately**, and replies (`{"type":"camera_frame"}`). Privacy by design — never a continuous feed, nothing recorded. Distinct from screen vision (`screen.py`), which is captured server-side.
 - AppleScript for all macOS integrations (no OAuth needed); all user-controlled strings MUST pass through `applescript_escape()` (actions.py) — injection guard, covered by `tests/test_applescript_escape.py`
 - Read-only for Mail (safety by design) — never add write paths to connected services (Mail, Calendar, Notes)
 - No telemetry/analytics; no external services beyond Anthropic and Fish Audio

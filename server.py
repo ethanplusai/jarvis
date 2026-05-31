@@ -45,6 +45,7 @@ from pydantic import BaseModel
 from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
+from camera import describe_camera
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
 from mail_access import get_unread_count, get_unread_messages, get_recent_messages, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
 from memory import (
@@ -109,6 +110,8 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN check Desktop projects and their git status
 - You CAN plan complex tasks by asking smart questions before executing
 - You CAN see what's on {user_name}'s screen — open windows, active apps, and screenshot vision
+- You CAN look through {user_name}'s webcam — a single on-demand photo via [ACTION:CAMERA]. Use it when he asks you to look at him or use the camera. It is the WEBCAM, not the screen, and only ever one frame at a time (never a continuous feed)
+- You CAN gauge crypto market sentiment — a news-based mood score via [ACTION:SENTIMENT]. Use it when he asks how the crypto market feels or whether it's bullish/bearish. It reads news headlines only; never present it as trading advice or a price prediction
 - You CAN read {user_name}'s calendar — today's events, upcoming meetings, schedule overview
 - You CAN read {user_name}'s email (READ-ONLY) — unread count, recent messages, search by sender/subject. You CANNOT send, delete, or modify emails.
 - You CAN read Apple Notes and create NEW notes — but you CANNOT edit or delete existing notes
@@ -187,6 +190,8 @@ INSTEAD SAY:
 ACTION SYSTEM:
 When you decide the user needs something DONE (not just discussed), include an action tag in your response:
 - [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
+- [ACTION:CAMERA] — take a single webcam photo and describe what's in front of the camera. Use ONLY when the user clearly means the camera/webcam or themselves: "look at me", "can you see me", "what do I look like", "use the camera". This is the WEBCAM, distinct from SCREEN (the desktop). On-demand single frame only; never continuous.
+- [ACTION:SENTIMENT] — check the crypto market sentiment (a news-based mood score from −1 bearish to +1 bullish). Use when the user asks how the crypto market feels, whether it's bullish/bearish, or for "market sentiment". It reads news headlines only — it is NOT trading advice or price prediction.
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
@@ -817,7 +822,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|CAMERA|SENTIMENT)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -1542,6 +1547,14 @@ def detect_action_fast(text: str) -> dict | None:
     if len(words) > 12:
         return None  # Long messages are conversation, not commands
 
+    # Camera requests — checked BEFORE screen so "look at me" goes to the webcam,
+    # not the desktop. Requires an explicit camera/face cue to avoid overlap.
+    if any(p in t for p in ["look at me", "can you see me", "do you see me",
+                             "through the camera", "use the camera", "turn on the camera",
+                             "look through the camera", "what do i look like", "how do i look",
+                             "webcam", "on the camera", "with the camera", "via the camera"]):
+        return {"action": "describe_camera"}
+
     # Screen requests — checked BEFORE project matching to prevent misrouting
     if any(p in t for p in ["look at my screen", "what's on my screen", "whats on my screen",
                              "what am i looking at", "what do you see", "see my screen",
@@ -1594,6 +1607,13 @@ def detect_action_fast(text: str) -> dict | None:
                              "what's the cost", "whats the cost", "api cost", "token usage",
                              "how expensive", "what's my bill"]):
         return {"action": "check_usage"}
+
+    # Crypto market sentiment — RSS news mood score
+    if any(p in t for p in ["market sentiment", "crypto sentiment", "crypto mood",
+                             "how's the crypto market", "hows the crypto market",
+                             "how's the market feeling", "sentiment score",
+                             "is crypto bullish", "is crypto bearish", "bullish or bearish"]):
+        return {"action": "market_sentiment"}
 
     return None  # Everything else goes to the LLM for conversational routing
 
@@ -1678,6 +1698,11 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
     JARVIS stays conversational — this runs completely off the main path.
     """
     lookup_id = str(uuid.uuid4())[:8]
+    # Baseline: the user utterance that triggered this lookup. We only suppress
+    # the spoken result if a NEWER utterance arrives while we work — otherwise a
+    # fast lookup (e.g. sentiment, ~1.5s) gets wrongly muted as "talking over"
+    # the very question that asked for it.
+    trigger_time = voice_state["last_user_time"] if voice_state else 0.0
     _active_lookups[lookup_id] = {
         "type": lookup_type,
         "status": "working",
@@ -1694,9 +1719,10 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
 
         _active_lookups[lookup_id]["status"] = "done"
 
-        # Speak the result — skip audio if user spoke recently to avoid collision
-        if voice_state and time.time() - voice_state["last_user_time"] < 3:
-            log.info(f"Skipping lookup audio for {lookup_type} — user spoke recently")
+        # Speak the result — but stay quiet if the user has said something NEW
+        # since this lookup began (don't talk over a fresh request).
+        if voice_state and voice_state["last_user_time"] > trigger_time:
+            log.info(f"Skipping lookup audio for {lookup_type} — newer user input arrived")
             # Result is still stored in history below
         else:
             tts = strip_markdown_for_tts(result_text)
@@ -1704,7 +1730,8 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                    # synthesize_speech returns raw mp3 bytes — base64-encode for JSON.
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
                 else:
                     await ws.send_json({"type": "text", "text": result_text})
                 await ws.send_json({"type": "status", "state": "idle"})
@@ -1724,7 +1751,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             audio = await synthesize_speech(fallback)
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
             await ws.send_json({"type": "status", "state": "idle"})
         except Exception:
             pass
@@ -1779,6 +1806,93 @@ async def _do_screen_lookup() -> str:
             result += f" Currently focused on {active['app']}: {active['title']}."
         return result
     return "Couldn't see the screen, sir."
+
+
+async def request_camera_frame(ws, pending_frames: dict, timeout: float = 12.0) -> str | None:
+    """Ask the browser for ONE webcam frame and await it.
+
+    The webcam lives in the frontend, so we send a {"type": "capture_camera"}
+    request and wait for the matching {"type": "camera_frame"} reply, which the
+    voice loop resolves via `pending_frames`. Returns base64 JPEG or None.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    pending_frames[request_id] = fut
+    try:
+        await ws.send_json({"type": "capture_camera", "request_id": request_id})
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except (asyncio.TimeoutError, Exception):
+        return None
+    finally:
+        pending_frames.pop(request_id, None)
+
+
+async def _do_camera_lookup(ws, pending_frames: dict) -> str:
+    """Webcam describe — request a single frame from the browser, then vision."""
+    frame_b64 = await request_camera_frame(ws, pending_frames)
+    if not frame_b64:
+        return ("I couldn't get a camera frame, sir. The webcam may be blocked, "
+                "in use by another app, or permission hasn't been granted.")
+    return await describe_camera(anthropic_client, frame_b64)
+
+
+# Market sentiment — runs the kukapay market-sentiment skill's analyzer as a
+# subprocess. It needs `requests`, so it's invoked with an interpreter that has
+# it (the bybit-mcp venv by default). Both paths are env-overridable.
+SENTIMENT_PYTHON = os.getenv("SENTIMENT_PYTHON", "/Users/oguz/bybit-mcp/venv/bin/python")
+SENTIMENT_SCRIPT = os.getenv(
+    "SENTIMENT_SCRIPT",
+    "/Users/oguz/bybit-mcp/.agents/skills/market-sentiment/scripts/sentiment_analyzer.py",
+)
+
+
+async def _do_sentiment_lookup() -> str:
+    """Run the market-sentiment analyzer and condense it into one spoken line."""
+    if not Path(SENTIMENT_SCRIPT).exists():
+        return "The market sentiment tool isn't installed, sir."
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            SENTIMENT_PYTHON, SENTIMENT_SCRIPT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25)
+    except asyncio.TimeoutError:
+        return "The sentiment feeds are slow to respond, sir. Try again in a moment."
+    except Exception as e:
+        log.warning(f"Sentiment lookup failed: {e}")
+        return "I couldn't reach the market sentiment tool, sir."
+
+    # Parse score / article count / verdict from the script's printed report.
+    score = None
+    articles = None
+    overall = ""
+    for line in stdout.decode(errors="replace").splitlines():
+        s = line.strip()
+        if s.startswith("Market Sentiment Score:"):
+            try:
+                score = float(s.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif s.startswith("- Analyzed"):
+            m = _action_re.search(r"Analyzed\s+(\d+)\s+recent articles", s)
+            if m:
+                articles = m.group(1)
+        elif s.startswith("Overall:"):
+            overall = s.split(":", 1)[1].strip()
+
+    if score is None:
+        return "The sentiment tool returned nothing readable, sir."
+
+    mood = "bullish" if score > 0.1 else "bearish" if score < -0.1 else "neutral"
+    detail = f"a score of {score:.2f}"
+    if articles:
+        detail += f" across {articles} recent articles"
+    summary = f"Crypto market sentiment is {mood}, sir — {detail}."
+    if overall:
+        summary += f" {overall}"
+    return summary
 
 
 def get_lookup_status() -> str:
@@ -1969,6 +2083,10 @@ async def voice_handler(ws: WebSocket):
     # Audio collision prevention — track when user last spoke
     voice_state = {"last_user_time": 0.0}
 
+    # Pending webcam frame requests — request_id -> Future resolved by the
+    # browser's "camera_frame" reply (see request_camera_frame).
+    pending_frames: dict[str, asyncio.Future] = {}
+
     # Self-awareness — track last spoken response to avoid repetition
     last_jarvis_response = ""
 
@@ -2022,6 +2140,14 @@ async def voice_handler(ws: WebSocket):
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+
+            # ── Webcam frame reply: resolve the waiting request_camera_frame ──
+            if msg.get("type") == "camera_frame":
+                rid = msg.get("request_id")
+                fut = pending_frames.get(rid)
+                if fut and not fut.done():
+                    fut.set_result(msg.get("data") or None)
                 continue
 
             # ── Fix-self: activate work mode in JARVIS repo ──
@@ -2200,6 +2326,12 @@ async def voice_handler(ws: WebSocket):
                         elif action["action"] == "describe_screen":
                             response_text = "Taking a look now, sir."
                             asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "describe_camera":
+                            response_text = "Let me have a look, sir."
+                            asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames), ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "market_sentiment":
+                            response_text = "Checking the crypto mood now, sir."
+                            asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_calendar":
                             response_text = "Checking your calendar now, sir."
                             asyncio.create_task(_lookup_and_report("calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state))
@@ -2355,6 +2487,10 @@ async def voice_handler(ws: WebSocket):
                                         asyncio.create_task(create_apple_note("JARVIS Note", target))
                                 elif embedded_action["action"] == "screen":
                                     asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "camera":
+                                    asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames), ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "sentiment":
+                                    asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "read_note":
                                     # Read note in background and report back
                                     async def _read_and_report(search_term, _ws):
