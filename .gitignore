@@ -39,3 +39,5 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+# CocoIndex Code (ccc)
+/.cocoindex_code/

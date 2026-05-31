@@ -284,12 +284,11 @@ def _get_weather_location() -> Optional[dict]:
         return _cached_weather_location
 
     try:
-        import urllib.request as _ureq
-        with _ureq.urlopen(
+        resp = httpx.get(
             "https://ipwho.is/?fields=success,city,region,country,latitude,longitude",
             timeout=3,
-        ) as resp:
-            data = json.loads(resp.read().decode())
+        )
+        data = resp.json()
         if data.get("success") is True:
             location = {
                 "latitude": float(data["latitude"]),
@@ -321,14 +320,13 @@ def _fetch_weather_string_sync() -> Optional[str]:
     unit_symbol = "°F" if unit == "fahrenheit" else "°C"
 
     try:
-        import urllib.request as _ureq
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={location['latitude']}&longitude={location['longitude']}"
             f"&current=temperature_2m,weathercode&temperature_unit={unit}"
         )
-        with _ureq.urlopen(url, timeout=3) as resp:
-            current = json.loads(resp.read()).get("current", {})
+        resp = httpx.get(url, timeout=3)
+        current = resp.json().get("current", {})
         temp = current.get("temperature_2m")
         if temp is None:
             return None
