@@ -417,3 +417,34 @@ html, body {
   display: flex;
   justify-content: flex-end;
 }
+
+/* Language toggle (top-left) */
+#lang-select {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  gap: 6px;
+  z-index: 20;
+}
+#lang-select .lang-btn {
+  background: rgba(20, 24, 34, 0.6);
+  color: rgba(180, 200, 230, 0.7);
+  border: 1px solid rgba(120, 160, 220, 0.25);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+#lang-select .lang-btn:hover {
+  color: rgba(210, 225, 245, 0.95);
+  border-color: rgba(120, 160, 220, 0.5);
+}
+#lang-select .lang-btn.active {
+  background: rgba(70, 130, 220, 0.35);
+  color: #eaf2ff;
+  border-color: rgba(120, 180, 255, 0.8);
+}

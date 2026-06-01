@@ -6,6 +6,7 @@ export type MessageHandler = (msg: Record<string, unknown>) => void;
 
 export interface JarvisSocket {
   send(data: Record<string, unknown>): void;
+  sendBinary(data: ArrayBuffer): void;
   onMessage(handler: MessageHandler): void;
   close(): void;
   isConnected(): boolean;
@@ -59,6 +60,11 @@ export function createSocket(url: string): JarvisSocket {
     send(data) {
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(data));
+      }
+    },
+    sendBinary(data) {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(data);
       }
     },
     onMessage(handler) {

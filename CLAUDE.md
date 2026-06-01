@@ -42,7 +42,7 @@ Live quality monitor (run alongside the server): `python monitor.py` tails serve
 
 ### Request pipeline
 `server.py` is an intentional ~2700-line monolith (see CONTRIBUTING.md) and is the orchestrator; the `/ws/voice` handler is the core loop:
-1. Frontend does speech-to-text via the browser Web Speech API (hence Chrome) and sends text.
+1. Frontend captures mic audio (`audio_capture.ts`, MediaRecorder + VAD) and streams each utterance as binary over the WebSocket. The backend transcribes it via a local Whisper service (`whisper_service.py`, runs in `whisper-venv` / Python 3.12 on :8765) which also returns the language. A legacy browser-Web-Speech transcript path still exists as a fallback.
 2. `classify_intent()` calls Haiku (`claude-haiku-4-5-20251001`) to pick an intent and emit an `[ACTION:*]` tag.
 3. `execute_action` (actions.py) routes the tag to a system integration or a Claude Code spawn.
 4. Reply text → Fish Audio TTS → streamed back as binary audio while the orb reacts.
@@ -88,6 +88,7 @@ These are NOT shared; confirm which one a module uses before touching persistenc
 - Max 1-2 sentences per voice response
 - Action tags: [ACTION:BUILD], [ACTION:BROWSE], [ACTION:RESEARCH], [ACTION:SCREEN], [ACTION:CAMERA], [ACTION:SENTIMENT], etc.
 - Market sentiment ([ACTION:SENTIMENT] / `_do_sentiment_lookup`): runs the external kukapay `market-sentiment` skill analyzer as a subprocess and speaks a one-line mood score. The script lives outside the repo at `~/bybit-mcp/.agents/skills/market-sentiment/scripts/sentiment_analyzer.py` and needs `requests`, so it's invoked with `SENTIMENT_PYTHON` (defaults to the bybit-mcp venv). Override both via `SENTIMENT_PYTHON` / `SENTIMENT_SCRIPT` env vars. News-based only — never present as trading advice.
+- Multilingual voice (English/French/Turkish): a top-left EN/FR/TR toggle sends `{type:"set_lang"}`; the chosen language is FORCED for Whisper transcription, the LLM reply, and the TTS voice (auto-detect proved unreliable on short utterances). Per-language Fish voices live in `_LANG_VOICE` — French and Turkish use private cloned voices (native speakers), English uses the MCU JARVIS voice. `whisper_service.py` peak-normalizes audio and accepts `?lang=` to force a language. Start it with `WHISPER_MODEL=base` for speed or `small` (default) for accuracy.
 - Camera (`camera.py`): on-demand single-frame webcam vision. The frame lives in the browser, so the backend requests it over the WebSocket (`{"type":"capture_camera"}`) and the frontend (`frontend/src/camera.ts`) captures one JPEG, **releases the camera immediately**, and replies (`{"type":"camera_frame"}`). Privacy by design — never a continuous feed, nothing recorded. Distinct from screen vision (`screen.py`), which is captured server-side.
 - AppleScript for all macOS integrations (no OAuth needed); all user-controlled strings MUST pass through `applescript_escape()` (actions.py) — injection guard, covered by `tests/test_applescript_escape.py`
 - Read-only for Mail (safety by design) — never add write paths to connected services (Mail, Calendar, Notes)

@@ -6,7 +6,8 @@
  */
 
 import { createOrb, type OrbState } from "./orb";
-import { createVoiceInput, createAudioPlayer } from "./voice";
+import { createAudioPlayer } from "./voice";
+import { createAudioCapture } from "./audio_capture";
 import { createSocket } from "./ws";
 import { captureCameraFrame } from "./camera";
 import { openSettings, checkFirstTimeSetup } from "./settings";
@@ -78,15 +79,15 @@ function transition(newState: State) {
 }
 
 // ---------------------------------------------------------------------------
-// Voice input
+// Voice input — mic capture + VAD; server transcribes (Whisper) & auto-detects
+// the language, so we just stream raw audio of each utterance.
 // ---------------------------------------------------------------------------
 
-const voiceInput = createVoiceInput(
-  (text: string) => {
+const voiceInput = createAudioCapture(
+  (pcm: ArrayBuffer) => {
     // Cancel any current JARVIS response before sending new input
     audioPlayer.stop();
-    // User spoke — send transcript
-    socket.send({ type: "transcript", text, isFinal: true });
+    socket.sendBinary(pcm);
     transition("thinking");
   },
   (msg: string) => {
@@ -192,6 +193,22 @@ const btnMenu = document.getElementById("btn-menu")!;
 const menuDropdown = document.getElementById("menu-dropdown")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
+
+// Language toggle — forces Whisper recognition + JARVIS replies to a language.
+const langButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".lang-btn"));
+function setLanguage(lang: string) {
+  for (const b of langButtons) b.classList.toggle("active", b.dataset.lang === lang);
+  socket.send({ type: "set_lang", lang });
+  console.log("[lang] set to", lang);
+}
+for (const b of langButtons) {
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setLanguage(b.dataset.lang || "en");
+  });
+}
+// Tell the server the default (English) once connected.
+setTimeout(() => setLanguage("en"), 1500);
 
 btnMute.addEventListener("click", (e) => {
   e.stopPropagation();

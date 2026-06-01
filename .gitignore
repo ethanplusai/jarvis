@@ -10,6 +10,7 @@
 node_modules/
 .venv/
 venv/
+whisper-venv/
 
 # Python
 __pycache__/

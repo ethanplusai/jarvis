@@ -67,7 +67,18 @@ log = logging.getLogger("jarvis")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
+# French and Turkish use private cloned voices from native speakers (the MCU
+# clone carries an English accent into French). English uses the MCU voice.
+FISH_VOICE_ID_FR = os.getenv("FISH_VOICE_ID_FR", "7e72838b555a4621a3ae6151b53249cf")
+FISH_VOICE_ID_TR = os.getenv("FISH_VOICE_ID_TR", "79c8bd0cadd84509a804037383af94b8")
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+
+# Per-language (reference_id, model) overrides. Languages absent here fall back
+# to the default JARVIS voice + Fish's default model.
+_LANG_VOICE: dict[str, tuple[str, Optional[str]]] = {
+    "fr": (FISH_VOICE_ID_FR, "speech-1.6"),
+    "tr": (FISH_VOICE_ID_TR, "speech-1.6"),
+}
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
@@ -1133,23 +1144,61 @@ _last_greeting_time: float = 0
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
-async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
+WHISPER_URL = os.getenv("WHISPER_URL", "http://127.0.0.1:8765")
+
+
+async def transcribe_audio(pcm: bytes, lang: Optional[str] = None) -> tuple[str, str]:
+    """Send recorded audio to the Whisper service; return (text, language).
+
+    If lang is given, Whisper is forced to that language (reliable); otherwise it
+    auto-detects. On any failure returns ("", lang or "en").
+    """
+    url = f"{WHISPER_URL}/transcribe"
+    if lang:
+        url += f"?lang={lang}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            r = await http.post(
+                url,
+                content=pcm,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            if r.status_code == 200:
+                j = r.json()
+                return (j.get("text", "").strip(), j.get("language", "en"))
+            log.warning(f"whisper service {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        log.warning(f"whisper transcribe failed: {e}")
+    return ("", lang or "en")
+
+
+async def synthesize_speech(text: str, lang: str = "en") -> Optional[bytes]:
+    """Generate speech audio from text using Fish Audio TTS.
+
+    lang selects the voice: 'fr' uses the cloned native-French voice; everything
+    else uses the default JARVIS voice. Fish auto-detects the spoken language
+    from the text, so the voice just needs to match for accent quality.
+    """
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
+
+    voice_id, model = _LANG_VOICE.get(lang, (FISH_VOICE_ID, None))
+    headers = {
+        "Authorization": f"Bearer {FISH_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if model:
+        headers["model"] = model
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
             response = await http.post(
                 FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json={
                     "text": text,
-                    "reference_id": FISH_VOICE_ID,
+                    "reference_id": voice_id,
                     "format": "mp3",
                 },
             )
@@ -1177,6 +1226,7 @@ async def generate_response(
     conversation_history: list[dict],
     last_response: str = "",
     session_summary: str = "",
+    lang: str = "en",
 ) -> str:
     """Generate a JARVIS response using Anthropic API."""
     now = datetime.now()
@@ -1220,6 +1270,18 @@ async def generate_response(
     # Self-awareness — remind JARVIS of last response to avoid repetition
     if last_response:
         system += f'\n\nYOUR LAST RESPONSE (do not repeat this):\n"{last_response[:150]}"'
+
+    # Language — the user spoke French/Turkish, so reply in kind (Whisper detected it).
+    _lang_names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
+    if lang in _lang_names:
+        name, honorific = _lang_names[lang]
+        system += (
+            f"\n\nLANGUAGE: The user is speaking {name}. Respond ONLY in natural, "
+            f"fluent {name}, keeping the same butler personality. Do NOT use English "
+            f"and do NOT mix languages. Address the user as '{honorific}' (never 'sir' "
+            f"or another language's honorific). [ACTION:X] tags (if any) stay in English "
+            f"exactly as specified, but every spoken word must be {name}."
+        )
 
     # Use conversation history — keep the last 20 messages for context
     # (older conversation is captured in session_summary)
@@ -2136,40 +2198,71 @@ async def voice_handler(ws: WebSocket):
             return  # WebSocket already gone
 
         while True:
-            raw = await ws.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+            message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
 
-            # ── Webcam frame reply: resolve the waiting request_camera_frame ──
-            if msg.get("type") == "camera_frame":
-                rid = msg.get("request_id")
-                fut = pending_frames.get(rid)
-                if fut and not fut.done():
-                    fut.set_result(msg.get("data") or None)
-                continue
+            # ── Audio utterance (binary) → Whisper (forced lang if set) ──
+            if message.get("bytes") is not None:
+                forced = voice_state.get("forced_lang")
+                text, utter_lang = await transcribe_audio(message["bytes"], lang=forced)
+                user_text = apply_speech_corrections(text.strip())
+                if not user_text:
+                    # Nothing intelligible — return the UI to idle so the mic
+                    # keeps listening instead of being stuck on "thinking".
+                    try:
+                        await ws.send_json({"type": "status", "state": "idle"})
+                    except Exception:
+                        pass
+                    continue
+            else:
+                raw = message.get("text")
+                if raw is None:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
 
-            # ── Fix-self: activate work mode in JARVIS repo ──
-            if msg.get("type") == "fix_self":
-                jarvis_dir = str(Path(__file__).parent)
-                await work_session.start(jarvis_dir)
-                response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
-                continue
+                # ── Webcam frame reply: resolve the waiting request_camera_frame ──
+                if msg.get("type") == "camera_frame":
+                    rid = msg.get("request_id")
+                    fut = pending_frames.get(rid)
+                    if fut and not fut.done():
+                        fut.set_result(msg.get("data") or None)
+                    continue
 
-            if msg.get("type") != "transcript" or not msg.get("isFinal"):
-                continue
+                # ── Language toggle: force Whisper + replies to a language ──
+                if msg.get("type") == "set_lang":
+                    lg = msg.get("lang")
+                    voice_state["forced_lang"] = lg if lg in ("en", "fr", "tr") else None
+                    log.info(f"Forced language set to: {voice_state.get('forced_lang')}")
+                    continue
 
-            user_text = apply_speech_corrections(msg.get("text", "").strip())
-            if not user_text:
-                continue
+                # ── Fix-self: activate work mode in JARVIS repo ──
+                if msg.get("type") == "fix_self":
+                    jarvis_dir = str(Path(__file__).parent)
+                    await work_session.start(jarvis_dir)
+                    response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
+                    tts = strip_markdown_for_tts(response_text)
+                    await ws.send_json({"type": "status", "state": "speaking"})
+                    audio = await synthesize_speech(tts)
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+                    else:
+                        await ws.send_json({"type": "text", "text": response_text})
+                    continue
+
+                # ── Legacy/browser STT transcript (English fallback path) ──
+                if msg.get("type") != "transcript" or not msg.get("isFinal"):
+                    continue
+                user_text = apply_speech_corrections(msg.get("text", "").strip())
+                utter_lang = "en"
+                if not user_text:
+                    continue
+
+            # Track this utterance's language — drives reply language + TTS voice.
+            voice_state["lang"] = utter_lang
 
             # Cancel any in-flight response
             _current_response_id += 1
@@ -2260,6 +2353,7 @@ async def voice_handler(ws: WebSocket):
                             cached_projects, history,
                             last_response=last_jarvis_response,
                             session_summary=session_summary,
+                            lang=voice_state.get("lang", "en"),
                         )
                     else:
                         # Send to claude -p (full power)
@@ -2316,7 +2410,9 @@ async def voice_handler(ws: WebSocket):
 
                 # ── CHAT MODE: fast keyword detection + Haiku ──
                 else:
-                    action = detect_action_fast(user_text)
+                    # Fast keyword actions are English-only; for French/Turkish go
+                    # straight to the LLM so the reply comes back in-language.
+                    action = detect_action_fast(user_text) if voice_state.get("lang", "en") == "en" else None
 
                     if action:
                         if action["action"] == "open_terminal":
@@ -2370,6 +2466,7 @@ async def voice_handler(ws: WebSocket):
                                 cached_projects, history,
                                 last_response=last_jarvis_response,
                                 session_summary=session_summary,
+                                lang=voice_state.get("lang", "en"),
                             )
 
                             # Check for action tags embedded in LLM response
@@ -2538,10 +2635,10 @@ async def voice_handler(ws: WebSocket):
                 if anthropic_client and len(user_text) > 15:
                     asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
 
-                # TTS
+                # TTS — voice follows the utterance's language (French → cloned voice)
                 tts = strip_markdown_for_tts(response_text)
                 await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
+                audio = await synthesize_speech(tts, lang=voice_state.get("lang", "en"))
                 if audio:
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
