@@ -46,8 +46,10 @@ from actions import execute_action, monitor_build, open_terminal, open_browser, 
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from camera import describe_camera
+import briefing
+import gmail_access
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
-from mail_access import get_unread_count, get_unread_messages, get_recent_messages, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
+from mail_access import get_unread_count, get_unread_messages, get_recent_messages, get_recent_headers, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
 from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
     create_note, search_notes, get_tasks_for_date, build_memory_context,
@@ -1670,6 +1672,11 @@ def detect_action_fast(text: str) -> dict | None:
                              "how expensive", "what's my bill"]):
         return {"action": "check_usage"}
 
+    # Morning briefing — full daily rundown
+    if any(p in t for p in ["morning briefing", "brief me", "my briefing", "daily briefing",
+                             "give me my briefing", "good morning jarvis", "start my day"]):
+        return {"action": "briefing"}
+
     # Crypto market sentiment — RSS news mood score
     if any(p in t for p in ["market sentiment", "crypto sentiment", "crypto mood",
                              "how's the crypto market", "hows the crypto market",
@@ -1839,16 +1846,19 @@ async def _do_mail_lookup() -> str:
     """Slow mail fetch — runs in thread."""
     unread_info = await get_unread_count()
     if isinstance(unread_info, dict):
+        if unread_info.get("error") or unread_info.get("total") is None:
+            return "I couldn't reach Mail just now, sir — it may still be syncing."
         _ctx_cache["mail"] = format_unread_summary(unread_info)
         if unread_info["total"] == 0:
             return "Inbox is clear, sir. No unread messages."
-        unread_msgs = await get_unread_messages(count=5)
         summary = format_unread_summary(unread_info)
-        if unread_msgs:
-            top = unread_msgs[:3]
+        # Fast recent headers (no slow read-status filter / body fetch).
+        recent = await get_recent_headers(count=5)
+        if recent:
             details = ". ".join(
                 f"{_short_sender(m['sender'])} regarding {m['subject']}"
-                for m in top
+                + ("" if m["read"] else " (unread)")
+                for m in recent[:4]
             )
             return f"{summary} Most recent: {details}."
         return summary
@@ -1955,6 +1965,142 @@ async def _do_sentiment_lookup() -> str:
     if overall:
         summary += f" {overall}"
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Morning briefing — runs after the startup sequence
+# ---------------------------------------------------------------------------
+
+async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
+    """Gather all sources, compose the briefing text, and synthesize the audio.
+
+    Returns (text, mp3_bytes). This is the slow part (~20s) and is safe to run
+    during the boot screen so the result is ready the instant the boot ends.
+    """
+    # Gather everything concurrently, each bounded so one slow source (e.g. a
+    # laggy feed) can't stall the whole briefing.
+    async def _timed(coro, t):
+        try:
+            return await asyncio.wait_for(coro, timeout=t)
+        except Exception:
+            return None
+
+    traffic, weather, portfolio, gmail, cal_txt, senti_txt = await asyncio.gather(
+        _timed(briefing.get_traffic(), 12),
+        _timed(briefing.get_weather(), 12),
+        _timed(briefing.get_portfolio(), 25),
+        _timed(gmail_access.get_briefing_mail(), 15),
+        _timed(_do_calendar_lookup(), 12),
+        _timed(_do_sentiment_lookup(), 22),
+    )
+
+    def _safe(v, default="unavailable"):
+        return default if (v is None or isinstance(v, Exception)) else v
+
+    traffic = _safe(traffic, {}); weather = _safe(weather, {}); portfolio = _safe(portfolio, {})
+    gmail = _safe(gmail, {}); cal_txt = _safe(cal_txt); senti_txt = _safe(senti_txt)
+
+    # Build a plain-facts block for the LLM to turn into a spoken briefing.
+    facts = []
+    if isinstance(traffic, dict) and traffic.get("ok"):
+        facts.append(f"COMMUTE: {traffic['condition']}, about {traffic['eta_min']} minutes to the office "
+                     f"({traffic['distance']} via {traffic['route']}). Usual time {traffic['normal_min']} min.")
+    else:
+        facts.append("COMMUTE: traffic data unavailable.")
+    if isinstance(weather, dict) and weather.get("ok"):
+        facts.append(f"WEATHER (today, home area): {weather['conditions']}, currently {weather['current_c']}°C, "
+                     f"high {weather['high_c']}°C, low {weather['low_c']}°C, {weather['rain_chance']}% chance of rain. "
+                     f"Give a brief clothing suggestion based on this.")
+    else:
+        facts.append("WEATHER: unavailable.")
+    if isinstance(gmail, dict) and gmail.get("ok"):
+        lines = [f"EMAIL (Gmail): {gmail['unread_total']} total unread; "
+                 f"{gmail['primary_unread']} unread in the Primary category (real correspondence)."]
+        for m in gmail.get("important", []):
+            lines.append(f"  - from {m['from']}: {m['subject']}")
+        lines.append("Judge which, if any, genuinely look like they need a reply; "
+                     "ignore receipts, notifications and automated mail. If none need action, say so briefly.")
+        facts.append("\n".join(lines))
+    else:
+        facts.append("EMAIL: Gmail unavailable.")
+    facts.append(f"AGENDA: {cal_txt}")
+    if isinstance(portfolio, dict) and portfolio.get("ok"):
+        best = portfolio.get("best"); worst = portfolio.get("worst")
+        line = f"PORTFOLIO: total value ${portfolio['total_value']}, {portfolio['total_gain_pct']:+.1f}% today."
+        if best: line += f" Best {best['ticker']} {best['gain_pct']:+.1f}%."
+        if worst: line += f" Worst {worst['ticker']} {worst['gain_pct']:+.1f}%."
+        facts.append(line)
+    else:
+        facts.append("PORTFOLIO: unavailable.")
+    facts.append(f"CRYPTO MOOD: {senti_txt}")
+
+    _names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
+    name, honorific = _names.get(lang, ("English", "sir"))
+    lang_rule = (f"Respond ONLY in natural {name}, addressing the user as '{honorific}'."
+                 if lang in _names else "Address the user as 'sir'.")
+
+    system = (
+        f"You are JARVIS delivering {USER_NAME}'s morning briefing as a refined British butler. "
+        f"{lang_rule} From the facts below compose ONE flowing, spoken briefing covering, in order: "
+        "a brief good-morning, the commute (traffic and ETA to the office), the weather with a short "
+        "clothing suggestion, any important emails, today's agenda, the portfolio with the key numbers, "
+        "and the crypto market mood. Natural and warm, no markdown, no lists, dry wit welcome but concise "
+        "— aim for 7 to 10 sentences. Do not invent facts; if something says unavailable, mention it briefly or skip."
+    )
+
+    response_text = None
+    if anthropic_client:
+        try:
+            resp = await anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                system=system,
+                messages=[{"role": "user", "content": "FACTS:\n" + "\n".join(facts)}],
+            )
+            response_text = resp.content[0].text.strip()
+        except Exception as e:
+            log.warning(f"briefing compose failed: {e}")
+    if not response_text:
+        response_text = "Good morning, sir. I'm afraid I couldn't assemble the full briefing just now."
+
+    # Synthesize the audio here too, so the boot prefetch hides this latency.
+    audio = await synthesize_speech(strip_markdown_for_tts(response_text), lang=lang)
+    return response_text, audio
+
+
+async def morning_briefing(ws, history: list[dict] = None, voice_state: dict = None):
+    """Deliver the briefing — using the result prefetched during the boot screen
+    if available, otherwise preparing it now — then open the dashboard window."""
+    lang = "en"
+    task = None
+    if voice_state:
+        lang = voice_state.get("forced_lang") or voice_state.get("lang") or "en"
+        task = voice_state.pop("briefing_task", None)
+    await ws.send_json({"type": "status", "state": "thinking"})
+    try:
+        if task is not None:
+            response_text, audio = await task   # prepared during the boot screen
+        else:
+            response_text, audio = await _prepare_briefing(lang)
+    except Exception as e:
+        log.warning(f"briefing failed: {e}")
+        response_text, audio = ("Good morning, sir. I couldn't assemble the briefing just now.", None)
+
+    # Open the portfolio dashboard window alongside the spoken briefing.
+    asyncio.create_task(briefing.open_dashboard_window())
+
+    try:
+        await ws.send_json({"type": "status", "state": "speaking"})
+        if audio:
+            await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+        else:
+            await ws.send_json({"type": "text", "text": response_text})
+        await ws.send_json({"type": "status", "state": "idle"})
+    except Exception:
+        pass
+    if history is not None:
+        history.append({"role": "assistant", "content": f"[morning briefing]: {response_text}"})
+    log.info(f"Briefing delivered ({lang}): {response_text[:80]}")
 
 
 def get_lookup_status() -> str:
@@ -2239,6 +2385,19 @@ async def voice_handler(ws: WebSocket):
                     log.info(f"Forced language set to: {voice_state.get('forced_lang')}")
                     continue
 
+                # ── Briefing prefetch: start gathering DURING the boot screen so
+                #    the briefing is ready the instant the boot finishes. ──
+                if msg.get("type") == "briefing_prefetch":
+                    pf_lang = voice_state.get("forced_lang") or voice_state.get("lang") or "en"
+                    voice_state["briefing_task"] = asyncio.create_task(_prepare_briefing(pf_lang))
+                    log.info(f"Briefing prefetch started ({pf_lang})")
+                    continue
+
+                # ── Morning briefing: triggered by the frontend after startup ──
+                if msg.get("type") == "briefing":
+                    asyncio.create_task(morning_briefing(ws, history=history, voice_state=voice_state))
+                    continue
+
                 # ── Fix-self: activate work mode in JARVIS repo ──
                 if msg.get("type") == "fix_self":
                     jarvis_dir = str(Path(__file__).parent)
@@ -2428,6 +2587,9 @@ async def voice_handler(ws: WebSocket):
                         elif action["action"] == "market_sentiment":
                             response_text = "Checking the crypto mood now, sir."
                             asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "briefing":
+                            response_text = "Preparing your morning briefing, sir."
+                            asyncio.create_task(morning_briefing(ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_calendar":
                             response_text = "Checking your calendar now, sir."
                             asyncio.create_task(_lookup_and_report("calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state))
@@ -2730,7 +2892,7 @@ class PreferencesUpdate(BaseModel):
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "GOOGLE_MAPS_API_KEY"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)

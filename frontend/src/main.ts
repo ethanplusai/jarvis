@@ -194,9 +194,10 @@ function endBoot() {
   try { bootVideo.pause(); bootAudio.pause(); } catch {}
   bootOverlay.classList.add("done");
   setTimeout(() => { bootOverlay.style.display = "none"; }, 1500);
-  // Hand off to the live assistant.
+  // Hand off to the live assistant, then deliver the morning briefing.
   voiceInput.start();
   transition("listening");
+  setTimeout(() => socket.send({ type: "briefing" }), 600);
 }
 
 function startBoot() {
@@ -211,6 +212,10 @@ function startBoot() {
   bootAudio.currentTime = 0;
   bootVideo.play().catch(() => {});
   bootAudio.play().catch(() => endBoot());
+  // Prefetch the briefing NOW (during the ~28s boot) so it's ready instantly
+  // when the boot ends — no second wait.
+  socket.send({ type: "set_lang", lang: currentLang });
+  socket.send({ type: "briefing_prefetch" });
 }
 
 bootVideo.addEventListener("ended", endBoot);

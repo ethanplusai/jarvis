@@ -94,21 +94,17 @@ async def get_unread_count() -> dict:
 
     Returns: {"total": int, "accounts": {"Google": 5, "Work": 3, ...}}
     """
+    # Single unified-inbox count only — the per-account loop made this >20s on a
+    # large inbox (the user has ~850 unread). One call is ~11s.
     script = """
 tell application "Mail"
-    set totalUnread to unread count of inbox
-    set output to "total:" & totalUnread & linefeed
-    repeat with acct in every account
-        set acctName to name of acct
-        try
-            set acctUnread to unread count of mailbox "INBOX" of acct
-            set output to output & acctName & ":" & acctUnread & linefeed
-        end try
-    end repeat
-    return output
+    return "total:" & (unread count of inbox)
 end tell
 """
-    raw = await _run_mail_script(script)
+    raw = await _run_mail_script(script, timeout=18)
+    if not raw:
+        # Empty output means the script failed/timed out — NOT an empty inbox.
+        return {"total": None, "accounts": {}, "error": "unavailable"}
     result = {"total": 0, "accounts": {}}
     for line in raw.split("\n"):
         line = line.strip()
@@ -123,6 +119,37 @@ end tell
             except ValueError:
                 pass
     return result
+
+
+async def get_recent_headers(count: int = 4) -> list[dict]:
+    """Fast: the N most recent inbox messages — sender/subject/read only, no body.
+
+    Avoids the slow `whose read status is false` filter + content fetch, so it
+    stays quick even on a large inbox. Returns [{sender, subject, read}].
+    """
+    script = f"""
+tell application "Mail"
+    set out to ""
+    repeat with i from 1 to {count}
+        try
+            set m to message i of inbox
+            set out to out & (sender of m) & "|||" & (subject of m) & "|||" & (read status of m) & linefeed
+        end try
+    end repeat
+    return out
+end tell
+"""
+    raw = await _run_mail_script(script, timeout=12)
+    msgs = []
+    for line in raw.split("\n"):
+        parts = line.strip().split("|||")
+        if len(parts) >= 3:
+            msgs.append({
+                "sender": parts[0].strip(),
+                "subject": parts[1].strip(),
+                "read": parts[2].strip().lower() == "true",
+            })
+    return msgs
 
 
 async def get_recent_messages(count: int = 10) -> list[dict]:

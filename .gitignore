@@ -44,3 +44,7 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+
+# Gmail OAuth secrets
+gmail_credentials.json
+gmail_token.json
