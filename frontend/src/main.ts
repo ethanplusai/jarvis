@@ -208,14 +208,16 @@ function endBoot() {
   awaitingBriefing = true;
   transition("thinking");
   setTimeout(() => socket.send({ type: "briefing" }), 600);
-  // Safety net: if the briefing never produces audio, start the mic anyway.
+  // Safety net for the rare case the briefing produces NO audio at all. Kept
+  // well beyond any real briefing length (the briefing can run ~60s) so it never
+  // fires mid-briefing and cuts the end off — onFinished is the normal trigger.
   setTimeout(() => {
     if (awaitingBriefing) {
       awaitingBriefing = false;
       voiceInput.start();
       transition("listening");
     }
-  }, 60000);
+  }, 180000);
 }
 
 function startBoot() {
