@@ -2040,24 +2040,26 @@ async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
 
     _names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
     name, honorific = _names.get(lang, ("English", "sir"))
-    lang_rule = (f"Respond ONLY in natural {name}, addressing the user as '{honorific}'."
-                 if lang in _names else "Address the user as 'sir'.")
 
-    # Time-aware opening greeting.
+    # Time-aware greeting — described SEMANTICALLY with no literal English words,
+    # otherwise the model copies them and writes the whole briefing in English.
     hour = datetime.now().hour
     if 5 <= hour < 12:
-        greet_rule = "Open with a warm 'Good morning' and that you hope he slept well."
+        greet_rule = "It is the morning: greet him for the morning and say you hope he slept well."
     elif 12 <= hour < 18:
-        greet_rule = "It is daytime (NOT morning): open simply with 'Hello, welcome back' — do NOT say good morning."
+        greet_rule = "It is the middle of the day, NOT morning: greet him simply — a hello and welcome back."
     else:
-        greet_rule = "It is the evening: open with 'Good evening' and that you hope he had a great day — do NOT say good morning."
+        greet_rule = "It is the evening, NOT morning: greet him for the evening and say you hope he had a great day."
 
+    only = "" if lang not in _names else f" Use absolutely no English — every word must be in {name}."
     system = (
         f"You are JARVIS delivering {USER_NAME}'s briefing as a refined British butler. "
-        f"{lang_rule} {greet_rule} From the facts below compose ONE flowing, spoken briefing covering, in order: "
-        "the time-appropriate greeting above, the commute (traffic and ETA to the office), the weather with a short "
-        "clothing suggestion, any important emails, today's agenda, the portfolio with the key numbers, "
-        "and the crypto market mood. Natural and warm, no markdown, no lists, dry wit welcome but concise "
+        f"IMPORTANT: write the ENTIRE briefing — every word, including the greeting — in {name}, "
+        f"addressing the user as '{honorific}'.{only} "
+        f"{greet_rule} Compose ONE flowing, spoken briefing covering, in order: the time-appropriate "
+        "greeting, the commute (traffic and ETA to the office), the weather with a short clothing "
+        "suggestion, any important emails, today's agenda, the portfolio with the key numbers, and the "
+        "crypto market mood. Natural and warm, no markdown, no lists, dry wit welcome but concise "
         "— aim for 7 to 10 sentences. Do not invent facts; if something says unavailable, mention it briefly or skip."
     )
 
