@@ -22,6 +22,7 @@ let currentState: State = "idle";
 let isMuted = false;
 let bootActive = true; // during the startup boot video — suppress greeting + mic
 let currentLang = "en"; // active language (drives boot audio + recognition)
+let awaitingBriefing = false; // mic stays off until the post-boot briefing finishes
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -102,6 +103,14 @@ const voiceInput = createAudioCapture(
 // ---------------------------------------------------------------------------
 
 audioPlayer.onFinished(() => {
+  // After the post-boot briefing finishes speaking, NOW start the mic — keeping
+  // it off during the briefing so JARVIS never transcribes its own voice.
+  if (awaitingBriefing) {
+    awaitingBriefing = false;
+    voiceInput.start();
+    transition("listening");
+    return;
+  }
   transition("idle");
 });
 
@@ -194,10 +203,19 @@ function endBoot() {
   try { bootVideo.pause(); bootAudio.pause(); } catch {}
   bootOverlay.classList.add("done");
   setTimeout(() => { bootOverlay.style.display = "none"; }, 1500);
-  // Hand off to the live assistant, then deliver the morning briefing.
-  voiceInput.start();
-  transition("listening");
+  // Deliver the briefing with the mic OFF so JARVIS can't hear (and transcribe)
+  // its own voice. The mic starts only when the briefing finishes (onFinished).
+  awaitingBriefing = true;
+  transition("thinking");
   setTimeout(() => socket.send({ type: "briefing" }), 600);
+  // Safety net: if the briefing never produces audio, start the mic anyway.
+  setTimeout(() => {
+    if (awaitingBriefing) {
+      awaitingBriefing = false;
+      voiceInput.start();
+      transition("listening");
+    }
+  }, 60000);
 }
 
 function startBoot() {

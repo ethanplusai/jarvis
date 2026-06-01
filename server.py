@@ -2043,10 +2043,19 @@ async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
     lang_rule = (f"Respond ONLY in natural {name}, addressing the user as '{honorific}'."
                  if lang in _names else "Address the user as 'sir'.")
 
+    # Time-aware opening greeting.
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        greet_rule = "Open with a warm 'Good morning' and that you hope he slept well."
+    elif 12 <= hour < 18:
+        greet_rule = "It is daytime (NOT morning): open simply with 'Hello, welcome back' — do NOT say good morning."
+    else:
+        greet_rule = "It is the evening: open with 'Good evening' and that you hope he had a great day — do NOT say good morning."
+
     system = (
-        f"You are JARVIS delivering {USER_NAME}'s morning briefing as a refined British butler. "
-        f"{lang_rule} From the facts below compose ONE flowing, spoken briefing covering, in order: "
-        "a brief good-morning, the commute (traffic and ETA to the office), the weather with a short "
+        f"You are JARVIS delivering {USER_NAME}'s briefing as a refined British butler. "
+        f"{lang_rule} {greet_rule} From the facts below compose ONE flowing, spoken briefing covering, in order: "
+        "the time-appropriate greeting above, the commute (traffic and ETA to the office), the weather with a short "
         "clothing suggestion, any important emails, today's agenda, the portfolio with the key numbers, "
         "and the crypto market mood. Natural and warm, no markdown, no lists, dry wit welcome but concise "
         "— aim for 7 to 10 sentences. Do not invent facts; if something says unavailable, mention it briefly or skip."
