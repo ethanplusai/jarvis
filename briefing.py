@@ -178,11 +178,22 @@ async def open_dashboard_window() -> None:
     if not dash.exists():
         return
     url = f"file://{dash}"
+    # Wide enough for the 8-column table + long position names, tall enough for
+    # all rows + totals + footer. Clamped to the main screen so it never exceeds it.
     script = f'''
+tell application "Finder" to set sb to bounds of window of desktop
+set screenW to item 3 of sb
+set screenH to item 4 of sb
+set winW to 1040
+set winH to 760
+if winW > (screenW - 40) then set winW to (screenW - 40)
+if winH > (screenH - 80) then set winH to (screenH - 80)
+set x1 to 40
+set y1 to 60
 tell application "Google Chrome"
     make new window
     set URL of active tab of front window to "{url}"
-    set bounds of front window to {{60, 80, 560, 720}}
+    set bounds of front window to {{x1, y1, x1 + winW, y1 + winH}}
 end tell
 '''
     try:
