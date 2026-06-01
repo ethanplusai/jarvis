@@ -20,6 +20,8 @@ import "./style.css";
 type State = "idle" | "listening" | "thinking" | "speaking";
 let currentState: State = "idle";
 let isMuted = false;
+let bootActive = true; // during the startup boot video — suppress greeting + mic
+let currentLang = "en"; // active language (drives boot audio + recognition)
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -111,6 +113,7 @@ socket.onMessage((msg) => {
   const type = msg.type as string;
 
   if (type === "audio") {
+    if (bootActive) return; // ignore the backend greeting while the boot video plays
     const audioData = msg.data as string;
     console.log("[audio] received", audioData ? `${audioData.length} chars` : "EMPTY", "state:", currentState);
     if (audioData) {
@@ -164,11 +167,60 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
-// Start listening after a brief delay for the orb to render
-setTimeout(() => {
+// ── Boot sequence: machine sound + HUD loading video, then fade to the orb ──
+const bootOverlay = document.getElementById("boot-overlay")!;
+const bootVideo = document.getElementById("boot-video") as HTMLVideoElement;
+const bootHint = document.getElementById("boot-hint")!;
+const bootLoading = document.getElementById("boot-loading")!;
+const bootAudio = document.getElementById("boot-audio") as HTMLAudioElement;
+let bootStarted = false;
+let bootGraphicFading = false;
+
+bootVideo.addEventListener("timeupdate", () => {
+  if (!bootActive) return;
+  // When the red HUD fades to black (~18.6s), reveal the red loading graphic.
+  if (bootVideo.currentTime >= 18.6) bootLoading.classList.add("show");
+  // Near the end (~bar 95%), fade the graphic out so the orb emerges as the
+  // music fades — the video keeps playing underneath so the audio fade finishes.
+  if (!bootGraphicFading && bootVideo.currentTime >= 26.8) {
+    bootGraphicFading = true;
+    bootOverlay.classList.add("done");
+  }
+});
+
+function endBoot() {
+  if (!bootActive) return;
+  bootActive = false;
+  try { bootVideo.pause(); bootAudio.pause(); } catch {}
+  bootOverlay.classList.add("done");
+  setTimeout(() => { bootOverlay.style.display = "none"; }, 1500);
+  // Hand off to the live assistant.
   voiceInput.start();
   transition("listening");
-}, 1000);
+}
+
+function startBoot() {
+  if (bootStarted) return;
+  bootStarted = true;
+  bootHint.style.display = "none";
+  // Silent HUD video + the active language's audio track (machine sound +
+  // music + welcome line in EN/FR/TR), started together by this user gesture.
+  bootVideo.muted = true;
+  bootVideo.currentTime = 0;
+  bootAudio.src = `/boot_audio_${currentLang}.mp3`;
+  bootAudio.currentTime = 0;
+  bootVideo.play().catch(() => {});
+  bootAudio.play().catch(() => endBoot());
+}
+
+bootVideo.addEventListener("ended", endBoot);
+bootAudio.addEventListener("ended", endBoot);
+// Safety net: end the boot even if the video stalls.
+bootVideo.addEventListener("loadedmetadata", () => {
+  setTimeout(endBoot, (bootVideo.duration + 4) * 1000);
+});
+// Boot needs a user gesture (audio autoplay). Start it on the first click.
+document.addEventListener("click", startBoot);
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
 function ensureAudioContext() {
@@ -197,6 +249,7 @@ const btnFixSelf = document.getElementById("btn-fix-self")!;
 // Language toggle — forces Whisper recognition + JARVIS replies to a language.
 const langButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".lang-btn"));
 function setLanguage(lang: string) {
+  currentLang = lang;
   for (const b of langButtons) b.classList.toggle("active", b.dataset.lang === lang);
   socket.send({ type: "set_lang", lang });
   console.log("[lang] set to", lang);

@@ -7,6 +7,20 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- Boot sequence — machine sound + HUD loading video, then fades to the orb -->
+    <div id="boot-overlay">
+      <video id="boot-video" src="/boot_silent.mp4" muted playsinline preload="auto"></video>
+      <audio id="boot-audio" preload="auto"></audio>
+      <div id="boot-loading">
+        <div class="bl-frame">
+          <div class="bl-title">INITIATING SYSTEM</div>
+          <div class="bl-bar"><div class="bl-fill"></div></div>
+          <div class="bl-status"><span>CHECKSUM: OK</span><span>MEMORY: OK</span><span>CORE: ONLINE</span></div>
+        </div>
+      </div>
+      <div id="boot-hint">select language (top-left) · click to initialize JARVIS</div>
+    </div>
+
     <canvas id="orb-canvas"></canvas>
 
     <!-- Language toggle — forces speech recognition + replies to a language -->

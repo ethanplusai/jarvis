@@ -425,7 +425,7 @@ html, body {
   left: 16px;
   display: flex;
   gap: 6px;
-  z-index: 20;
+  z-index: 200; /* above the boot overlay so you can pick a language before starting */
 }
 #lang-select .lang-btn {
   background: rgba(20, 24, 34, 0.6);
@@ -447,4 +447,97 @@ html, body {
   background: rgba(70, 130, 220, 0.35);
   color: #eaf2ff;
   border-color: rgba(120, 180, 255, 0.8);
+}
+
+/* Boot sequence overlay */
+#boot-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 1.2s ease;
+}
+#boot-overlay.done {
+  opacity: 0;
+  pointer-events: none;
+}
+#boot-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+#boot-hint {
+  position: absolute;
+  bottom: 12%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: rgba(120, 200, 255, 0.85);
+  font-family: -apple-system, sans-serif;
+  font-size: 15px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  animation: bootpulse 1.6s ease-in-out infinite;
+}
+@keyframes bootpulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+/* Red HUD loading graphic (overlays the boot video's black tail) */
+#boot-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,40,40,0.05) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg, rgba(255,40,40,0.05) 0 1px, transparent 1px 34px);
+  pointer-events: none;
+}
+#boot-loading.show { opacity: 1; }
+.bl-frame {
+  width: min(640px, 80vw);
+  padding: 26px 30px;
+  border: 1px solid rgba(255,60,60,0.5);
+  border-radius: 6px;
+  box-shadow: 0 0 30px rgba(255,40,40,0.25), inset 0 0 20px rgba(255,40,40,0.08);
+  background: rgba(20,0,0,0.35);
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+}
+.bl-title {
+  color: #ff5a5a;
+  font-size: 18px;
+  letter-spacing: 0.32em;
+  text-shadow: 0 0 12px rgba(255,60,60,0.9);
+  margin-bottom: 16px;
+}
+.bl-title::after { content: " ▾▾▾"; animation: bldots 1s steps(3) infinite; }
+@keyframes bldots { 0%{opacity:.2} 50%{opacity:1} 100%{opacity:.2} }
+.bl-bar {
+  height: 16px;
+  border: 1px solid rgba(255,60,60,0.6);
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255,40,40,0.06);
+}
+.bl-fill {
+  height: 100%;
+  width: 0%;
+  background: repeating-linear-gradient(90deg, #ff3a3a 0 10px, #b81f1f 10px 14px);
+  box-shadow: 0 0 16px rgba(255,50,50,0.9);
+}
+#boot-loading.show .bl-fill { animation: blfill 8.4s linear forwards; }
+@keyframes blfill { from { width: 0%; } to { width: 100%; } }
+.bl-status {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  color: rgba(255,120,120,0.8);
+  font-size: 11px;
+  letter-spacing: 0.18em;
 }
