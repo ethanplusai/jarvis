@@ -18,12 +18,16 @@ import logging
 log = logging.getLogger("jarvis.camera")
 
 
-async def describe_camera(anthropic_client, frame_b64: str) -> str:
+_LANG = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
+
+
+async def describe_camera(anthropic_client, frame_b64: str, lang: str = "en") -> str:
     """Describe a single webcam frame via the Claude vision API.
 
     Args:
         anthropic_client: AsyncAnthropic client.
         frame_b64: base64-encoded JPEG (no data-URL prefix).
+        lang: 'fr'/'tr' to reply in that language; otherwise English.
 
     Returns:
         A short, spoken-style description, or a polite failure line.
@@ -33,6 +37,9 @@ async def describe_camera(anthropic_client, frame_b64: str) -> str:
     if not anthropic_client:
         return "Camera captured, but I've no vision model configured, sir."
 
+    name, honorific = _LANG.get(lang, ("English", "sir"))
+    lang_line = (f" Reply ONLY in {name}, addressing the user as '{honorific}'."
+                 if lang in _LANG else " Address the user as 'sir'.")
     try:
         response = await anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -41,8 +48,8 @@ async def describe_camera(anthropic_client, frame_b64: str) -> str:
                 "You are JARVIS looking through the user's webcam. Describe what you "
                 "see concisely and naturally, as a British butler would: who or what "
                 "is in frame, their expression or surroundings, anything notable. "
-                "Address the user as 'sir'. 1-3 sentences max. No markdown. "
-                "If the frame is too dark or empty to make out, say so plainly."
+                "1-3 sentences max. No markdown. "
+                "If the frame is too dark or empty to make out, say so plainly." + lang_line
             ),
             messages=[{
                 "role": "user",

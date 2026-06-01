@@ -1278,10 +1278,11 @@ async def generate_response(
     if lang in _lang_names:
         name, honorific = _lang_names[lang]
         system += (
-            f"\n\nLANGUAGE: The user is speaking {name}. Respond ONLY in natural, "
-            f"fluent {name}, keeping the same butler personality. Do NOT use English "
-            f"and do NOT mix languages. Address the user as '{honorific}' (never 'sir' "
-            f"or another language's honorific). [ACTION:X] tags (if any) stay in English "
+            f"\n\nLANGUAGE (critical): You MUST reply ONLY in {name}. Never English, "
+            f"Spanish, Italian, Portuguese or any other language — reply in {name} even "
+            f"if the transcribed input looks garbled or like another language. Keep the "
+            f"butler personality and address the user as '{honorific}' (never 'sir' or "
+            f"another language's honorific). [ACTION:X] tags (if any) stay in English "
             f"exactly as specified, but every spoken word must be {name}."
         )
 
@@ -1865,10 +1866,10 @@ async def _do_mail_lookup() -> str:
     return "Couldn't reach Mail at the moment, sir."
 
 
-async def _do_screen_lookup() -> str:
+async def _do_screen_lookup(lang: str = "en") -> str:
     """Screen describe — runs in thread."""
     if anthropic_client:
-        return await describe_screen(anthropic_client)
+        return await describe_screen(anthropic_client, lang=lang)
     windows = await get_active_windows()
     if windows:
         apps = set(w["app"] for w in windows)
@@ -1900,13 +1901,13 @@ async def request_camera_frame(ws, pending_frames: dict, timeout: float = 12.0) 
         pending_frames.pop(request_id, None)
 
 
-async def _do_camera_lookup(ws, pending_frames: dict) -> str:
+async def _do_camera_lookup(ws, pending_frames: dict, lang: str = "en") -> str:
     """Webcam describe — request a single frame from the browser, then vision."""
     frame_b64 = await request_camera_frame(ws, pending_frames)
     if not frame_b64:
         return ("I couldn't get a camera frame, sir. The webcam may be blocked, "
                 "in use by another app, or permission hasn't been granted.")
-    return await describe_camera(anthropic_client, frame_b64)
+    return await describe_camera(anthropic_client, frame_b64, lang=lang)
 
 
 # Market sentiment — runs the kukapay market-sentiment skill's analyzer as a
@@ -2610,10 +2611,10 @@ async def voice_handler(ws: WebSocket):
                             response_text = await handle_show_recent()
                         elif action["action"] == "describe_screen":
                             response_text = "Taking a look now, sir."
-                            asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                            asyncio.create_task(_lookup_and_report("screen", lambda: _do_screen_lookup(voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
                         elif action["action"] == "describe_camera":
                             response_text = "Let me have a look, sir."
-                            asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames), ws, history=history, voice_state=voice_state))
+                            asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames, voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
                         elif action["action"] == "market_sentiment":
                             response_text = "Checking the crypto mood now, sir."
                             asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
@@ -2775,9 +2776,9 @@ async def voice_handler(ws: WebSocket):
                                     else:
                                         asyncio.create_task(create_apple_note("JARVIS Note", target))
                                 elif embedded_action["action"] == "screen":
-                                    asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                                    asyncio.create_task(_lookup_and_report("screen", lambda: _do_screen_lookup(voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "camera":
-                                    asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames), ws, history=history, voice_state=voice_state))
+                                    asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames, voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "sentiment":
                                     asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "read_note":

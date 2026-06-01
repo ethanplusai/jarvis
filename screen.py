@@ -151,11 +151,16 @@ async def take_screenshot(display_only: bool = True) -> str | None:
             pass
 
 
-async def describe_screen(anthropic_client) -> str:
+_LANG = {"fr": "French", "tr": "Turkish"}
+
+
+async def describe_screen(anthropic_client, lang: str = "en") -> str:
     """Describe what's on the user's screen.
 
     Tries screenshot + vision first. Falls back to window list + LLM summary.
+    lang: 'fr'/'tr' to reply in that language; otherwise English.
     """
+    lang_line = f" Reply ONLY in {_LANG[lang]}." if lang in _LANG else ""
     # Try screenshot + vision
     screenshot_b64 = await take_screenshot()
     if screenshot_b64 and anthropic_client:
@@ -168,7 +173,7 @@ async def describe_screen(anthropic_client) -> str:
                     "Describe what you see concisely: which apps are open, what the user "
                     "appears to be working on, any notable content visible. "
                     "Be specific about app names, file names, URLs, code, or documents visible. "
-                    "2-4 sentences max. No markdown."
+                    "2-4 sentences max. No markdown." + lang_line
                 ),
                 messages=[{
                     "role": "user",
@@ -219,7 +224,7 @@ async def describe_screen(anthropic_client) -> str:
                 max_tokens=100,
                 system=(
                     "You are JARVIS. Given the user's open windows and apps, summarize "
-                    "what they appear to be working on in 1-2 sentences. Natural voice, no markdown."
+                    "what they appear to be working on in 1-2 sentences. Natural voice, no markdown." + lang_line
                 ),
                 messages=[{"role": "user", "content": "Open windows:\n" + "\n".join(context_parts)}],
             )
