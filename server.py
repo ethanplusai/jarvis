@@ -1985,20 +1985,20 @@ async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
         except Exception:
             return None
 
-    traffic, weather, portfolio, gmail, cal_txt, senti_txt = await asyncio.gather(
+    traffic, weather, portfolio, gmail, cal_txt, senti = await asyncio.gather(
         _timed(briefing.get_traffic(), 12),
         _timed(briefing.get_weather(), 12),
         _timed(briefing.get_portfolio(), 25),
         _timed(gmail_access.get_briefing_mail(), 15),
         _timed(_do_calendar_lookup(), 12),
-        _timed(_do_sentiment_lookup(), 22),
+        _timed(briefing.get_sentiment(), 12),
     )
 
     def _safe(v, default="unavailable"):
         return default if (v is None or isinstance(v, Exception)) else v
 
     traffic = _safe(traffic, {}); weather = _safe(weather, {}); portfolio = _safe(portfolio, {})
-    gmail = _safe(gmail, {}); cal_txt = _safe(cal_txt); senti_txt = _safe(senti_txt)
+    gmail = _safe(gmail, {}); cal_txt = _safe(cal_txt); senti = _safe(senti, {})
 
     # Build a plain-facts block for the LLM to turn into a spoken briefing.
     facts = []
@@ -2032,7 +2032,11 @@ async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
         facts.append(line)
     else:
         facts.append("PORTFOLIO: unavailable.")
-    facts.append(f"CRYPTO MOOD: {senti_txt}")
+    if isinstance(senti, dict) and senti.get("ok"):
+        facts.append(f"CRYPTO MOOD: {senti['mood']} (score {senti['score']:+.2f} "
+                     f"across {senti['articles']} crypto news articles).")
+    else:
+        facts.append("CRYPTO MOOD: unavailable.")
 
     _names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
     name, honorific = _names.get(lang, ("English", "sir"))
@@ -2063,9 +2067,18 @@ async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
     if not response_text:
         response_text = "Good morning, sir. I'm afraid I couldn't assemble the full briefing just now."
 
-    # Synthesize the audio here too, so the boot prefetch hides this latency.
-    audio = await synthesize_speech(strip_markdown_for_tts(response_text), lang=lang)
-    return response_text, audio
+    # A long briefing is ~24s of TTS in one call. Split into chunks and
+    # synthesize them CONCURRENTLY (~8s), returned as ordered audio segments the
+    # player queues — fits inside the boot prefetch window so it plays instantly.
+    sentences = _action_re.split(r"(?<=[.!?])\s+", response_text.strip())
+    n = 3
+    size = max(1, -(-len(sentences) // n))
+    chunks = [" ".join(sentences[i:i + size]) for i in range(0, len(sentences), size)] or [response_text]
+    audios = await asyncio.gather(*[
+        synthesize_speech(strip_markdown_for_tts(c), lang=lang) for c in chunks
+    ])
+    audios = [a for a in audios if a]
+    return response_text, audios
 
 
 async def morning_briefing(ws, history: list[dict] = None, voice_state: dict = None):
@@ -2076,23 +2089,27 @@ async def morning_briefing(ws, history: list[dict] = None, voice_state: dict = N
     if voice_state:
         lang = voice_state.get("forced_lang") or voice_state.get("lang") or "en"
         task = voice_state.pop("briefing_task", None)
+    log.info(f"morning_briefing ({lang}); prefetched={task is not None}")
     await ws.send_json({"type": "status", "state": "thinking"})
     try:
         if task is not None:
-            response_text, audio = await task   # prepared during the boot screen
+            response_text, audios = await task   # prepared during the boot screen
         else:
-            response_text, audio = await _prepare_briefing(lang)
+            response_text, audios = await _prepare_briefing(lang)
     except Exception as e:
         log.warning(f"briefing failed: {e}")
-        response_text, audio = ("Good morning, sir. I couldn't assemble the briefing just now.", None)
+        response_text, audios = ("Good morning, sir. I couldn't assemble the briefing just now.", [])
 
     # Open the portfolio dashboard window alongside the spoken briefing.
     asyncio.create_task(briefing.open_dashboard_window())
 
     try:
         await ws.send_json({"type": "status", "state": "speaking"})
-        if audio:
-            await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+        if audios:
+            # Send the segments in order; the player queues them seamlessly.
+            for i, a in enumerate(audios):
+                await ws.send_json({"type": "audio", "data": base64.b64encode(a).decode(),
+                                    "text": response_text if i == 0 else ""})
         else:
             await ws.send_json({"type": "text", "text": response_text})
         await ws.send_json({"type": "status", "state": "idle"})

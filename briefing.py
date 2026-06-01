@@ -172,6 +172,53 @@ async def get_portfolio() -> dict:
     }
 
 
+# ---- Crypto sentiment (fast, concurrent) ---------------------------------
+
+_POS = ["adoption", "launch", "partnership", "etf", "rally", "breakthrough",
+        "growth", "approval", "bullish", "surge", "adopts", "soar", "gains"]
+_NEG = ["crash", "exploit", "hack", "delay", "liquidation", "depeg", "bearish",
+        "decline", "setback", "breach", "drop", "plunge", "selloff", "lawsuit"]
+_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+    "https://cointelegraph.com/rss",
+    "https://cryptopotato.com/feed/",
+    "https://bitcoinist.com/feed/",
+    "https://www.newsbtc.com/feed/",
+    "https://cryptonews.com/news/feed/",
+]
+
+
+def _fetch_feed(url: str) -> list[str]:
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(_get(url, timeout=8))
+        out = []
+        for it in root.findall(".//item"):
+            title = it.findtext("title") or ""
+            desc = it.findtext("description") or ""
+            out.append((title + " " + desc).lower())
+        return out
+    except Exception:
+        return []
+
+
+async def get_sentiment() -> dict:
+    """Crypto news sentiment — fetches all feeds concurrently (~4s vs ~20s)."""
+    results = await asyncio.gather(*[asyncio.to_thread(_fetch_feed, u) for u in _FEEDS])
+    texts = [t for sub in results for t in sub]
+    if not texts:
+        return {"ok": False}
+    total = pos = neg = 0
+    for txt in texts:
+        p = sum(1 for w in _POS if w in txt)
+        n = sum(1 for w in _NEG if w in txt)
+        total += 1 if p > n else -1 if n > p else 0
+    count = len(texts)
+    score = total / count if count else 0.0
+    mood = "bullish" if score > 0.1 else "bearish" if score < -0.1 else "neutral"
+    return {"ok": True, "score": round(score, 2), "mood": mood, "articles": count}
+
+
 async def open_dashboard_window() -> None:
     """Open the portfolio dashboard in a small Chrome app window."""
     dash = PORTFOLIO_DIR / "dashboard.html"
