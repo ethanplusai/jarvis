@@ -2117,10 +2117,12 @@ async def morning_briefing(ws, history: list[dict] = None, voice_state: dict = N
     try:
         await ws.send_json({"type": "status", "state": "speaking"})
         if audios:
-            # Send the segments in order; the player queues them seamlessly.
-            for i, a in enumerate(audios):
-                await ws.send_json({"type": "audio", "data": base64.b64encode(a).decode(),
-                                    "text": response_text if i == 0 else ""})
+            # Concatenate the parallel-synthesized mp3 chunks into ONE blob — a
+            # single audio buffer avoids the multi-segment playback race that was
+            # cutting off the last (crypto) segment.
+            combined = b"".join(audios)
+            await ws.send_json({"type": "audio", "data": base64.b64encode(combined).decode(),
+                                "text": response_text})
         else:
             await ws.send_json({"type": "text", "text": response_text})
         await ws.send_json({"type": "status", "state": "idle"})
