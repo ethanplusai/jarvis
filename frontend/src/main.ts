@@ -6,8 +6,10 @@
  */
 
 import { createOrb, type OrbState } from "./orb";
-import { createVoiceInput, createAudioPlayer } from "./voice";
+import { createAudioPlayer } from "./voice";
+import { createAudioCapture } from "./audio_capture";
 import { createSocket } from "./ws";
+import { captureCameraFrame } from "./camera";
 import { openSettings, checkFirstTimeSetup } from "./settings";
 import "./style.css";
 
@@ -18,6 +20,9 @@ import "./style.css";
 type State = "idle" | "listening" | "thinking" | "speaking";
 let currentState: State = "idle";
 let isMuted = false;
+let bootActive = true; // during the startup boot video — suppress greeting + mic
+let currentLang = "en"; // active language (drives boot audio + recognition)
+let awaitingBriefing = false; // mic stays off until the post-boot briefing finishes
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -77,15 +82,15 @@ function transition(newState: State) {
 }
 
 // ---------------------------------------------------------------------------
-// Voice input
+// Voice input — mic capture + VAD; server transcribes (Whisper) & auto-detects
+// the language, so we just stream raw audio of each utterance.
 // ---------------------------------------------------------------------------
 
-const voiceInput = createVoiceInput(
-  (text: string) => {
+const voiceInput = createAudioCapture(
+  (pcm: ArrayBuffer) => {
     // Cancel any current JARVIS response before sending new input
     audioPlayer.stop();
-    // User spoke — send transcript
-    socket.send({ type: "transcript", text, isFinal: true });
+    socket.sendBinary(pcm);
     transition("thinking");
   },
   (msg: string) => {
@@ -98,6 +103,14 @@ const voiceInput = createVoiceInput(
 // ---------------------------------------------------------------------------
 
 audioPlayer.onFinished(() => {
+  // After the post-boot briefing finishes speaking, NOW start the mic — keeping
+  // it off during the briefing so JARVIS never transcribes its own voice.
+  if (awaitingBriefing) {
+    awaitingBriefing = false;
+    voiceInput.start();
+    transition("listening");
+    return;
+  }
   transition("idle");
 });
 
@@ -109,6 +122,7 @@ socket.onMessage((msg) => {
   const type = msg.type as string;
 
   if (type === "audio") {
+    if (bootActive) return; // ignore the backend greeting while the boot video plays
     const audioData = msg.data as string;
     console.log("[audio] received", audioData ? `${audioData.length} chars` : "EMPTY", "state:", currentState);
     if (audioData) {
@@ -137,6 +151,20 @@ socket.onMessage((msg) => {
   } else if (type === "text") {
     // Text fallback when TTS fails
     console.log("[JARVIS]", msg.text);
+  } else if (type === "capture_camera") {
+    // Server wants a single webcam frame. Capture one, release the camera,
+    // and send it back tagged with the same request_id.
+    const requestId = msg.request_id as string;
+    console.log("[camera] capture requested", requestId);
+    captureCameraFrame()
+      .then((data) => {
+        socket.send({ type: "camera_frame", request_id: requestId, data });
+        if (!data) showError("Camera unavailable or blocked.");
+      })
+      .catch((e) => {
+        console.error("[camera] error", e);
+        socket.send({ type: "camera_frame", request_id: requestId, data: null });
+      });
   } else if (type === "task_spawned") {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {
@@ -148,11 +176,76 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
-// Start listening after a brief delay for the orb to render
-setTimeout(() => {
-  voiceInput.start();
-  transition("listening");
-}, 1000);
+// ── Boot sequence: machine sound + HUD loading video, then fade to the orb ──
+const bootOverlay = document.getElementById("boot-overlay")!;
+const bootVideo = document.getElementById("boot-video") as HTMLVideoElement;
+const bootHint = document.getElementById("boot-hint")!;
+const bootLoading = document.getElementById("boot-loading")!;
+const bootAudio = document.getElementById("boot-audio") as HTMLAudioElement;
+let bootStarted = false;
+let bootGraphicFading = false;
+
+bootVideo.addEventListener("timeupdate", () => {
+  if (!bootActive) return;
+  // When the red HUD fades to black (~18.6s), reveal the red loading graphic.
+  if (bootVideo.currentTime >= 18.6) bootLoading.classList.add("show");
+  // Near the end (~bar 95%), fade the graphic out so the orb emerges as the
+  // music fades — the video keeps playing underneath so the audio fade finishes.
+  if (!bootGraphicFading && bootVideo.currentTime >= 26.8) {
+    bootGraphicFading = true;
+    bootOverlay.classList.add("done");
+  }
+});
+
+function endBoot() {
+  if (!bootActive) return;
+  bootActive = false;
+  try { bootVideo.pause(); bootAudio.pause(); } catch {}
+  bootOverlay.classList.add("done");
+  setTimeout(() => { bootOverlay.style.display = "none"; }, 1500);
+  // Deliver the briefing with the mic OFF so JARVIS can't hear (and transcribe)
+  // its own voice. The mic starts only when the briefing finishes (onFinished).
+  awaitingBriefing = true;
+  transition("thinking");
+  setTimeout(() => socket.send({ type: "briefing" }), 600);
+  // Safety net for the rare case the briefing produces NO audio at all. Kept
+  // well beyond any real briefing length (the briefing can run ~60s) so it never
+  // fires mid-briefing and cuts the end off — onFinished is the normal trigger.
+  setTimeout(() => {
+    if (awaitingBriefing) {
+      awaitingBriefing = false;
+      voiceInput.start();
+      transition("listening");
+    }
+  }, 180000);
+}
+
+function startBoot() {
+  if (bootStarted) return;
+  bootStarted = true;
+  bootHint.style.display = "none";
+  // Silent HUD video + the active language's audio track (machine sound +
+  // music + welcome line in EN/FR/TR), started together by this user gesture.
+  bootVideo.muted = true;
+  bootVideo.currentTime = 0;
+  bootAudio.src = `/boot_audio_${currentLang}.mp3`;
+  bootAudio.currentTime = 0;
+  bootVideo.play().catch(() => {});
+  bootAudio.play().catch(() => endBoot());
+  // Prefetch the briefing NOW (during the ~28s boot) so it's ready instantly
+  // when the boot ends — no second wait.
+  socket.send({ type: "set_lang", lang: currentLang });
+  socket.send({ type: "briefing_prefetch" });
+}
+
+bootVideo.addEventListener("ended", endBoot);
+bootAudio.addEventListener("ended", endBoot);
+// Safety net: end the boot even if the video stalls.
+bootVideo.addEventListener("loadedmetadata", () => {
+  setTimeout(endBoot, (bootVideo.duration + 4) * 1000);
+});
+// Boot needs a user gesture (audio autoplay). Start it on the first click.
+document.addEventListener("click", startBoot);
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
 function ensureAudioContext() {
@@ -177,6 +270,23 @@ const btnMenu = document.getElementById("btn-menu")!;
 const menuDropdown = document.getElementById("menu-dropdown")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
+
+// Language toggle — forces Whisper recognition + JARVIS replies to a language.
+const langButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".lang-btn"));
+function setLanguage(lang: string) {
+  currentLang = lang;
+  for (const b of langButtons) b.classList.toggle("active", b.dataset.lang === lang);
+  socket.send({ type: "set_lang", lang });
+  console.log("[lang] set to", lang);
+}
+for (const b of langButtons) {
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setLanguage(b.dataset.lang || "en");
+  });
+}
+// Tell the server the default (English) once connected.
+setTimeout(() => setLanguage("en"), 1500);
 
 btnMute.addEventListener("click", (e) => {
   e.stopPropagation();

@@ -1,11 +1,16 @@
 # Environment
 .env
 .env.local
+.env.save
+
+# Runtime logs / pids (start_jarvis.sh)
+.run/
 
 # Dependencies
 node_modules/
 .venv/
 venv/
+whisper-venv/
 
 # Python
 __pycache__/
@@ -39,3 +44,7 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+
+# Gmail OAuth secrets
+gmail_credentials.json
+gmail_token.json

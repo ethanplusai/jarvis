@@ -1,3 +1,5 @@
+
+
 """
 JARVIS Server — Voice AI + Development Orchestration
 
@@ -34,6 +36,7 @@ from typing import Optional
 
 import anthropic
 import httpx
+from openai import AsyncOpenAI
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -42,8 +45,11 @@ from pydantic import BaseModel
 from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
+from camera import describe_camera
+import briefing
+import gmail_access
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
-from mail_access import get_unread_count, get_unread_messages, get_recent_messages, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
+from mail_access import get_unread_count, get_unread_messages, get_recent_messages, get_recent_headers, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
 from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
     create_note, search_notes, get_tasks_for_date, build_memory_context,
@@ -63,7 +69,18 @@ log = logging.getLogger("jarvis")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
+# French and Turkish use private cloned voices from native speakers (the MCU
+# clone carries an English accent into French). English uses the MCU voice.
+FISH_VOICE_ID_FR = os.getenv("FISH_VOICE_ID_FR", "7e72838b555a4621a3ae6151b53249cf")
+FISH_VOICE_ID_TR = os.getenv("FISH_VOICE_ID_TR", "79c8bd0cadd84509a804037383af94b8")
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+
+# Per-language (reference_id, model) overrides. Languages absent here fall back
+# to the default JARVIS voice + Fish's default model.
+_LANG_VOICE: dict[str, tuple[str, Optional[str]]] = {
+    "fr": (FISH_VOICE_ID_FR, "speech-1.6"),
+    "tr": (FISH_VOICE_ID_TR, "speech-1.6"),
+}
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
@@ -106,6 +123,8 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN check Desktop projects and their git status
 - You CAN plan complex tasks by asking smart questions before executing
 - You CAN see what's on {user_name}'s screen — open windows, active apps, and screenshot vision
+- You CAN look through {user_name}'s webcam — a single on-demand photo via [ACTION:CAMERA]. Use it when he asks you to look at him or use the camera. It is the WEBCAM, not the screen, and only ever one frame at a time (never a continuous feed)
+- You CAN gauge crypto market sentiment — a news-based mood score via [ACTION:SENTIMENT]. Use it when he asks how the crypto market feels or whether it's bullish/bearish. It reads news headlines only; never present it as trading advice or a price prediction
 - You CAN read {user_name}'s calendar — today's events, upcoming meetings, schedule overview
 - You CAN read {user_name}'s email (READ-ONLY) — unread count, recent messages, search by sender/subject. You CANNOT send, delete, or modify emails.
 - You CAN read Apple Notes and create NEW notes — but you CANNOT edit or delete existing notes
@@ -184,6 +203,8 @@ INSTEAD SAY:
 ACTION SYSTEM:
 When you decide the user needs something DONE (not just discussed), include an action tag in your response:
 - [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
+- [ACTION:CAMERA] — take a single webcam photo and describe what's in front of the camera. Use ONLY when the user clearly means the camera/webcam or themselves: "look at me", "can you see me", "what do I look like", "use the camera". This is the WEBCAM, distinct from SCREEN (the desktop). On-demand single frame only; never continuous.
+- [ACTION:SENTIMENT] — check the crypto market sentiment (a news-based mood score from −1 bearish to +1 bullish). Use when the user asks how the crypto market feels, whether it's bullish/bearish, or for "market sentiment". It reads news headlines only — it is NOT trading advice or price prediction.
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
@@ -814,7 +835,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|CAMERA|SENTIMENT)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -1125,23 +1146,61 @@ _last_greeting_time: float = 0
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
-async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
+WHISPER_URL = os.getenv("WHISPER_URL", "http://127.0.0.1:8765")
+
+
+async def transcribe_audio(pcm: bytes, lang: Optional[str] = None) -> tuple[str, str]:
+    """Send recorded audio to the Whisper service; return (text, language).
+
+    If lang is given, Whisper is forced to that language (reliable); otherwise it
+    auto-detects. On any failure returns ("", lang or "en").
+    """
+    url = f"{WHISPER_URL}/transcribe"
+    if lang:
+        url += f"?lang={lang}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            r = await http.post(
+                url,
+                content=pcm,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            if r.status_code == 200:
+                j = r.json()
+                return (j.get("text", "").strip(), j.get("language", "en"))
+            log.warning(f"whisper service {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        log.warning(f"whisper transcribe failed: {e}")
+    return ("", lang or "en")
+
+
+async def synthesize_speech(text: str, lang: str = "en") -> Optional[bytes]:
+    """Generate speech audio from text using Fish Audio TTS.
+
+    lang selects the voice: 'fr' uses the cloned native-French voice; everything
+    else uses the default JARVIS voice. Fish auto-detects the spoken language
+    from the text, so the voice just needs to match for accent quality.
+    """
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
+
+    voice_id, model = _LANG_VOICE.get(lang, (FISH_VOICE_ID, None))
+    headers = {
+        "Authorization": f"Bearer {FISH_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if model:
+        headers["model"] = model
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
             response = await http.post(
                 FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json={
                     "text": text,
-                    "reference_id": FISH_VOICE_ID,
+                    "reference_id": voice_id,
                     "format": "mp3",
                 },
             )
@@ -1169,6 +1228,7 @@ async def generate_response(
     conversation_history: list[dict],
     last_response: str = "",
     session_summary: str = "",
+    lang: str = "en",
 ) -> str:
     """Generate a JARVIS response using Anthropic API."""
     now = datetime.now()
@@ -1212,6 +1272,19 @@ async def generate_response(
     # Self-awareness — remind JARVIS of last response to avoid repetition
     if last_response:
         system += f'\n\nYOUR LAST RESPONSE (do not repeat this):\n"{last_response[:150]}"'
+
+    # Language — the user spoke French/Turkish, so reply in kind (Whisper detected it).
+    _lang_names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
+    if lang in _lang_names:
+        name, honorific = _lang_names[lang]
+        system += (
+            f"\n\nLANGUAGE (critical): You MUST reply ONLY in {name}. Never English, "
+            f"Spanish, Italian, Portuguese or any other language — reply in {name} even "
+            f"if the transcribed input looks garbled or like another language. Keep the "
+            f"butler personality and address the user as '{honorific}' (never 'sir' or "
+            f"another language's honorific). [ACTION:X] tags (if any) stay in English "
+            f"exactly as specified, but every spoken word must be {name}."
+        )
 
     # Use conversation history — keep the last 20 messages for context
     # (older conversation is captured in session_summary)
@@ -1297,9 +1370,12 @@ def _cost_from_tokens(input_t: int, output_t: int) -> float:
 
 
 def track_usage(response):
-    """Track token usage from an Anthropic API response."""
-    inp = getattr(response.usage, "input_tokens", 0) if hasattr(response, "usage") else 0
-    out = getattr(response.usage, "output_tokens", 0) if hasattr(response, "usage") else 0
+    """Track token usage from an API response."""
+    if hasattr(response, "usage") and response.usage:
+        inp = getattr(response.usage, "input_tokens", None) or getattr(response.usage, "prompt_tokens", 0)
+        out = getattr(response.usage, "output_tokens", None) or getattr(response.usage, "completion_tokens", 0)
+    else:
+        inp = out = 0
     _session_tokens["input"] += inp
     _session_tokens["output"] += out
     _session_tokens["api_calls"] += 1
@@ -1536,6 +1612,14 @@ def detect_action_fast(text: str) -> dict | None:
     if len(words) > 12:
         return None  # Long messages are conversation, not commands
 
+    # Camera requests — checked BEFORE screen so "look at me" goes to the webcam,
+    # not the desktop. Requires an explicit camera/face cue to avoid overlap.
+    if any(p in t for p in ["look at me", "can you see me", "do you see me",
+                             "through the camera", "use the camera", "turn on the camera",
+                             "look through the camera", "what do i look like", "how do i look",
+                             "webcam", "on the camera", "with the camera", "via the camera"]):
+        return {"action": "describe_camera"}
+
     # Screen requests — checked BEFORE project matching to prevent misrouting
     if any(p in t for p in ["look at my screen", "what's on my screen", "whats on my screen",
                              "what am i looking at", "what do you see", "see my screen",
@@ -1588,6 +1672,18 @@ def detect_action_fast(text: str) -> dict | None:
                              "what's the cost", "whats the cost", "api cost", "token usage",
                              "how expensive", "what's my bill"]):
         return {"action": "check_usage"}
+
+    # Morning briefing — full daily rundown
+    if any(p in t for p in ["morning briefing", "brief me", "my briefing", "daily briefing",
+                             "give me my briefing", "good morning jarvis", "start my day"]):
+        return {"action": "briefing"}
+
+    # Crypto market sentiment — RSS news mood score
+    if any(p in t for p in ["market sentiment", "crypto sentiment", "crypto mood",
+                             "how's the crypto market", "hows the crypto market",
+                             "how's the market feeling", "sentiment score",
+                             "is crypto bullish", "is crypto bearish", "bullish or bearish"]):
+        return {"action": "market_sentiment"}
 
     return None  # Everything else goes to the LLM for conversational routing
 
@@ -1672,6 +1768,11 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
     JARVIS stays conversational — this runs completely off the main path.
     """
     lookup_id = str(uuid.uuid4())[:8]
+    # Baseline: the user utterance that triggered this lookup. We only suppress
+    # the spoken result if a NEWER utterance arrives while we work — otherwise a
+    # fast lookup (e.g. sentiment, ~1.5s) gets wrongly muted as "talking over"
+    # the very question that asked for it.
+    trigger_time = voice_state["last_user_time"] if voice_state else 0.0
     _active_lookups[lookup_id] = {
         "type": lookup_type,
         "status": "working",
@@ -1688,17 +1789,19 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
 
         _active_lookups[lookup_id]["status"] = "done"
 
-        # Speak the result — skip audio if user spoke recently to avoid collision
-        if voice_state and time.time() - voice_state["last_user_time"] < 3:
-            log.info(f"Skipping lookup audio for {lookup_type} — user spoke recently")
+        # Speak the result — but stay quiet if the user has said something NEW
+        # since this lookup began (don't talk over a fresh request).
+        if voice_state and voice_state["last_user_time"] > trigger_time:
+            log.info(f"Skipping lookup audio for {lookup_type} — newer user input arrived")
             # Result is still stored in history below
         else:
             tts = strip_markdown_for_tts(result_text)
-            audio = await synthesize_speech(tts)
+            audio = await synthesize_speech(tts, lang=voice_state.get("lang", "en") if voice_state else "en")
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                    # synthesize_speech returns raw mp3 bytes — base64-encode for JSON.
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
                 else:
                     await ws.send_json({"type": "text", "text": result_text})
                 await ws.send_json({"type": "status", "state": "idle"})
@@ -1715,10 +1818,10 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
         _active_lookups[lookup_id]["status"] = "timeout"
         try:
             fallback = f"That {lookup_type} check is taking too long, sir. The data may still be syncing."
-            audio = await synthesize_speech(fallback)
+            audio = await synthesize_speech(fallback, lang=voice_state.get("lang", "en") if voice_state else "en")
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
             await ws.send_json({"type": "status", "state": "idle"})
         except Exception:
             pass
@@ -1744,26 +1847,29 @@ async def _do_mail_lookup() -> str:
     """Slow mail fetch — runs in thread."""
     unread_info = await get_unread_count()
     if isinstance(unread_info, dict):
+        if unread_info.get("error") or unread_info.get("total") is None:
+            return "I couldn't reach Mail just now, sir — it may still be syncing."
         _ctx_cache["mail"] = format_unread_summary(unread_info)
         if unread_info["total"] == 0:
             return "Inbox is clear, sir. No unread messages."
-        unread_msgs = await get_unread_messages(count=5)
         summary = format_unread_summary(unread_info)
-        if unread_msgs:
-            top = unread_msgs[:3]
+        # Fast recent headers (no slow read-status filter / body fetch).
+        recent = await get_recent_headers(count=5)
+        if recent:
             details = ". ".join(
                 f"{_short_sender(m['sender'])} regarding {m['subject']}"
-                for m in top
+                + ("" if m["read"] else " (unread)")
+                for m in recent[:4]
             )
             return f"{summary} Most recent: {details}."
         return summary
     return "Couldn't reach Mail at the moment, sir."
 
 
-async def _do_screen_lookup() -> str:
+async def _do_screen_lookup(lang: str = "en") -> str:
     """Screen describe — runs in thread."""
     if anthropic_client:
-        return await describe_screen(anthropic_client)
+        return await describe_screen(anthropic_client, lang=lang)
     windows = await get_active_windows()
     if windows:
         apps = set(w["app"] for w in windows)
@@ -1773,6 +1879,259 @@ async def _do_screen_lookup() -> str:
             result += f" Currently focused on {active['app']}: {active['title']}."
         return result
     return "Couldn't see the screen, sir."
+
+
+async def request_camera_frame(ws, pending_frames: dict, timeout: float = 12.0) -> str | None:
+    """Ask the browser for ONE webcam frame and await it.
+
+    The webcam lives in the frontend, so we send a {"type": "capture_camera"}
+    request and wait for the matching {"type": "camera_frame"} reply, which the
+    voice loop resolves via `pending_frames`. Returns base64 JPEG or None.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    pending_frames[request_id] = fut
+    try:
+        await ws.send_json({"type": "capture_camera", "request_id": request_id})
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except (asyncio.TimeoutError, Exception):
+        return None
+    finally:
+        pending_frames.pop(request_id, None)
+
+
+async def _do_camera_lookup(ws, pending_frames: dict, lang: str = "en") -> str:
+    """Webcam describe — request a single frame from the browser, then vision."""
+    frame_b64 = await request_camera_frame(ws, pending_frames)
+    if not frame_b64:
+        return ("I couldn't get a camera frame, sir. The webcam may be blocked, "
+                "in use by another app, or permission hasn't been granted.")
+    return await describe_camera(anthropic_client, frame_b64, lang=lang)
+
+
+# Market sentiment — runs the kukapay market-sentiment skill's analyzer as a
+# subprocess. It needs `requests`, so it's invoked with an interpreter that has
+# it (the bybit-mcp venv by default). Both paths are env-overridable.
+SENTIMENT_PYTHON = os.getenv("SENTIMENT_PYTHON", "/Users/oguz/bybit-mcp/venv/bin/python")
+SENTIMENT_SCRIPT = os.getenv(
+    "SENTIMENT_SCRIPT",
+    "/Users/oguz/bybit-mcp/.agents/skills/market-sentiment/scripts/sentiment_analyzer.py",
+)
+
+
+async def _do_sentiment_lookup() -> str:
+    """Run the market-sentiment analyzer and condense it into one spoken line."""
+    if not Path(SENTIMENT_SCRIPT).exists():
+        return "The market sentiment tool isn't installed, sir."
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            SENTIMENT_PYTHON, SENTIMENT_SCRIPT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25)
+    except asyncio.TimeoutError:
+        return "The sentiment feeds are slow to respond, sir. Try again in a moment."
+    except Exception as e:
+        log.warning(f"Sentiment lookup failed: {e}")
+        return "I couldn't reach the market sentiment tool, sir."
+
+    # Parse score / article count / verdict from the script's printed report.
+    score = None
+    articles = None
+    overall = ""
+    for line in stdout.decode(errors="replace").splitlines():
+        s = line.strip()
+        if s.startswith("Market Sentiment Score:"):
+            try:
+                score = float(s.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif s.startswith("- Analyzed"):
+            m = _action_re.search(r"Analyzed\s+(\d+)\s+recent articles", s)
+            if m:
+                articles = m.group(1)
+        elif s.startswith("Overall:"):
+            overall = s.split(":", 1)[1].strip()
+
+    if score is None:
+        return "The sentiment tool returned nothing readable, sir."
+
+    mood = "bullish" if score > 0.1 else "bearish" if score < -0.1 else "neutral"
+    detail = f"a score of {score:.2f}"
+    if articles:
+        detail += f" across {articles} recent articles"
+    summary = f"Crypto market sentiment is {mood}, sir — {detail}."
+    if overall:
+        summary += f" {overall}"
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Morning briefing — runs after the startup sequence
+# ---------------------------------------------------------------------------
+
+async def _prepare_briefing(lang: str) -> tuple[str, Optional[bytes]]:
+    """Gather all sources, compose the briefing text, and synthesize the audio.
+
+    Returns (text, mp3_bytes). This is the slow part (~20s) and is safe to run
+    during the boot screen so the result is ready the instant the boot ends.
+    """
+    # Gather everything concurrently, each bounded so one slow source (e.g. a
+    # laggy feed) can't stall the whole briefing.
+    async def _timed(coro, t):
+        try:
+            return await asyncio.wait_for(coro, timeout=t)
+        except Exception:
+            return None
+
+    traffic, weather, portfolio, gmail, cal_txt, senti = await asyncio.gather(
+        _timed(briefing.get_traffic(), 12),
+        _timed(briefing.get_weather(), 12),
+        _timed(briefing.get_portfolio(), 25),
+        _timed(gmail_access.get_briefing_mail(), 15),
+        _timed(_do_calendar_lookup(), 12),
+        _timed(briefing.get_sentiment(), 12),
+    )
+
+    def _safe(v, default="unavailable"):
+        return default if (v is None or isinstance(v, Exception)) else v
+
+    traffic = _safe(traffic, {}); weather = _safe(weather, {}); portfolio = _safe(portfolio, {})
+    gmail = _safe(gmail, {}); cal_txt = _safe(cal_txt); senti = _safe(senti, {})
+
+    # Build a plain-facts block for the LLM to turn into a spoken briefing.
+    facts = []
+    if isinstance(traffic, dict) and traffic.get("ok"):
+        facts.append(f"COMMUTE: {traffic['condition']}, about {traffic['eta_min']} minutes to the office "
+                     f"({traffic['distance']} via {traffic['route']}). Usual time {traffic['normal_min']} min.")
+    else:
+        facts.append("COMMUTE: traffic data unavailable.")
+    if isinstance(weather, dict) and weather.get("ok"):
+        facts.append(f"WEATHER (today, home area): {weather['conditions']}, currently {weather['current_c']}°C, "
+                     f"high {weather['high_c']}°C, low {weather['low_c']}°C, {weather['rain_chance']}% chance of rain. "
+                     f"Give a brief clothing suggestion based on this.")
+    else:
+        facts.append("WEATHER: unavailable.")
+    if isinstance(gmail, dict) and gmail.get("ok"):
+        lines = [f"EMAIL (Gmail): {gmail['unread_total']} total unread; "
+                 f"{gmail['primary_unread']} unread in the Primary category (real correspondence)."]
+        for m in gmail.get("important", []):
+            lines.append(f"  - from {m['from']}: {m['subject']}")
+        lines.append("Judge which, if any, genuinely look like they need a reply; "
+                     "ignore receipts, notifications and automated mail. If none need action, say so briefly.")
+        facts.append("\n".join(lines))
+    else:
+        facts.append("EMAIL: Gmail unavailable.")
+    facts.append(f"AGENDA: {cal_txt}")
+    if isinstance(portfolio, dict) and portfolio.get("ok"):
+        best = portfolio.get("best"); worst = portfolio.get("worst")
+        line = f"PORTFOLIO: total value ${portfolio['total_value']}, {portfolio['total_gain_pct']:+.1f}% today."
+        if best: line += f" Best {best['ticker']} {best['gain_pct']:+.1f}%."
+        if worst: line += f" Worst {worst['ticker']} {worst['gain_pct']:+.1f}%."
+        facts.append(line)
+    else:
+        facts.append("PORTFOLIO: unavailable.")
+    if isinstance(senti, dict) and senti.get("ok"):
+        facts.append(f"CRYPTO MOOD: {senti['mood']} (score {senti['score']:+.2f} "
+                     f"across {senti['articles']} crypto news articles).")
+    else:
+        facts.append("CRYPTO MOOD: unavailable.")
+
+    _names = {"fr": ("French", "monsieur"), "tr": ("Turkish", "efendim")}
+    name, honorific = _names.get(lang, ("English", "sir"))
+
+    # Time-aware greeting — described SEMANTICALLY with no literal English words,
+    # otherwise the model copies them and writes the whole briefing in English.
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        greet_rule = "It is the morning: greet him for the morning and say you hope he slept well."
+    elif 12 <= hour < 18:
+        greet_rule = "It is the middle of the day, NOT morning: greet him simply — a hello and welcome back."
+    else:
+        greet_rule = "It is the evening, NOT morning: greet him for the evening and say you hope he had a great day."
+
+    only = "" if lang not in _names else f" Use absolutely no English — every word must be in {name}."
+    system = (
+        f"You are JARVIS delivering {USER_NAME}'s briefing as a refined British butler. "
+        f"IMPORTANT: write the ENTIRE briefing — every word, including the greeting — in {name}, "
+        f"addressing the user as '{honorific}'.{only} "
+        f"{greet_rule} Compose ONE flowing, spoken briefing covering, in order: the time-appropriate "
+        "greeting, the commute (traffic and ETA to the office), the weather with a short clothing "
+        "suggestion, any important emails, today's agenda, the portfolio with the key numbers, and the "
+        "crypto market mood. Natural and warm, no markdown, no lists, dry wit welcome but concise "
+        "— aim for 7 to 10 sentences. Do not invent facts; if something says unavailable, mention it briefly or skip."
+    )
+
+    response_text = None
+    if anthropic_client:
+        try:
+            resp = await anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                system=system,
+                messages=[{"role": "user", "content": "FACTS:\n" + "\n".join(facts)}],
+            )
+            response_text = resp.content[0].text.strip()
+        except Exception as e:
+            log.warning(f"briefing compose failed: {e}")
+    if not response_text:
+        response_text = "Good morning, sir. I'm afraid I couldn't assemble the full briefing just now."
+
+    # A long briefing is ~24s of TTS in one call. Split into chunks and
+    # synthesize them CONCURRENTLY (~8s), returned as ordered audio segments the
+    # player queues — fits inside the boot prefetch window so it plays instantly.
+    sentences = _action_re.split(r"(?<=[.!?])\s+", response_text.strip())
+    n = 3
+    size = max(1, -(-len(sentences) // n))
+    chunks = [" ".join(sentences[i:i + size]) for i in range(0, len(sentences), size)] or [response_text]
+    audios = await asyncio.gather(*[
+        synthesize_speech(strip_markdown_for_tts(c), lang=lang) for c in chunks
+    ])
+    audios = [a for a in audios if a]
+    return response_text, audios
+
+
+async def morning_briefing(ws, history: list[dict] = None, voice_state: dict = None):
+    """Deliver the briefing — using the result prefetched during the boot screen
+    if available, otherwise preparing it now — then open the dashboard window."""
+    lang = "en"
+    task = None
+    if voice_state:
+        lang = voice_state.get("forced_lang") or voice_state.get("lang") or "en"
+        task = voice_state.pop("briefing_task", None)
+    log.info(f"morning_briefing ({lang}); prefetched={task is not None}")
+    await ws.send_json({"type": "status", "state": "thinking"})
+    try:
+        if task is not None:
+            response_text, audios = await task   # prepared during the boot screen
+        else:
+            response_text, audios = await _prepare_briefing(lang)
+    except Exception as e:
+        log.warning(f"briefing failed: {e}")
+        response_text, audios = ("Good morning, sir. I couldn't assemble the briefing just now.", [])
+
+    # Open the portfolio dashboard window alongside the spoken briefing.
+    asyncio.create_task(briefing.open_dashboard_window())
+
+    try:
+        await ws.send_json({"type": "status", "state": "speaking"})
+        if audios:
+            # Concatenate the parallel-synthesized mp3 chunks into ONE blob — a
+            # single audio buffer avoids the multi-segment playback race that was
+            # cutting off the last (crypto) segment.
+            combined = b"".join(audios)
+            await ws.send_json({"type": "audio", "data": base64.b64encode(combined).decode(),
+                                "text": response_text})
+        else:
+            await ws.send_json({"type": "text", "text": response_text})
+        await ws.send_json({"type": "status", "state": "idle"})
+    except Exception:
+        pass
+    if history is not None:
+        history.append({"role": "assistant", "content": f"[morning briefing]: {response_text}"})
+    log.info(f"Briefing delivered ({lang}): {response_text[:80]}")
 
 
 def get_lookup_status() -> str:
@@ -1963,6 +2322,10 @@ async def voice_handler(ws: WebSocket):
     # Audio collision prevention — track when user last spoke
     voice_state = {"last_user_time": 0.0}
 
+    # Pending webcam frame requests — request_id -> Future resolved by the
+    # browser's "camera_frame" reply (see request_camera_frame).
+    pending_frames: dict[str, asyncio.Future] = {}
+
     # Self-awareness — track last spoken response to avoid repetition
     last_jarvis_response = ""
 
@@ -2012,32 +2375,84 @@ async def voice_handler(ws: WebSocket):
             return  # WebSocket already gone
 
         while True:
-            raw = await ws.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+            message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
 
-            # ── Fix-self: activate work mode in JARVIS repo ──
-            if msg.get("type") == "fix_self":
-                jarvis_dir = str(Path(__file__).parent)
-                await work_session.start(jarvis_dir)
-                response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
-                continue
+            # ── Audio utterance (binary) → Whisper (forced lang if set) ──
+            if message.get("bytes") is not None:
+                forced = voice_state.get("forced_lang")
+                text, utter_lang = await transcribe_audio(message["bytes"], lang=forced)
+                user_text = apply_speech_corrections(text.strip())
+                if not user_text:
+                    # Nothing intelligible — return the UI to idle so the mic
+                    # keeps listening instead of being stuck on "thinking".
+                    try:
+                        await ws.send_json({"type": "status", "state": "idle"})
+                    except Exception:
+                        pass
+                    continue
+            else:
+                raw = message.get("text")
+                if raw is None:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
 
-            if msg.get("type") != "transcript" or not msg.get("isFinal"):
-                continue
+                # ── Webcam frame reply: resolve the waiting request_camera_frame ──
+                if msg.get("type") == "camera_frame":
+                    rid = msg.get("request_id")
+                    fut = pending_frames.get(rid)
+                    if fut and not fut.done():
+                        fut.set_result(msg.get("data") or None)
+                    continue
 
-            user_text = apply_speech_corrections(msg.get("text", "").strip())
-            if not user_text:
-                continue
+                # ── Language toggle: force Whisper + replies to a language ──
+                if msg.get("type") == "set_lang":
+                    lg = msg.get("lang")
+                    voice_state["forced_lang"] = lg if lg in ("en", "fr", "tr") else None
+                    log.info(f"Forced language set to: {voice_state.get('forced_lang')}")
+                    continue
+
+                # ── Briefing prefetch: start gathering DURING the boot screen so
+                #    the briefing is ready the instant the boot finishes. ──
+                if msg.get("type") == "briefing_prefetch":
+                    pf_lang = voice_state.get("forced_lang") or voice_state.get("lang") or "en"
+                    voice_state["briefing_task"] = asyncio.create_task(_prepare_briefing(pf_lang))
+                    log.info(f"Briefing prefetch started ({pf_lang})")
+                    continue
+
+                # ── Morning briefing: triggered by the frontend after startup ──
+                if msg.get("type") == "briefing":
+                    asyncio.create_task(morning_briefing(ws, history=history, voice_state=voice_state))
+                    continue
+
+                # ── Fix-self: activate work mode in JARVIS repo ──
+                if msg.get("type") == "fix_self":
+                    jarvis_dir = str(Path(__file__).parent)
+                    await work_session.start(jarvis_dir)
+                    response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
+                    tts = strip_markdown_for_tts(response_text)
+                    await ws.send_json({"type": "status", "state": "speaking"})
+                    audio = await synthesize_speech(tts)
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+                    else:
+                        await ws.send_json({"type": "text", "text": response_text})
+                    continue
+
+                # ── Legacy/browser STT transcript (English fallback path) ──
+                if msg.get("type") != "transcript" or not msg.get("isFinal"):
+                    continue
+                user_text = apply_speech_corrections(msg.get("text", "").strip())
+                utter_lang = "en"
+                if not user_text:
+                    continue
+
+            # Track this utterance's language — drives reply language + TTS voice.
+            voice_state["lang"] = utter_lang
 
             # Cancel any in-flight response
             _current_response_id += 1
@@ -2128,6 +2543,7 @@ async def voice_handler(ws: WebSocket):
                             cached_projects, history,
                             last_response=last_jarvis_response,
                             session_summary=session_summary,
+                            lang=voice_state.get("lang", "en"),
                         )
                     else:
                         # Send to claude -p (full power)
@@ -2184,7 +2600,9 @@ async def voice_handler(ws: WebSocket):
 
                 # ── CHAT MODE: fast keyword detection + Haiku ──
                 else:
-                    action = detect_action_fast(user_text)
+                    # Fast keyword actions are English-only; for French/Turkish go
+                    # straight to the LLM so the reply comes back in-language.
+                    action = detect_action_fast(user_text) if voice_state.get("lang", "en") == "en" else None
 
                     if action:
                         if action["action"] == "open_terminal":
@@ -2193,7 +2611,16 @@ async def voice_handler(ws: WebSocket):
                             response_text = await handle_show_recent()
                         elif action["action"] == "describe_screen":
                             response_text = "Taking a look now, sir."
-                            asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                            asyncio.create_task(_lookup_and_report("screen", lambda: _do_screen_lookup(voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "describe_camera":
+                            response_text = "Let me have a look, sir."
+                            asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames, voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "market_sentiment":
+                            response_text = "Checking the crypto mood now, sir."
+                            asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
+                        elif action["action"] == "briefing":
+                            response_text = "Preparing your morning briefing, sir."
+                            asyncio.create_task(morning_briefing(ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_calendar":
                             response_text = "Checking your calendar now, sir."
                             asyncio.create_task(_lookup_and_report("calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state))
@@ -2232,6 +2659,7 @@ async def voice_handler(ws: WebSocket):
                                 cached_projects, history,
                                 last_response=last_jarvis_response,
                                 session_summary=session_summary,
+                                lang=voice_state.get("lang", "en"),
                             )
 
                             # Check for action tags embedded in LLM response
@@ -2242,15 +2670,21 @@ async def voice_handler(ws: WebSocket):
                                 # Ensure there's always something to speak
                                 if not response_text.strip():
                                     action_type = embedded_action["action"]
+                                    _lg = voice_state.get("lang", "en")
                                     if action_type == "prompt_project":
                                         proj = embedded_action["target"].split("|||")[0].strip()
-                                        response_text = f"Connecting to {proj} now, sir."
+                                        response_text = ({"fr": f"Connexion à {proj}, monsieur.",
+                                                          "tr": f"{proj} bağlanıyorum, efendim."}
+                                                         .get(_lg, f"Connecting to {proj} now, sir."))
                                     elif action_type == "build":
-                                        response_text = "On it, sir."
+                                        response_text = {"fr": "Je m'en occupe, monsieur.",
+                                                         "tr": "Hallediyorum, efendim."}.get(_lg, "On it, sir.")
                                     elif action_type == "research":
-                                        response_text = "Looking into that now, sir."
+                                        response_text = {"fr": "Je me renseigne, monsieur.",
+                                                         "tr": "Araştırıyorum, efendim."}.get(_lg, "Looking into that now, sir.")
                                     else:
-                                        response_text = "Right away, sir."
+                                        response_text = {"fr": "Tout de suite, monsieur.",
+                                                         "tr": "Hemen, efendim."}.get(_lg, "Right away, sir.")
 
                                 if embedded_action["action"] == "build":
                                     # Build in background — JARVIS stays conversational
@@ -2348,7 +2782,11 @@ async def voice_handler(ws: WebSocket):
                                     else:
                                         asyncio.create_task(create_apple_note("JARVIS Note", target))
                                 elif embedded_action["action"] == "screen":
-                                    asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                                    asyncio.create_task(_lookup_and_report("screen", lambda: _do_screen_lookup(voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "camera":
+                                    asyncio.create_task(_lookup_and_report("camera", lambda: _do_camera_lookup(ws, pending_frames, voice_state.get("lang", "en")), ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "sentiment":
+                                    asyncio.create_task(_lookup_and_report("sentiment", _do_sentiment_lookup, ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "read_note":
                                     # Read note in background and report back
                                     async def _read_and_report(search_term, _ws):
@@ -2396,10 +2834,10 @@ async def voice_handler(ws: WebSocket):
                 if anthropic_client and len(user_text) > 15:
                     asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
 
-                # TTS
+                # TTS — voice follows the utterance's language (French → cloned voice)
                 tts = strip_markdown_for_tts(response_text)
                 await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
+                audio = await synthesize_speech(tts, lang=voice_state.get("lang", "en"))
                 if audio:
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
@@ -2491,20 +2929,24 @@ class PreferencesUpdate(BaseModel):
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "GOOGLE_MAPS_API_KEY"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
     return {"success": True}
 
-@app.post("/api/settings/test-anthropic")
-async def api_test_anthropic(body: KeyTest):
-    key = body.key_value or os.getenv("ANTHROPIC_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
+@app.post("/api/settings/test-ollama")
+async def api_test_ollama(body: KeyTest):
     try:
-        client = anthropic.AsyncAnthropic(api_key=key)
-        await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "Hi"}])
+        client = AsyncOpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+        )
+        await client.chat.completions.create(
+            model="gemma3:27b",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "Hi"}],
+        )
         return {"valid": True}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
@@ -2679,3 +3121,4 @@ if __name__ == "__main__":
         log_level="info",
         **ssl_kwargs,
     )
+   

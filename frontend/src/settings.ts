@@ -108,6 +108,13 @@ function buildPanelHTML(): string {
             </div>
           </div>
 
+          <div class="settings-field">
+            <label>Google Maps API Key <span style="opacity:.6;font-weight:400">(traffic in the morning briefing)</span></label>
+            <div class="settings-input-row">
+              <input type="password" id="input-gmaps-key" placeholder="AIza..." />
+            </div>
+          </div>
+
           <div class="settings-actions">
             <button class="settings-btn primary" id="btn-save-keys">Save Keys</button>
           </div>
@@ -260,11 +267,16 @@ function wireEvents() {
     const anthropicKey = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
     const fishKey = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
 
+    const gmapsKey = (document.getElementById("input-gmaps-key") as HTMLInputElement).value.trim();
+
     if (anthropicKey) {
       await apiPost("/api/settings/keys", { key_name: "ANTHROPIC_API_KEY", key_value: anthropicKey });
     }
     if (fishKey) {
       await apiPost("/api/settings/keys", { key_name: "FISH_API_KEY", key_value: fishKey });
+    }
+    if (gmapsKey) {
+      await apiPost("/api/settings/keys", { key_name: "GOOGLE_MAPS_API_KEY", key_value: gmapsKey });
     }
     await loadStatus();
   });
@@ -277,12 +289,12 @@ function wireEvents() {
     }
   });
 
-  // Test Anthropic
+  // Test Ollama (local LLM)
   document.getElementById("btn-test-anthropic")?.addEventListener("click", async () => {
     setDotStatus("status-anthropic", "yellow");
     const key = (document.getElementById("input-anthropic-key") as HTMLInputElement).value.trim();
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-anthropic", { key_value: key || undefined });
+      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-ollama", { key_value: key || undefined });
       setDotStatus("status-anthropic", result.valid ? "green" : "red");
     } catch {
       setDotStatus("status-anthropic", "red");
