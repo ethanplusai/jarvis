@@ -1796,7 +1796,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             # Result is still stored in history below
         else:
             tts = strip_markdown_for_tts(result_text)
-            audio = await synthesize_speech(tts)
+            audio = await synthesize_speech(tts, lang=voice_state.get("lang", "en") if voice_state else "en")
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
@@ -1818,7 +1818,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
         _active_lookups[lookup_id]["status"] = "timeout"
         try:
             fallback = f"That {lookup_type} check is taking too long, sir. The data may still be syncing."
-            audio = await synthesize_speech(fallback)
+            audio = await synthesize_speech(fallback, lang=voice_state.get("lang", "en") if voice_state else "en")
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
                 await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
@@ -2670,15 +2670,21 @@ async def voice_handler(ws: WebSocket):
                                 # Ensure there's always something to speak
                                 if not response_text.strip():
                                     action_type = embedded_action["action"]
+                                    _lg = voice_state.get("lang", "en")
                                     if action_type == "prompt_project":
                                         proj = embedded_action["target"].split("|||")[0].strip()
-                                        response_text = f"Connecting to {proj} now, sir."
+                                        response_text = ({"fr": f"Connexion à {proj}, monsieur.",
+                                                          "tr": f"{proj} bağlanıyorum, efendim."}
+                                                         .get(_lg, f"Connecting to {proj} now, sir."))
                                     elif action_type == "build":
-                                        response_text = "On it, sir."
+                                        response_text = {"fr": "Je m'en occupe, monsieur.",
+                                                         "tr": "Hallediyorum, efendim."}.get(_lg, "On it, sir.")
                                     elif action_type == "research":
-                                        response_text = "Looking into that now, sir."
+                                        response_text = {"fr": "Je me renseigne, monsieur.",
+                                                         "tr": "Araştırıyorum, efendim."}.get(_lg, "Looking into that now, sir.")
                                     else:
-                                        response_text = "Right away, sir."
+                                        response_text = {"fr": "Tout de suite, monsieur.",
+                                                         "tr": "Hemen, efendim."}.get(_lg, "Right away, sir.")
 
                                 if embedded_action["action"] == "build":
                                     # Build in background — JARVIS stays conversational
