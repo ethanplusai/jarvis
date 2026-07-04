@@ -1601,6 +1601,95 @@ async def tts_test():
 
 
 
+
+def _safe_count(label: str, getter, default):
+    try:
+        return getter()
+    except Exception as exc:
+        log.debug("briefing %s unavailable: %s", label, exc)
+        return default
+
+
+def _compact_task(task: dict) -> dict:
+    return {
+        "id": task.get("id"),
+        "title": task.get("title", ""),
+        "priority": task.get("priority", "medium"),
+        "due_date": task.get("due_date") or "",
+        "project": task.get("project") or "",
+    }
+
+
+def _compact_memory(memory: dict) -> dict:
+    return {
+        "id": memory.get("id"),
+        "type": memory.get("type", "fact"),
+        "content": memory.get("content", ""),
+        "importance": memory.get("importance", 5),
+    }
+
+
+@app.get("/api/briefing")
+async def api_briefing():
+    """Personal assistant briefing assembled from local context and connectors.
+
+    This endpoint is intentionally deterministic and cheap: it avoids LLM calls
+    so the UI can refresh the user's operational picture frequently.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    open_task_items = _safe_count("tasks", lambda: get_open_tasks(), [])
+    high_priority = [t for t in open_task_items if str(t.get("priority", "")).lower() == "high"]
+    due_today = [t for t in open_task_items if (t.get("due_date") or "") == today]
+    overdue = [t for t in open_task_items if (t.get("due_date") or "") and (t.get("due_date") or "") < today]
+
+    try:
+        calendar_events = await get_todays_events()
+    except Exception as exc:
+        log.debug("briefing calendar unavailable: %s", exc)
+        calendar_events = []
+    try:
+        unread = await get_unread_count()
+    except Exception as exc:
+        log.debug("briefing mail unavailable: %s", exc)
+        unread = {"count": 0, "available": False}
+    memories = _safe_count("memories", lambda: get_important_memories(5), [])
+    stats = _safe_count("memory stats", memory_stats, {})
+    mcp_servers = _safe_count("mcp", mcp_registry.connected_servers, [])
+
+    recommendations = []
+    if overdue:
+        recommendations.append(f"Clear {len(overdue)} overdue task{'s' if len(overdue) != 1 else ''} first.")
+    if high_priority:
+        recommendations.append(f"Protect focus time for {len(high_priority)} high-priority task{'s' if len(high_priority) != 1 else ''}.")
+    if calendar_events:
+        recommendations.append(f"Calendar has {len(calendar_events)} event{'s' if len(calendar_events) != 1 else ''} today; leave buffer around meetings.")
+    if int(unread.get("count") or 0) > 0:
+        recommendations.append(f"Triage {int(unread.get('count') or 0)} unread email{'s' if int(unread.get('count') or 0) != 1 else ''} after the first focus block.")
+    if not mcp_servers:
+        recommendations.append("Connect one MCP tool to unlock richer external actions.")
+    if not recommendations:
+        recommendations.append("No obvious fires, sir — an unusually civilised state of affairs.")
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "tasks": {
+            "open": len(open_task_items),
+            "high_priority": len(high_priority),
+            "due_today": [_compact_task(t) for t in due_today[:5]],
+            "overdue": [_compact_task(t) for t in overdue[:5]],
+            "focus": [_compact_task(t) for t in (overdue + high_priority + open_task_items)[:5]],
+        },
+        "calendar": {"today_count": len(calendar_events), "events": calendar_events[:5]},
+        "email": unread,
+        "memory": {"stats": stats, "important": [_compact_memory(m) for m in memories]},
+        "connectivity": {
+            "mcp_connected": len(mcp_servers),
+            "mcp_servers": [{"id": s.get("id"), "name": s.get("name"), "category": s.get("category")} for s in mcp_servers[:6]],
+            "providers_configured": [p["id"] for p in providers_for_status() if p.get("configured")],
+        },
+        "recommendations": recommendations[:4],
+    }
+
 @app.get("/api/system")
 async def api_system():
     """Lightweight HUD telemetry for the browser mission-control panel."""
