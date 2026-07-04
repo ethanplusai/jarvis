@@ -2472,3 +2472,44 @@ body {
 .voice-samples .mini-actions a:hover {
   background: rgba(103, 232, 249, 0.1);
 }
+
+/* Personal briefing cockpit widget */
+.briefing-body {
+  display: grid;
+  gap: 9px;
+}
+
+.briefing-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.briefing-stats div {
+  border: 1px solid rgba(45, 212, 191, 0.13);
+  border-radius: 12px;
+  background: rgba(15, 118, 110, 0.1);
+  padding: 8px 6px;
+}
+
+.briefing-stats span {
+  display: block;
+  color: rgba(153, 246, 228, 0.55);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.briefing-stats strong {
+  display: block;
+  margin-top: 3px;
+  color: rgba(240, 253, 250, 0.92);
+  font-size: 18px;
+}
+
+.briefing-body ul {
+  margin: 2px 0 0 16px;
+  color: rgba(204, 251, 241, 0.76);
+  font-size: 11px;
+  line-height: 1.45;
+}

@@ -35,12 +35,14 @@ const artifactList = document.getElementById("artifact-list")!;
 const pendingActions = document.getElementById("pending-actions")!;
 const widgetGrid = document.getElementById("widget-grid")!;
 const jarvisBriefs = document.getElementById("jarvis-briefs")!;
+const personalBriefing = document.getElementById("personal-briefing")!;
 const btnCustomizeWidgets = document.getElementById("btn-customize-widgets")!;
 
-type WidgetId = "jarvis" | "news" | "weather" | "markets" | "activity" | "guard";
-const DEFAULT_WIDGETS: WidgetId[] = ["jarvis", "news", "weather", "markets", "activity", "guard"];
+type WidgetId = "jarvis" | "briefing" | "news" | "weather" | "markets" | "activity" | "guard";
+const DEFAULT_WIDGETS: WidgetId[] = ["jarvis", "briefing", "news", "weather", "markets", "activity", "guard"];
 const WIDGET_LABELS: Record<WidgetId, string> = {
   jarvis: "JARVIS text summaries",
+  briefing: "Personal briefing",
   news: "News radar",
   weather: "Weather",
   markets: "Markets / stock exchange",
@@ -557,15 +559,53 @@ refreshSystemMetrics();
 refreshUsage();
 refreshArtifacts();
 refreshPendingActions();
+refreshPersonalBriefing();
 setInterval(refreshSystemMetrics, 5000);
 setInterval(refreshUsage, 8000);
 setInterval(refreshArtifacts, 15000);
 setInterval(refreshPendingActions, 10000);
+setInterval(refreshPersonalBriefing, 60000);
 
 
 // ---------------------------------------------------------------------------
-// Artifacts + guardrail action queue
+// Personal briefing, artifacts + guardrail action queue
 // ---------------------------------------------------------------------------
+
+
+type Briefing = {
+  tasks?: { open?: number; high_priority?: number; due_today?: Array<{ title?: string }>; overdue?: Array<{ title?: string }>; focus?: Array<{ title?: string; priority?: string; due_date?: string }> };
+  calendar?: { today_count?: number };
+  email?: { count?: number; available?: boolean };
+  memory?: { stats?: { total_memories?: number; open_tasks?: number }; important?: Array<{ content?: string; type?: string }> };
+  connectivity?: { mcp_connected?: number; mcp_servers?: Array<{ name?: string }> ; providers_configured?: string[] };
+  recommendations?: string[];
+};
+
+async function refreshPersonalBriefing() {
+  try {
+    const res = await fetch("/api/briefing");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as Briefing;
+    const focus = data.tasks?.focus?.[0];
+    const connectors = data.connectivity?.mcp_servers?.map((s) => s.name).filter(Boolean).join(", ") || "No MCP tools connected";
+    const recommendations = (data.recommendations || []).slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    personalBriefing.innerHTML = `
+      <div class="briefing-stats">
+        <div><span>Tasks</span><strong>${Number(data.tasks?.open || 0)}</strong></div>
+        <div><span>Today</span><strong>${Number(data.calendar?.today_count || 0)}</strong></div>
+        <div><span>Unread</span><strong>${Number(data.email?.count || 0)}</strong></div>
+        <div><span>MCP</span><strong>${Number(data.connectivity?.mcp_connected || 0)}</strong></div>
+      </div>
+      <strong>${focus ? escapeHtml(focus.title || "Focus selected") : "No urgent focus selected"}</strong>
+      <small>${focus ? `Priority: ${escapeHtml(focus.priority || "medium")}${focus.due_date ? ` · due ${escapeHtml(focus.due_date)}` : ""}` : "Ask JARVIS for a task focus plan when you're ready."}</small>
+      <ul>${recommendations}</ul>
+      <small>Connectors: ${escapeHtml(connectors)}</small>`;
+  } catch {
+    personalBriefing.innerHTML = `<strong>Briefing unavailable</strong><small>The local context endpoint did not respond.</small>`;
+  }
+}
+
+document.getElementById("btn-briefing-refresh")?.addEventListener("click", refreshPersonalBriefing);
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "\'": "&#039;" }[ch] || ch));
