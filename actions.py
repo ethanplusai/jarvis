@@ -1,5 +1,9 @@
 """
-JARVIS Action Executor — AppleScript-based system actions.
+JARVIS Action Executor — desktop actions.
+
+macOS gets the rich AppleScript integrations; Windows and Linux route through
+the cross-platform layer in system_control.py and degrade gracefully where a
+capability is mac-only.
 
 Execute actions IMMEDIATELY, before generating any LLM response.
 Each function returns {"success": bool, "confirmation": str}.
@@ -9,11 +13,16 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from urllib.parse import quote
 
+import system_control
+
 log = logging.getLogger("jarvis.actions")
+
+IS_MAC = sys.platform == "darwin"
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -25,6 +34,8 @@ async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
 
     Shows the user JARVIS is active in that terminal. Reverts after revert_after seconds.
     """
+    if not IS_MAC:
+        return
     # Save the current profile, switch to Ocean, then revert
     script_save = (
         'tell application "Terminal"\n'
@@ -89,6 +100,8 @@ def applescript_escape(s: str) -> str:
 
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
+    if not IS_MAC:
+        return await system_control.open_terminal(command)
     if command:
         escaped = applescript_escape(command)
         script = (
@@ -122,6 +135,8 @@ async def open_terminal(command: str = "") -> dict:
 
 async def open_browser(url: str, browser: str = "chrome") -> dict:
     """Open URL in user's browser (Chrome or Firefox)."""
+    if not IS_MAC:
+        return await system_control.open_url(url)
     escaped_url = url.replace('"', '\\"')
 
     if browser.lower() == "firefox":
@@ -172,6 +187,9 @@ async def open_claude_in_project(project_dir: str, prompt: str) -> dict:
     claude_md.write_text(f"# Task\n\n{prompt}\n\nBuild this completely. If web app, make index.html work standalone.\n")
 
     skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    if not IS_MAC:
+        # `;` works in both bash and Windows PowerShell (5.1 lacks `&&`).
+        return await system_control.open_terminal(f"cd {project_dir!r} ; claude{skip_flag}")
     escaped_dir = applescript_escape(project_dir)
     script = (
         'tell application "Terminal"\n'
@@ -204,6 +222,11 @@ async def prompt_existing_terminal(project_name: str, prompt: str) -> dict:
     Uses System Events keystroke to type into an active Claude Code session
     rather than `do script` which would open a new shell.
     """
+    if not IS_MAC:
+        return {
+            "success": False,
+            "confirmation": "Typing into existing terminals is only available on macOS for now, sir.",
+        }
     escaped_name = applescript_escape(project_name)
     escaped_prompt = applescript_escape(prompt)
 
@@ -283,7 +306,9 @@ return "OK"
 
 
 async def get_chrome_tab_info() -> dict:
-    """Read the current Chrome tab's title and URL via AppleScript."""
+    """Read the current Chrome tab's title and URL via AppleScript (macOS only)."""
+    if not IS_MAC:
+        return {}
     script = (
         'tell application "Google Chrome"\n'
         "    set tabTitle to title of active tab of front window\n"

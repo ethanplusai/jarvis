@@ -11,57 +11,91 @@ export interface VoiceInput {
   stop(): void;
   pause(): void;
   resume(): void;
+  setLanguage(lang: string): void;
+  getLanguage(): string;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const webkitSpeechRecognition: any;
 
+const DEFAULT_SPEECH_LANGUAGE = "en-US";
+const DUPLICATE_WINDOW_MS = 1200;
+
 export function createVoiceInput(
   onTranscript: (text: string) => void,
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  initialLanguage = localStorage.getItem("jarvis.speechLanguage") || DEFAULT_SPEECH_LANGUAGE
 ): VoiceInput {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const SR = (window as any).SpeechRecognition || (typeof webkitSpeechRecognition !== "undefined" ? webkitSpeechRecognition : null);
   if (!SR) {
-    onError("Speech recognition not supported in this browser");
-    return { start() {}, stop() {}, pause() {}, resume() {} };
+    onError("Speech recognition not supported in this browser. Use Chrome/Chromium for live voice capture.");
+    return { start() {}, stop() {}, pause() {}, resume() {}, setLanguage() {}, getLanguage() { return initialLanguage; } };
   }
 
   const recognition = new SR();
   recognition.continuous = true;
   recognition.interimResults = true;
-  recognition.lang = "en-US";
+  recognition.lang = initialLanguage;
+  recognition.maxAlternatives = 1;
 
   let shouldListen = false;
   let paused = false;
+  let starting = false;
+  let lastFinalText = "";
+  let lastFinalAt = 0;
+
+  function safeStart() {
+    if (!shouldListen || paused || starting) return;
+    starting = true;
+    window.setTimeout(() => {
+      try {
+        recognition.start();
+      } catch {
+        // Already started by the browser runtime.
+      } finally {
+        starting = false;
+      }
+    }, 80);
+  }
+
+  recognition.onstart = () => {
+    starting = false;
+  };
 
   recognition.onresult = (event: any) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
       if (event.results[i].isFinal) {
-        const text = event.results[i][0].transcript.trim();
-        if (text) onTranscript(text);
+        const text = event.results[i][0].transcript.trim().replace(/\s+/g, " ");
+        const now = Date.now();
+        if (!text) continue;
+        if (text.toLowerCase() === lastFinalText.toLowerCase() && now - lastFinalAt < DUPLICATE_WINDOW_MS) {
+          continue;
+        }
+        lastFinalText = text;
+        lastFinalAt = now;
+        onTranscript(text);
       }
     }
   };
 
   recognition.onend = () => {
-    if (shouldListen && !paused) {
-      try {
-        recognition.start();
-      } catch {
-        // Already started
-      }
-    }
+    starting = false;
+    safeStart();
   };
 
   recognition.onerror = (event: any) => {
+    starting = false;
     if (event.error === "not-allowed") {
-      onError("Microphone access denied. Please allow microphone access.");
+      onError("Microphone access denied. Please allow microphone access and refresh JARVIS.");
       shouldListen = false;
-    } else if (event.error === "no-speech") {
-      // Normal, just restart
-    } else if (event.error === "aborted") {
-      // Expected during pause
+    } else if (event.error === "audio-capture") {
+      onError("No microphone detected. Check your input device, sir.");
+      shouldListen = false;
+    } else if (event.error === "network") {
+      onError("Speech recognition network error. Voice capture will retry shortly.");
+    } else if (event.error === "no-speech" || event.error === "aborted") {
+      // Expected during pauses and quiet rooms.
     } else {
       console.warn("[voice] recognition error:", event.error);
     }
@@ -71,30 +105,37 @@ export function createVoiceInput(
     start() {
       shouldListen = true;
       paused = false;
-      try {
-        recognition.start();
-      } catch {
-        // Already started
-      }
+      safeStart();
     },
     stop() {
       shouldListen = false;
       paused = false;
+      starting = false;
       recognition.stop();
     },
     pause() {
       paused = true;
+      starting = false;
       recognition.stop();
     },
     resume() {
       paused = false;
-      if (shouldListen) {
+      safeStart();
+    },
+    setLanguage(lang: string) {
+      const next = lang || DEFAULT_SPEECH_LANGUAGE;
+      localStorage.setItem("jarvis.speechLanguage", next);
+      recognition.lang = next;
+      if (shouldListen && !paused) {
         try {
-          recognition.start();
+          recognition.stop();
         } catch {
-          // Already started
+          safeStart();
         }
       }
+    },
+    getLanguage() {
+      return recognition.lang || DEFAULT_SPEECH_LANGUAGE;
     },
   };
 }
@@ -164,8 +205,9 @@ export function createAudioPlayer(): AudioPlayer {
         if (!isPlaying) playNext();
       } catch (err) {
         console.error("[audio] decode error:", err);
-        // Skip bad audio, continue
-        if (!isPlaying && queue.length > 0) playNext();
+        // Skip bad audio. Always advance — playNext() fires the finished callback
+        // when the queue is empty, so a failed last buffer can't wedge the orb.
+        if (!isPlaying) playNext();
       }
     },
 

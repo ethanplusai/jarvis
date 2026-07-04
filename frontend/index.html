@@ -3,34 +3,170 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>JARVIS</title>
+    <title>JARVIS — AI Evolution Labs</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#0a0e14" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <canvas id="orb-canvas"></canvas>
 
+    <a id="brand-link" href="https://aievolutionlabs.io/" target="_blank" rel="noreferrer">AI Evolution Labs</a>
+
+    <div id="hud-shell" aria-label="JARVIS mission control">
+      <section id="hud-left" class="hud-panel">
+        <div class="hud-kicker">MISSION CONTROL</div>
+        <div class="hud-title">Live Systems</div>
+        <div class="hud-metrics">
+          <div><span>LINK</span><strong id="metric-link">connecting</strong></div>
+          <div><span>UPTIME</span><strong id="metric-uptime">--</strong></div>
+          <div><span>LOAD</span><strong id="metric-load">--</strong></div>
+          <div><span>DISK</span><strong id="metric-disk">--</strong></div>
+          <div><span>SESSION COST</span><strong id="metric-cost">--</strong></div>
+          <div><span>TOKENS</span><strong id="metric-tokens">--</strong></div>
+        </div>
+        <div id="drop-zone">
+          <span>DROP FILES</span>
+          <small>Text, code, JSON, Markdown and CSV become instant context.</small>
+        </div>
+        <div class="mini-panel-header">
+          <span>ARTIFACTS</span>
+          <button id="btn-artifacts-refresh" title="Refresh artifacts">Refresh</button>
+        </div>
+        <div id="artifact-list" class="mini-list"></div>
+      </section>
+
+      <section id="hud-right" class="hud-panel control-center-panel">
+        <div class="control-center-head">
+          <div>
+            <div class="hud-kicker">CONTROL CENTER</div>
+            <div class="hud-title">Personal Intel</div>
+          </div>
+          <button id="btn-customize-widgets" class="hud-icon-btn" title="Customize widgets">Tune</button>
+        </div>
+        <p class="control-center-subtitle">Widgets you can reorder, hide, and feed with JARVIS summaries.</p>
+        <div id="widget-grid" class="widget-grid" aria-live="polite">
+          <article class="intel-widget accent-teal">
+            <div class="widget-head"><span>Rapid Actions</span></div>
+            <div id="quick-actions" class="quick-actions-compact">
+              <button data-command="Look at my screen and summarize what matters.">Scan Screen</button>
+              <button data-command="Summarize today's calendar and unread email priorities.">Daily Brief</button>
+              <button data-command="Show my open tasks and suggest what to do next.">Task Focus</button>
+              <button data-command="Research this market and prepare a sourced brief.">Research Brief</button>
+            </div>
+          </article>
+          <article class="intel-widget accent-cyan" data-widget="jarvis">
+            <div class="widget-head"><span>JARVIS Briefs</span><button data-pin-widget="jarvis">Pin</button></div>
+            <div id="jarvis-briefs" class="widget-body"></div>
+          </article>
+          <article class="intel-widget accent-teal" data-widget="briefing">
+            <div class="widget-head"><span>Personal Briefing</span><button id="btn-briefing-refresh" title="Refresh personal briefing">Refresh</button></div>
+            <div id="personal-briefing" class="widget-body briefing-body">
+              <strong>Loading local context</strong><small>Tasks, calendar, mail, memory, and connectors in one cockpit.</small>
+            </div>
+          </article>
+          <article class="intel-widget accent-violet" data-widget="news">
+            <div class="widget-head"><span>News Radar</span><button data-command="Create a concise news widget for my control center with 3 important headlines and why they matter.">Ask</button></div>
+            <div class="widget-body"><strong>Awaiting live brief</strong><small>Ask JARVIS to create or refresh a news widget for your market, city, or industry.</small></div>
+          </article>
+          <article class="intel-widget accent-amber" data-widget="weather">
+            <div class="widget-head"><span>Weather</span><button data-command="Check today's weather and send a short weather card to my control center.">Ask</button></div>
+            <div class="widget-body"><strong id="widget-weather-value">Set by JARVIS</strong><small>Use voice/text: “add weather for London to control center”.</small></div>
+          </article>
+          <article class="intel-widget accent-green" data-widget="markets">
+            <div class="widget-head"><span>Markets</span><button data-command="Create a market snapshot widget for my watchlist in the control center.">Ask</button></div>
+            <div class="widget-body"><strong>Watchlist ready</strong><small>Stocks, crypto, indexes, and business KPIs can be pushed here by JARVIS.</small></div>
+          </article>
+          <article class="intel-widget accent-blue" data-widget="activity">
+            <div class="widget-head"><span>Activity Log</span><div class="log-actions"><button id="btn-log-copy" title="Copy log to clipboard">Copy</button><button id="btn-log-clear" title="Clear log">Clear</button></div></div>
+            <div id="event-log" aria-live="polite"></div>
+          </article>
+          <article class="intel-widget accent-red" data-widget="guard">
+            <div class="widget-head"><span>Action Guard</span><button id="btn-action-refresh" title="Refresh pending actions">Refresh</button></div>
+            <div id="pending-actions" class="mini-list"></div>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <!-- State pill — shows current assistant state -->
+    <div id="state-pill" class="state-idle" role="status" aria-live="polite">
+      <span class="state-dot"></span>
+      <span id="state-pill-label">idle</span>
+    </div>
+
+    <!-- Text command bar — type to JARVIS -->
+    <form id="command-bar" autocomplete="off">
+      <input
+        id="command-input"
+        type="text"
+        placeholder="Type a command, or press / to focus…"
+        aria-label="Type a command to JARVIS"
+        maxlength="2000"
+      />
+      <button id="command-send" type="submit" title="Send (Enter)" aria-label="Send command">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </form>
+
+    <!-- Toast notifications -->
+    <div id="toast-stack" aria-live="polite"></div>
+
+    <!-- Keyboard shortcuts overlay -->
+    <div id="shortcuts-overlay" style="display:none">
+      <div class="shortcuts-card">
+        <h2>Keyboard Shortcuts</h2>
+        <ul>
+          <li><kbd>/</kbd><span>Focus command bar</span></li>
+          <li><kbd>M</kbd><span>Mute / unmute microphone</span></li>
+          <li><kbd>Esc</kbd><span>Stop speaking · close panels</span></li>
+          <li><kbd>L</kbd><span>Clear activity log</span></li>
+          <li><kbd>,</kbd><span>Open settings</span></li>
+          <li><kbd>?</kbd><span>Toggle this help</span></li>
+        </ul>
+        <small>Press <kbd>?</kbd> or <kbd>Esc</kbd> to close</small>
+      </div>
+    </div>
+
     <!-- Minimal controls — top right -->
     <div id="controls">
-      <button id="btn-mute" title="Mute/Unmute">
+      <button id="btn-mute" title="Mute/Unmute" aria-label="Mute or unmute microphone">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
           <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
           <line x1="12" y1="19" x2="12" y2="23"/>
         </svg>
       </button>
-      <button id="btn-menu" title="Menu">
+      <button id="btn-help" title="Keyboard shortcuts (?)" aria-label="Show keyboard shortcuts">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      </button>
+      <button id="btn-menu" title="Menu" aria-label="Open menu">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>
         </svg>
       </button>
     </div>
 
-    <!-- Dropdown menu -->
-    <div id="menu-dropdown" style="display:none">
-      <button id="btn-settings">Settings</button>
+    <!-- Right-side menu drawer -->
+    <aside id="menu-dropdown" class="side-menu" style="display:none" aria-label="JARVIS side menu">
+      <div class="side-menu-header">
+        <span>JARVIS Menu</span>
+        <button id="btn-menu-close" title="Close menu" aria-label="Close menu">&times;</button>
+      </div>
+      <button id="btn-settings">Settings · model & APIs</button>
+      <button id="btn-control-center" data-command="Summarize what matters right now and send it to my control center.">Send brief to Control Center</button>
       <button id="btn-restart">Restart Server</button>
       <button id="btn-fix-self">Fix Yourself</button>
-    </div>
+      <small>Slides from the right. Use Settings → Engine for model choice, and Settings → API Keys for required vs optional connectors.</small>
+    </aside>
 
     <div id="status-text"></div>
     <div id="jarvis-label">JARVIS</div>

@@ -1,0 +1,419 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Jarvis premium clear AI voice assistant hero</title>
+  <desc id="desc">A clean premium animated SVG for Jarvis AI Voice Assistant with a central glowing orb, separated agent status cards, and a compact voice visualizer.</desc>
+
+  <style>
+    :root {
+      --bg: #030812;
+      --panel: #081522;
+      --panel-2: #0d1d2d;
+      --line: #18344a;
+      --cyan: #38e8ff;
+      --cyan-soft: #9bf8ff;
+      --mint: #6dffbf;
+      --violet: #8d7cff;
+      --rose: #ff5fd2;
+      --amber: #ffd36b;
+      --text: #f1fbff;
+      --muted: #8fb0bf;
+    }
+
+    .grid {
+      animation: gridMove 26s linear infinite;
+    }
+
+    .orb {
+      animation: orbPulse 4s ease-in-out infinite;
+      transform-origin: 600px 228px;
+    }
+
+    .orb-core {
+      animation: corePulse 2.8s ease-in-out infinite;
+      transform-origin: 600px 228px;
+    }
+
+    .ring-one {
+      animation: rotate 18s linear infinite;
+      transform-origin: 600px 228px;
+    }
+
+    .ring-two {
+      animation: rotateReverse 28s linear infinite;
+      transform-origin: 600px 228px;
+    }
+
+    .small-dot {
+      animation: dotPulse 2.5s ease-in-out infinite;
+    }
+
+    .small-dot:nth-child(2n) {
+      animation-delay: -0.7s;
+    }
+
+    .small-dot:nth-child(3n) {
+      animation-delay: -1.2s;
+    }
+
+    .status-card {
+      animation: cardFloat 7s ease-in-out infinite;
+    }
+
+    .status-card.right {
+      animation-delay: -2.4s;
+    }
+
+    .mini-card {
+      animation: miniFloat 8s ease-in-out infinite;
+    }
+
+    .mini-card:nth-of-type(2) {
+      animation-delay: -1.6s;
+    }
+
+    .mini-card:nth-of-type(3) {
+      animation-delay: -3.1s;
+    }
+
+    .meter-fill {
+      transform-origin: left center;
+      animation: meter 2.6s ease-in-out infinite;
+    }
+
+    .meter-fill.delay {
+      animation-delay: -1.1s;
+    }
+
+    .voice-bar {
+      transform-origin: center bottom;
+      animation: voiceBar 1.15s ease-in-out infinite;
+    }
+
+    .voice-bar:nth-child(2) { animation-delay: -0.88s; }
+    .voice-bar:nth-child(3) { animation-delay: -0.24s; }
+    .voice-bar:nth-child(4) { animation-delay: -0.68s; }
+    .voice-bar:nth-child(5) { animation-delay: -0.12s; }
+    .voice-bar:nth-child(6) { animation-delay: -0.94s; }
+    .voice-bar:nth-child(7) { animation-delay: -0.42s; }
+    .voice-bar:nth-child(8) { animation-delay: -1.08s; }
+    .voice-bar:nth-child(9) { animation-delay: -0.31s; }
+    .voice-bar:nth-child(10) { animation-delay: -0.74s; }
+    .voice-bar:nth-child(11) { animation-delay: -0.18s; }
+    .voice-bar:nth-child(12) { animation-delay: -0.58s; }
+
+    .scan {
+      animation: scanLine 3s ease-in-out infinite;
+    }
+
+    .connector {
+      stroke-dasharray: 7 14;
+      animation: connectorFlow 3s linear infinite;
+    }
+
+    .logo-glow {
+      animation: logoGlow 3.6s ease-in-out infinite;
+    }
+
+    .signal {
+      animation: signalPulse 1.9s ease-in-out infinite;
+      transform-origin: center;
+    }
+
+    .signal:nth-child(2) {
+      animation-delay: -0.6s;
+    }
+
+    .signal:nth-child(3) {
+      animation-delay: -1.2s;
+    }
+
+    @keyframes gridMove {
+      from { transform: translate3d(0, 0, 0); }
+      to { transform: translate3d(-48px, 48px, 0); }
+    }
+
+    @keyframes orbPulse {
+      0%, 100% { transform: scale(0.99); opacity: 0.96; }
+      50% { transform: scale(1.02); opacity: 1; }
+    }
+
+    @keyframes corePulse {
+      0%, 100% { transform: scale(0.9); opacity: 0.7; }
+      50% { transform: scale(1.12); opacity: 1; }
+    }
+
+    @keyframes rotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes rotateReverse {
+      from { transform: rotate(360deg); }
+      to { transform: rotate(0deg); }
+    }
+
+    @keyframes dotPulse {
+      0%, 100% { opacity: 0.35; transform: scale(0.85); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    @keyframes cardFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+
+    @keyframes miniFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+
+    @keyframes meter {
+      0%, 100% { transform: scaleX(0.68); opacity: 0.7; }
+      50% { transform: scaleX(1); opacity: 1; }
+    }
+
+    @keyframes voiceBar {
+      0%, 100% { transform: scaleY(0.28); opacity: 0.45; }
+      38% { transform: scaleY(1); opacity: 1; }
+      68% { transform: scaleY(0.55); opacity: 0.72; }
+    }
+
+    @keyframes scanLine {
+      0%, 100% { transform: translateY(-22px); opacity: 0; }
+      18%, 82% { opacity: 1; }
+      50% { transform: translateY(58px); }
+    }
+
+    @keyframes connectorFlow {
+      from { stroke-dashoffset: 0; }
+      to { stroke-dashoffset: -42; }
+    }
+
+    @keyframes logoGlow {
+      0%, 100% { opacity: 0.82; }
+      50% { opacity: 1; }
+    }
+
+    @keyframes signalPulse {
+      0%, 100% { opacity: 0.25; transform: scale(0.82); }
+      50% { opacity: 1; transform: scale(1.12); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .grid,
+      .orb,
+      .orb-core,
+      .ring-one,
+      .ring-two,
+      .small-dot,
+      .status-card,
+      .mini-card,
+      .meter-fill,
+      .voice-bar,
+      .scan,
+      .connector,
+      .logo-glow,
+      .signal {
+        animation: none;
+      }
+    }
+  </style>
+
+  <defs>
+    <radialGradient id="bgGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(600 235) rotate(90) scale(420 680)">
+      <stop stop-color="#0d3750"/>
+      <stop offset="0.48" stop-color="#06111f"/>
+      <stop offset="1" stop-color="#02050c"/>
+    </radialGradient>
+
+    <radialGradient id="orbPaint" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(568 186) rotate(55) scale(150)">
+      <stop stop-color="#ffffff"/>
+      <stop offset="0.16" stop-color="#b7fbff"/>
+      <stop offset="0.42" stop-color="#38e8ff"/>
+      <stop offset="0.74" stop-color="#166d9d"/>
+      <stop offset="1" stop-color="#06101c"/>
+    </radialGradient>
+
+    <radialGradient id="corePaint" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(600 228) scale(58)">
+      <stop stop-color="#ffffff"/>
+      <stop offset="0.35" stop-color="#bffcff"/>
+      <stop offset="0.72" stop-color="#38e8ff" stop-opacity="0.8"/>
+      <stop offset="1" stop-color="#38e8ff" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="ringPaint" x1="456" y1="94" x2="739" y2="364" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff5fd2"/>
+      <stop offset="0.48" stop-color="#38e8ff"/>
+      <stop offset="1" stop-color="#6dffbf"/>
+    </linearGradient>
+
+    <linearGradient id="panelStroke" x1="80" y1="146" x2="323" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38e8ff"/>
+      <stop offset="1" stop-color="#8d7cff"/>
+    </linearGradient>
+
+    <linearGradient id="panelStrokeRight" x1="875" y1="146" x2="1120" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffd36b"/>
+      <stop offset="0.52" stop-color="#ff5fd2"/>
+      <stop offset="1" stop-color="#38e8ff"/>
+    </linearGradient>
+
+    <linearGradient id="logoPaint" x1="430" y1="523" x2="770" y2="523" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38e8ff"/>
+      <stop offset="0.48" stop-color="#f1fbff"/>
+      <stop offset="1" stop-color="#6dffbf"/>
+    </linearGradient>
+
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.12 0 0 0 0 0.9 0 0 0 0 1 0 0 0 0.72 0"/>
+      <feBlend in2="SourceGraphic" mode="screen"/>
+    </filter>
+
+    <filter id="panelShadow" x="-20%" y="-30%" width="140%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000814" flood-opacity="0.52"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#38e8ff" flood-opacity="0.13"/>
+    </filter>
+
+    <pattern id="cleanGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" stroke="#20384d" stroke-opacity="0.22" stroke-width="1"/>
+    </pattern>
+
+    <clipPath id="orbClip">
+      <circle cx="600" cy="228" r="118"/>
+    </clipPath>
+
+    <clipPath id="leftClip">
+      <rect x="80" y="150" width="246" height="128" rx="18"/>
+    </clipPath>
+
+    <clipPath id="rightClip">
+      <rect x="874" y="150" width="246" height="128" rx="18"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="630" rx="34" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" rx="34" fill="url(#cleanGrid)" class="grid" opacity="0.56"/>
+  <ellipse cx="600" cy="226" rx="360" ry="172" fill="#38e8ff" fill-opacity="0.08"/>
+  <ellipse cx="600" cy="226" rx="230" ry="122" fill="#8d7cff" fill-opacity="0.08"/>
+
+  <path class="connector" d="M327 214H410C437 214 447 228 474 228" stroke="#38e8ff" stroke-opacity="0.32" stroke-width="2"/>
+  <path class="connector" d="M873 214H790C763 214 753 228 726 228" stroke="#ffd36b" stroke-opacity="0.3" stroke-width="2"/>
+  <path class="connector" d="M430 425H501C530 425 539 395 568 382" stroke="#6dffbf" stroke-opacity="0.25" stroke-width="2"/>
+  <path class="connector" d="M770 425H699C670 425 661 395 632 382" stroke="#ff5fd2" stroke-opacity="0.25" stroke-width="2"/>
+
+  <g class="status-card" filter="url(#panelShadow)">
+    <rect x="80" y="150" width="246" height="128" rx="18" fill="#081522" fill-opacity="0.94"/>
+    <rect x="80.5" y="150.5" width="245" height="127" rx="17.5" stroke="url(#panelStroke)" stroke-opacity="0.62"/>
+    <g clip-path="url(#leftClip)">
+      <rect x="80" y="150" width="246" height="38" fill="#0d1d2d"/>
+      <rect class="scan" x="80" y="188" width="246" height="12" fill="#38e8ff" fill-opacity="0.08"/>
+    </g>
+    <text x="104" y="175" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="800" letter-spacing="0">AGENT STATUS</text>
+    <circle class="signal" cx="108" cy="211" r="5" fill="#6dffbf"/>
+    <text x="124" y="216" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" letter-spacing="0">ONLINE</text>
+    <text x="104" y="243" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">intent router</text>
+    <rect x="104" y="254" width="174" height="7" rx="3.5" fill="#173149"/>
+    <rect class="meter-fill" x="104" y="254" width="148" height="7" rx="3.5" fill="#38e8ff"/>
+  </g>
+
+  <g class="status-card right" filter="url(#panelShadow)">
+    <rect x="874" y="150" width="246" height="128" rx="18" fill="#081522" fill-opacity="0.94"/>
+    <rect x="874.5" y="150.5" width="245" height="127" rx="17.5" stroke="url(#panelStrokeRight)" stroke-opacity="0.62"/>
+    <g clip-path="url(#rightClip)">
+      <rect x="874" y="150" width="246" height="38" fill="#0d1d2d"/>
+      <rect class="scan" x="874" y="188" width="246" height="12" fill="#ff5fd2" fill-opacity="0.08"/>
+    </g>
+    <text x="898" y="175" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="800" letter-spacing="0">VOICE STATE</text>
+    <text x="898" y="215" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">listening</text>
+    <rect x="898" y="228" width="174" height="7" rx="3.5" fill="#173149"/>
+    <rect class="meter-fill" x="898" y="228" width="116" height="7" rx="3.5" fill="#ffd36b"/>
+    <text x="898" y="259" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">response ready</text>
+    <circle class="signal" cx="1075" cy="253" r="6" fill="#6dffbf"/>
+    <path d="M1068 211C1068 222 1084 222 1084 211V198C1084 188 1068 188 1068 198V211Z" stroke="#f1fbff" stroke-width="4" stroke-linecap="round"/>
+    <path d="M1057 208C1058 232 1094 232 1095 208M1076 233V244M1066 244H1086" stroke="#38e8ff" stroke-width="4" stroke-linecap="round"/>
+  </g>
+
+  <g class="orb">
+    <g class="ring-two">
+      <circle cx="600" cy="228" r="150" stroke="#f1fbff" stroke-opacity="0.16" stroke-width="2" stroke-dasharray="2 15"/>
+      <path d="M474 148A150 150 0 0 1 672 95" stroke="#ff5fd2" stroke-width="4" stroke-linecap="round"/>
+      <path d="M725 308A150 150 0 0 1 540 365" stroke="#6dffbf" stroke-width="4" stroke-linecap="round"/>
+    </g>
+    <g class="ring-one">
+      <circle cx="600" cy="228" r="132" stroke="url(#ringPaint)" stroke-opacity="0.72" stroke-width="3" stroke-dasharray="44 32 8 24"/>
+      <path d="M600 96A132 132 0 0 1 732 228" stroke="#38e8ff" stroke-width="5" stroke-linecap="round" filter="url(#softGlow)"/>
+    </g>
+    <g clip-path="url(#orbClip)">
+      <circle cx="600" cy="228" r="118" fill="url(#orbPaint)"/>
+      <circle cx="548" cy="170" r="76" fill="#ffffff" fill-opacity="0.12"/>
+      <path d="M496 302C562 332 655 324 720 262" stroke="#f1fbff" stroke-opacity="0.14" stroke-width="2"/>
+      <path d="M505 205C570 164 653 166 709 215" stroke="#f1fbff" stroke-opacity="0.12" stroke-width="2"/>
+      <path d="M511 252L565 210L622 232L682 196L718 252L672 303L697 345L620 320L578 356L536 306L493 318L511 252Z" stroke="#f1fbff" stroke-opacity="0.35" stroke-width="1.4"/>
+      <path d="M565 210L578 270L620 320M622 232L672 303M511 252L578 270L536 306" stroke="#38e8ff" stroke-opacity="0.38" stroke-width="1.2"/>
+      <circle class="small-dot" cx="511" cy="252" r="3.5" fill="#ffd36b"/>
+      <circle class="small-dot" cx="565" cy="210" r="3.5" fill="#38e8ff"/>
+      <circle class="small-dot" cx="622" cy="232" r="4" fill="#6dffbf"/>
+      <circle class="small-dot" cx="682" cy="196" r="3" fill="#ff5fd2"/>
+      <circle class="small-dot" cx="718" cy="252" r="3.5" fill="#f1fbff"/>
+      <circle class="small-dot" cx="672" cy="303" r="4" fill="#38e8ff"/>
+      <circle class="small-dot" cx="620" cy="320" r="3.5" fill="#6dffbf"/>
+      <circle class="small-dot" cx="536" cy="306" r="3" fill="#f1fbff"/>
+      <g class="orb-core" filter="url(#softGlow)">
+        <circle cx="600" cy="228" r="58" fill="url(#corePaint)"/>
+        <circle cx="600" cy="228" r="32" fill="#f1fbff" fill-opacity="0.62"/>
+      </g>
+    </g>
+    <circle cx="600" cy="228" r="118" stroke="#9bf8ff" stroke-opacity="0.55" stroke-width="2"/>
+  </g>
+
+  <g class="mini-card" filter="url(#panelShadow)">
+    <rect x="210" y="386" width="220" height="80" rx="16" fill="#081522" fill-opacity="0.92"/>
+    <rect x="210.5" y="386.5" width="219" height="79" rx="15.5" stroke="#38e8ff" stroke-opacity="0.34"/>
+    <text x="234" y="415" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="0">WAKE WORD</text>
+    <text x="234" y="439" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">locked and verified</text>
+    <circle class="signal" cx="386" cy="426" r="6" fill="#6dffbf"/>
+  </g>
+
+  <g class="mini-card" filter="url(#panelShadow)">
+    <rect x="490" y="386" width="220" height="80" rx="16" fill="#081522" fill-opacity="0.92"/>
+    <rect x="490.5" y="386.5" width="219" height="79" rx="15.5" stroke="#8d7cff" stroke-opacity="0.34"/>
+    <text x="514" y="415" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="0">ACTION PLAN</text>
+    <text x="514" y="439" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">tool chain selected</text>
+    <rect x="652" y="416" width="28" height="7" rx="3.5" fill="#38e8ff"/>
+    <rect x="652" y="432" width="44" height="7" rx="3.5" fill="#6dffbf"/>
+  </g>
+
+  <g class="mini-card" filter="url(#panelShadow)">
+    <rect x="770" y="386" width="220" height="80" rx="16" fill="#081522" fill-opacity="0.92"/>
+    <rect x="770.5" y="386.5" width="219" height="79" rx="15.5" stroke="#ff5fd2" stroke-opacity="0.34"/>
+    <text x="794" y="415" fill="#f1fbff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="0">RESPONSE</text>
+    <text x="794" y="439" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" letter-spacing="0">124 ms latency</text>
+    <path d="M932 426H960M946 412V440" stroke="#38e8ff" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <g class="logo-glow" filter="url(#softGlow)">
+    <text x="600" y="536" text-anchor="middle" fill="url(#logoPaint)" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="60" font-weight="900" letter-spacing="0">JARVIS</text>
+    <path d="M440 548H520M680 548H760" stroke="#38e8ff" stroke-opacity="0.48" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <text x="600" y="565" text-anchor="middle" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" letter-spacing="0">premium AI voice assistant</text>
+
+  <g transform="translate(486 575)">
+    <rect x="0" y="-20" width="228" height="42" rx="21" fill="#081522" fill-opacity="0.88"/>
+    <rect x="0.5" y="-19.5" width="227" height="41" rx="20.5" stroke="#38e8ff" stroke-opacity="0.28"/>
+    <text x="22" y="5" fill="#8fb0bf" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="11" font-weight="700" letter-spacing="0">VOICE</text>
+    <g transform="translate(78 11)" fill="#38e8ff">
+      <rect class="voice-bar" x="0" y="-18" width="5" height="18" rx="2.5"/>
+      <rect class="voice-bar" x="11" y="-28" width="5" height="28" rx="2.5"/>
+      <rect class="voice-bar" x="22" y="-16" width="5" height="16" rx="2.5"/>
+      <rect class="voice-bar" x="33" y="-32" width="5" height="32" rx="2.5"/>
+      <rect class="voice-bar" x="44" y="-21" width="5" height="21" rx="2.5"/>
+      <rect class="voice-bar" x="55" y="-35" width="5" height="35" rx="2.5"/>
+      <rect class="voice-bar" x="66" y="-19" width="5" height="19" rx="2.5"/>
+      <rect class="voice-bar" x="77" y="-30" width="5" height="30" rx="2.5"/>
+      <rect class="voice-bar" x="88" y="-17" width="5" height="17" rx="2.5"/>
+      <rect class="voice-bar" x="99" y="-26" width="5" height="26" rx="2.5"/>
+      <rect class="voice-bar" x="110" y="-15" width="5" height="15" rx="2.5"/>
+      <rect class="voice-bar" x="121" y="-24" width="5" height="24" rx="2.5"/>
+    </g>
+  </g>
+</svg>

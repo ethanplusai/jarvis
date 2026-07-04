@@ -18,6 +18,7 @@ __pycache__/
 data/*.jsonl
 data/active_session.json
 data/.jarvis_output.txt
+data/artifacts/
 
 # Certificates
 *.pem
@@ -39,3 +40,7 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+
+# Generated brand icons (scripts/generate_icon.py)
+jarvis.png
+jarvis.ico

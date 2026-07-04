@@ -13,6 +13,8 @@ import base64
 import json
 import logging
 import os
+import platform
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -36,8 +38,8 @@ import anthropic
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
@@ -48,10 +50,19 @@ from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
     create_note, search_notes, get_tasks_for_date, build_memory_context,
     format_tasks_for_voice, extract_memories, get_important_memories,
+    get_recent_memories, delete_memory, get_all_memories, memory_stats,
 )
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
+from integrations import provider_env_keys, providers_for_status, skills_for_status, is_configured
+from providers import config as provider_config, llm as provider_llm, tts as provider_tts
+import skills as skills_system
+import onboarding as onboarding_system
+import mcp_registry
+import mcp_client
+import action_log
+import system_control
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("jarvis")
@@ -66,6 +77,12 @@ FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _set_user_name(value: str):
+    """Update the in-process user name (used after onboarding learns it)."""
+    global USER_NAME
+    USER_NAME = value
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
 DESKTOP_PATH = Path.home() / "Desktop"
@@ -79,6 +96,8 @@ VOICE & PERSONALITY:
 - Never say "How can I help you?" or "Is there anything else?" — just act
 - Deliver bad news calmly, like reporting weather: "We have a slight problem, sir."
 - Your humor is observational, never jokes: state facts and let implications land
+- Be funny in a premium way: quick dry asides, tiny cinematic confidence, never slapstick
+- Sound good in audio: short clauses, clean punctuation, no long nested sentences
 - Economy of language — say more with less. No filler, no corporate-speak
 - When things go wrong, get CALMER, not more alarmed
 
@@ -112,6 +131,8 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN manage tasks — create, complete, and list to-do items with priorities and due dates
 - You CAN help plan {user_name}'s day — combine calendar events, tasks, and priorities into an organized plan
 - You CAN remember facts about {user_name} — preferences, decisions, goals. Use [ACTION:REMEMBER] to store important info.
+- You HAVE a library of installable skills for small-business work (sales, marketing, finance, HR, support, ops, and more). Active skills appear under ACTIVE SKILLS. When a skill is marked executable, use [ACTION:RUN_SKILL] slug ||| {{json params}} to actually produce the artifact (e.g. an invoice). Suggest enabling a relevant skill when one would help.
+- You CAN connect to external tools (email, docs, CRM, database, design) over MCP. Connected tools appear under CONNECTED TOOLS. If a needed tool isn't connected, suggest connecting it in Settings.
 
 DAY PLANNING:
 When {user_name} asks to plan his day or schedule, DO NOT dispatch to a project. Instead:
@@ -138,8 +159,9 @@ If the user asks you to do something you genuinely can't do, say "I'm afraid tha
 
 YOUR INTERFACE:
 The user interacts with you through a web browser showing a particle orb visualization that reacts to your voice. The interface has these controls:
-- **Three-dot menu** (top right): contains Settings, Restart Server, and Fix Yourself options
-- **Settings panel**: Opens from the menu. Users can enter API keys (Anthropic, Fish Audio), test connections, set their name and preferences, and see system status (calendar, mail, notes connectivity). Keys are saved to the .env file.
+- **Three-dot menu** (top right): opens a right-side drawer with Settings, Control Center brief, Restart Server, and Fix Yourself options.
+- **Control Center**: the right HUD contains customizable widgets for JARVIS text summaries, important information, news, weather, time, stock/market snapshots, stats, activity, and action confirmations. Users can hide/pin widgets with Tune. You can send concise cards there with [ACTION:CONTROL_CENTER] title ||| body ||| category.
+- **Settings panel**: slides from the right. Users can choose the active model in Engine, tune speech capture language, record local voice reference samples in Voice Capture Lab, group API keys into required vs optional connectors, test connections, set their name/preferences, and see system status. Keys are saved to the .env file.
 - **Mute button**: Toggles your listening on/off. When muted, you can't hear the user. They click it again to unmute.
 - **Restart Server**: Restarts your backend process. Useful if something seems stuck.
 - **Fix Yourself**: Opens Claude Code in your own project directory so you can debug and fix issues in your own code.
@@ -204,6 +226,17 @@ CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're
 - [ACTION:CREATE_NOTE] title ||| body — create a new Apple Note. For saving plans, ideas, lists.
   "save that as a note" → [ACTION:CREATE_NOTE] Day Plan March 19 ||| Morning: client calls. Afternoon: TikTok dashboard. Evening: JARVIS improvements.
 - [ACTION:READ_NOTE] title search — read an existing Apple Note by title keyword.
+- [ACTION:MCP_CALL] server_id ||| tool_name ||| {json args} — call a connected MCP tool. Read-only calls execute immediately; outbound/write calls are queued for confirmation and logged before anything is sent.
+- [ACTION:CONTROL_CENTER] title ||| body ||| category — add or update a concise card in the user's Control Center. Use this for important summaries, news briefs, weather, time, statistics, market/giełda snapshots, reminders, and anything the user asks to see in widgets. Category examples: jarvis, news, weather, markets, stats, alert.
+
+DESKTOP CONTROL (works on macOS, Windows, and Linux; unsupported combos report gracefully):
+- [ACTION:OPEN_APP] app name — launch a desktop application. "open Spotify" → [ACTION:OPEN_APP] Spotify
+- [ACTION:OPEN_PATH] /path/to/file-or-folder — open a file or folder in the system file manager.
+- [ACTION:SET_VOLUME] 0-100 — set the system output volume. "volume to forty percent" → [ACTION:SET_VOLUME] 40
+- [ACTION:MEDIA] play_pause|next|previous — control music/media playback.
+- [ACTION:LOCK_SCREEN] — lock the computer when the user asks to lock up or step away.
+- [ACTION:CLIPBOARD] text — copy the given text to the user's clipboard.
+- [ACTION:SCREENSHOT] — capture the screen to a file the user can open later.
 
 You use Claude Code as your tool to build, research, and write code — but YOU are the one doing the work. Never say "Claude Code did X" or "Claude Code is asking" — say "I built X", "I'm checking on that", "I found X". You ARE the intelligence. Claude Code is just your hands.
 
@@ -369,6 +402,19 @@ class ClaudeTask:
         return (end - self.started_at).total_seconds()
 
 
+class IntakeFileRequest(BaseModel):
+    name: str = Field(..., max_length=160)
+    mime_type: str = Field(default="text/plain", max_length=120)
+    content: str = Field(..., max_length=524288)
+
+
+class VoiceSampleRequest(BaseModel):
+    filename: str = Field(..., max_length=160)
+    mime_type: str = Field(default="audio/webm", max_length=80)
+    duration_seconds: float = Field(default=0, ge=0, le=300)
+    data_base64: str = Field(..., max_length=8_000_000)
+
+
 class TaskRequest(BaseModel):
     prompt: str
     working_dir: str = "."
@@ -488,12 +534,26 @@ class ClaudeTaskManager:
         start = time.time()
         timeout = 600  # 10 minutes
 
+        stall_after = 60  # seconds without output growth before assuming completion
         while time.time() - start < timeout:
             await asyncio.sleep(5)
-            if output_file.exists():
-                content = output_file.read_text()
-                if "--- JARVIS TASK COMPLETE ---" in content or len(content) > 100:
-                    task.result = content.replace("--- JARVIS TASK COMPLETE ---", "").strip()
+            if not output_file.exists():
+                continue
+            content = output_file.read_text()
+            if "--- JARVIS TASK COMPLETE ---" in content:
+                task.result = content.replace("--- JARVIS TASK COMPLETE ---", "").strip()
+                task.status = "completed"
+                break
+            # Fallback: the marker can be lost (terminal closed, tee interrupted).
+            # If there is real output and the file has stopped growing, treat the
+            # task as finished rather than waiting out the full timeout.
+            if content.strip():
+                try:
+                    mtime = output_file.stat().st_mtime
+                except OSError:
+                    continue
+                if time.time() - mtime > stall_after:
+                    task.result = content.strip()
                     task.status = "completed"
                     break
         else:
@@ -686,6 +746,12 @@ def format_projects_for_prompt(projects: list[dict]) -> str:
 # Speech-to-Text Corrections
 # ---------------------------------------------------------------------------
 
+ACTION_KEYWORDS = {
+    "open_terminal": ["open terminal", "launch terminal", "open claude code", "launch claude code"],
+    "browse": ["browse", "search for", "look up", "google", "go to", "open website", "pull up"],
+    "build": ["build", "create app", "make app", "generate project", "scaffold"],
+}
+
 STT_CORRECTIONS = {
     r"\bcloud code\b": "Claude Code",
     r"\bclock code\b": "Claude Code",
@@ -813,14 +879,16 @@ def extract_action(response: str) -> tuple[str, dict | None]:
 
     Returns (clean_text_for_tts, action_dict_or_none).
     """
+    # Match the tag and its target up to the end of that line only, so any spoken
+    # text the model places AFTER the tag (a common ordering) is preserved.
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
-        response, _action_re.DOTALL,
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|PROFILE|RECOMMEND_SKILLS|ONBOARD_DONE|RUN_SKILL|MCP_CALL|CONTROL_CENTER|OPEN_APP|OPEN_PATH|SET_VOLUME|MEDIA|LOCK_SCREEN|CLIPBOARD|SCREENSHOT)\]\s*([^\n]*)',
+        response,
     )
     if match:
         action_type = match.group(1).lower()
         action_target = match.group(2).strip()
-        clean_text = response[:match.start()].strip()
+        clean_text = (response[:match.start()] + response[match.end():]).strip()
         return clean_text, {"action": action_type, "target": action_target}
     return response, None
 
@@ -843,6 +911,43 @@ async def _execute_browse(target: str):
             await open_browser(f"https://www.google.com/search?q={quote(target)}")
     except Exception as e:
         log.error(f"Browse execution failed: {e}")
+
+
+_DESKTOP_CONTROL_HANDLERS = {
+    "open_app": system_control.open_app,
+    "open_path": system_control.open_path,
+    "set_volume": system_control.set_volume,
+    "media": system_control.media,
+    "clipboard": system_control.clipboard_copy,
+}
+
+
+async def _execute_desktop_control(action: str, target: str):
+    """Run a cross-platform desktop-control action and record it in the action log."""
+    try:
+        if action == "lock_screen":
+            result = await system_control.lock_screen()
+        elif action == "screenshot":
+            result = await system_control.take_screenshot()
+        else:
+            handler = _DESKTOP_CONTROL_HANDLERS.get(action)
+            if handler is None:
+                return
+            result = await handler(target)
+        action_log.record_action(
+            "desktop_control",
+            f"Desktop control: {action}",
+            status="completed" if result.get("success") else "failed",
+            risk="medium" if action == "lock_screen" else "low",
+            target=target[:200],
+            result=result,
+        )
+        if not result.get("success"):
+            log.warning(f"Desktop control {action} failed: {result.get('confirmation')}")
+        else:
+            log.info(f"Desktop control {action}: {result.get('confirmation')}")
+    except Exception as e:
+        log.error(f"Desktop control {action} failed: {e}")
 
 
 async def _execute_research(target: str, ws=None):
@@ -1126,35 +1231,16 @@ _last_greeting_time: float = 0
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
-        return None
+    """Generate speech audio via the active TTS provider (Fish Audio / ElevenLabs).
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
-    except Exception as e:
-        log.error(f"TTS error: {e}")
-        return None
+    Provider selection and keys are read live from the environment, so changes
+    saved at runtime take effect without a restart. Usage accounting stays here.
+    """
+    audio = await provider_tts.synthesize(text)
+    if audio is not None:
+        _session_tokens["tts_calls"] += 1
+        _append_usage_entry(0, 0, "tts")
+    return audio
 
 
 # ---------------------------------------------------------------------------
@@ -1197,6 +1283,8 @@ async def generate_response(
         user_name=USER_NAME,
         project_dir=PROJECT_DIR,
     )
+    system += f"\n\n{_personalization_prompt()}"
+
     if lookup_status:
         system += f"\n\nACTIVE LOOKUPS:\n{lookup_status}\nIf asked about progress, report this status."
 
@@ -1204,6 +1292,31 @@ async def generate_response(
     memory_ctx = build_memory_context(text)
     if memory_ctx:
         system += f"\n\nJARVIS MEMORY:\n{memory_ctx}"
+
+    # User profile (learned during onboarding)
+    profile_ctx = onboarding_system.profile_prompt()
+    if profile_ctx:
+        system += f"\n\n{profile_ctx}"
+
+    # Onboarding takes priority — if active, steer the discovery conversation
+    onboarding_ctx = onboarding_system.onboarding_prompt()
+    if onboarding_ctx:
+        system += f"\n\n{onboarding_ctx}"
+
+    # Active skills and a lightweight menu of what else can be enabled
+    skills_ctx = skills_system.enabled_skills_prompt()
+    if skills_ctx:
+        system += f"\n\n{skills_ctx}"
+    if onboarding_ctx:
+        # Only surface the broader catalog while onboarding, to keep prompts lean
+        catalog_ctx = skills_system.catalog_index_prompt()
+        if catalog_ctx:
+            system += f"\n\n{catalog_ctx}"
+
+    # Connected external tools via MCP
+    mcp_ctx = mcp_registry.mcp_prompt()
+    if mcp_ctx:
+        system += f"\n\n{mcp_ctx}"
 
     # Three-tier memory — inject rolling summary of earlier conversation
     if session_summary:
@@ -1220,18 +1333,23 @@ async def generate_response(
     if not messages or messages[-1].get("content") != text:
         messages = messages + [{"role": "user", "content": text}]
 
-    try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=250,  # Extra room for [ACTION:X] tags
-            system=system,
-            messages=messages,
-        )
-        track_usage(response)
-        return response.content[0].text
-    except Exception as e:
-        log.error(f"LLM error: {e}")
-        return "Apologies, sir. I'm having trouble connecting to my language systems."
+    # Route the conversational brain through the active provider. Claude remains
+    # the default and still drives actions/classification elsewhere; other brains
+    # may be weaker at the [ACTION:X] protocol (surfaced as a note in the UI).
+    provider = provider_config.active_llm_provider()
+    model = provider_config.active_llm_model(provider)
+    if provider == "anthropic" and not os.getenv(provider_config.model_env_key("anthropic"), "").strip():
+        # Low-latency default for the voice loop; an explicit user override wins.
+        model = "claude-haiku-4-5-20251001"
+    return await provider_llm.complete(
+        provider=provider,
+        model=model,
+        system=system,
+        messages=messages,
+        max_tokens=250,  # Extra room for [ACTION:X] tags
+        anthropic_client=client,
+        on_usage=_record_llm_usage,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1293,17 +1411,47 @@ def _get_usage_for_period(seconds: float | None = None) -> dict:
 
 
 def _cost_from_tokens(input_t: int, output_t: int) -> float:
-    return (input_t / 1_000_000) * 0.80 + (output_t / 1_000_000) * 4.00
+    # Claude Haiku 4.5 list pricing ($1/MTok in, $5/MTok out); used as an
+    # approximation when a non-Anthropic brain is active.
+    return (input_t / 1_000_000) * 1.00 + (output_t / 1_000_000) * 5.00
 
 
 def track_usage(response):
     """Track token usage from an Anthropic API response."""
     inp = getattr(response.usage, "input_tokens", 0) if hasattr(response, "usage") else 0
     out = getattr(response.usage, "output_tokens", 0) if hasattr(response, "usage") else 0
-    _session_tokens["input"] += inp
-    _session_tokens["output"] += out
+    _record_llm_usage(inp, out)
+
+
+def _record_llm_usage(input_tokens: int, output_tokens: int):
+    """Usage callback shared by all LLM providers (Anthropic + httpx-based)."""
+    _session_tokens["input"] += input_tokens or 0
+    _session_tokens["output"] += output_tokens or 0
     _session_tokens["api_calls"] += 1
-    _append_usage_entry(inp, out, "api")
+    _append_usage_entry(input_tokens or 0, output_tokens or 0, "api")
+
+
+async def summarize(prompt: str, system: str = "", max_tokens: int = 150) -> str:
+    """Summarize/condense text, preferring Claude but falling back to the active
+    provider when no Anthropic key is configured. Returns "" on failure so callers
+    can skip gracefully. Keeps background work (session summary, memory extraction,
+    dispatch summaries) alive even when a non-Claude brain is in use.
+    """
+    messages = [{"role": "user", "content": prompt}]
+    if anthropic_client is not None:
+        return await provider_llm.complete(
+            provider="anthropic", model="claude-haiku-4-5-20251001",
+            system=system, messages=messages, max_tokens=max_tokens,
+            anthropic_client=anthropic_client, on_usage=_record_llm_usage,
+        )
+    provider = provider_config.active_llm_provider()
+    if provider == "anthropic":
+        return ""  # no Claude key and no alternate brain selected
+    text = await provider_llm.complete(
+        provider=provider, model=provider_config.active_llm_model(provider),
+        system=system, messages=messages, max_tokens=max_tokens, on_usage=_record_llm_usage,
+    )
+    return "" if text == provider_llm.FALLBACK else text
 
 
 def get_usage_summary() -> str:
@@ -1449,6 +1597,154 @@ async def tts_test():
     if audio:
         return {"audio": base64.b64encode(audio).decode()}
     return {"audio": None, "error": "TTS failed"}
+
+
+
+
+
+def _safe_count(label: str, getter, default):
+    try:
+        return getter()
+    except Exception as exc:
+        log.debug("briefing %s unavailable: %s", label, exc)
+        return default
+
+
+def _compact_task(task: dict) -> dict:
+    return {
+        "id": task.get("id"),
+        "title": task.get("title", ""),
+        "priority": task.get("priority", "medium"),
+        "due_date": task.get("due_date") or "",
+        "project": task.get("project") or "",
+    }
+
+
+def _compact_memory(memory: dict) -> dict:
+    return {
+        "id": memory.get("id"),
+        "type": memory.get("type", "fact"),
+        "content": memory.get("content", ""),
+        "importance": memory.get("importance", 5),
+    }
+
+
+@app.get("/api/briefing")
+async def api_briefing():
+    """Personal assistant briefing assembled from local context and connectors.
+
+    This endpoint is intentionally deterministic and cheap: it avoids LLM calls
+    so the UI can refresh the user's operational picture frequently.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    open_task_items = _safe_count("tasks", lambda: get_open_tasks(), [])
+    high_priority = [t for t in open_task_items if str(t.get("priority", "")).lower() == "high"]
+    due_today = [t for t in open_task_items if (t.get("due_date") or "") == today]
+    overdue = [t for t in open_task_items if (t.get("due_date") or "") and (t.get("due_date") or "") < today]
+
+    try:
+        calendar_events = await get_todays_events()
+    except Exception as exc:
+        log.debug("briefing calendar unavailable: %s", exc)
+        calendar_events = []
+    try:
+        unread = await get_unread_count()
+    except Exception as exc:
+        log.debug("briefing mail unavailable: %s", exc)
+        unread = {"count": 0, "available": False}
+    memories = _safe_count("memories", lambda: get_important_memories(5), [])
+    stats = _safe_count("memory stats", memory_stats, {})
+    mcp_servers = _safe_count("mcp", mcp_registry.connected_servers, [])
+
+    recommendations = []
+    if overdue:
+        recommendations.append(f"Clear {len(overdue)} overdue task{'s' if len(overdue) != 1 else ''} first.")
+    if high_priority:
+        recommendations.append(f"Protect focus time for {len(high_priority)} high-priority task{'s' if len(high_priority) != 1 else ''}.")
+    if calendar_events:
+        recommendations.append(f"Calendar has {len(calendar_events)} event{'s' if len(calendar_events) != 1 else ''} today; leave buffer around meetings.")
+    if int(unread.get("count") or 0) > 0:
+        recommendations.append(f"Triage {int(unread.get('count') or 0)} unread email{'s' if int(unread.get('count') or 0) != 1 else ''} after the first focus block.")
+    if not mcp_servers:
+        recommendations.append("Connect one MCP tool to unlock richer external actions.")
+    if not recommendations:
+        recommendations.append("No obvious fires, sir — an unusually civilised state of affairs.")
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "tasks": {
+            "open": len(open_task_items),
+            "high_priority": len(high_priority),
+            "due_today": [_compact_task(t) for t in due_today[:5]],
+            "overdue": [_compact_task(t) for t in overdue[:5]],
+            "focus": [_compact_task(t) for t in (overdue + high_priority + open_task_items)[:5]],
+        },
+        "calendar": {"today_count": len(calendar_events), "events": calendar_events[:5]},
+        "email": unread,
+        "memory": {"stats": stats, "important": [_compact_memory(m) for m in memories]},
+        "connectivity": {
+            "mcp_connected": len(mcp_servers),
+            "mcp_servers": [{"id": s.get("id"), "name": s.get("name"), "category": s.get("category")} for s in mcp_servers[:6]],
+            "providers_configured": [p["id"] for p in providers_for_status() if p.get("configured")],
+        },
+        "recommendations": recommendations[:4],
+    }
+
+@app.get("/api/system")
+async def api_system():
+    """Lightweight HUD telemetry for the browser mission-control panel."""
+    uptime = int(time.time() - _session_start)
+    try:
+        load_average = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        load_average = None
+
+    disk = shutil.disk_usage(Path(__file__).parent)
+    return {
+        "status": "online",
+        "uptime_seconds": uptime,
+        "load_average": load_average,
+        "disk_free_gb": round(disk.free / (1024 ** 3), 2),
+        "disk_total_gb": round(disk.total / (1024 ** 3), 2),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "connected_clients": len(task_manager._websockets),
+    }
+
+
+@app.post("/api/intake-file")
+async def api_intake_file(req: IntakeFileRequest):
+    """Save a small dropped text/code file and index a summary as a JARVIS note."""
+    safe_name = Path(req.name).name.replace("/", "_").replace("\\", "_")
+    if not safe_name:
+        return JSONResponse(status_code=400, content={"error": "Invalid file name"})
+
+    upload_dir = Path(__file__).parent / "data" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = upload_dir / f"{stamp}-{safe_name}"
+    target.write_text(req.content, encoding="utf-8", errors="replace")
+
+    preview = req.content[:1800].strip()
+    title = f"Uploaded file: {safe_name}"
+    note = (
+        f"File uploaded through the JARVIS mission-control HUD.\n"
+        f"Path: {target}\n"
+        f"MIME: {req.mime_type}\n\n"
+        f"Preview:\n{preview}"
+    )
+    try:
+        create_note(title=title, content=note, topic="uploads", tags=["upload", "hud", safe_name])
+    except Exception as e:
+        log.warning(f"Could not index uploaded file note: {e}")
+
+    return {
+        "status": "stored",
+        "name": safe_name,
+        "path": str(target),
+        "bytes": len(req.content.encode("utf-8")),
+        "preview": preview[:500],
+    }
 
 
 @app.get("/api/usage")
@@ -1922,16 +2218,10 @@ New messages to incorporate:
 
 Write an updated summary in 2-4 sentences capturing the key topics, decisions, and context. Be concise."""
 
-    try:
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        log.warning(f"Summary update failed: {e}")
-        return old_summary  # Keep old summary on failure
+    # Prefer Claude but fall back to the active provider when no Anthropic key is
+    # configured, so the rolling summary keeps working under a non-Claude brain.
+    result = await summarize(prompt, max_tokens=200)
+    return result.strip() if result else old_summary
 
 
 # -- WebSocket Voice Handler -----------------------------------------------
@@ -1956,9 +2246,8 @@ async def voice_handler(ws: WebSocket):
     work_session = WorkSession()
     planner = TaskPlanner()
 
-    # Response cancellation — when new input arrives, cancel current response
+    # Request sequencing — lets the client discard a stale reply after barge-in
     _current_response_id = 0
-    _cancel_response = False
 
     # Audio collision prevention — track when user last spoke
     voice_state = {"last_user_time": 0.0}
@@ -2027,9 +2316,10 @@ async def voice_handler(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
                     await ws.send_json({"type": "text", "text": response_text})
+                    await ws.send_json({"type": "status", "state": "idle"})
                 continue
 
             if msg.get("type") != "transcript" or not msg.get("isFinal"):
@@ -2039,12 +2329,10 @@ async def voice_handler(ws: WebSocket):
             if not user_text:
                 continue
 
-            # Cancel any in-flight response
+            # Track this request so the client can discard a stale reply if the
+            # user barges in with a newer utterance before this one finishes.
             _current_response_id += 1
-            my_response_id = _current_response_id
-            _cancel_response = True
-            await asyncio.sleep(0.05)  # Let any pending sends notice the cancellation
-            _cancel_response = False
+            req_id = msg.get("id", _current_response_id)
 
             voice_state["last_user_time"] = time.time()
             log.info(f"User: {user_text}")
@@ -2282,6 +2570,8 @@ async def voice_handler(ws: WebSocket):
                                     )
                                 elif embedded_action["action"] == "browse":
                                     asyncio.create_task(_execute_browse(embedded_action["target"]))
+                                elif embedded_action["action"] in ("open_app", "open_path", "set_volume", "media", "lock_screen", "clipboard", "screenshot"):
+                                    asyncio.create_task(_execute_desktop_control(embedded_action["action"], embedded_action["target"]))
                                 elif embedded_action["action"] == "research":
                                     # Research enters work mode too
                                     name = _generate_project_name(embedded_action["target"])
@@ -2365,6 +2655,100 @@ async def voice_handler(ws: WebSocket):
                                             except Exception:
                                                 pass
                                     asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
+                                elif embedded_action["action"] == "profile":
+                                    # Store a piece of the user profile learned during onboarding
+                                    target = embedded_action["target"]
+                                    if "|||" in target:
+                                        key, _, value = target.partition("|||")
+                                        key = key.strip().lower().replace(" ", "_")
+                                        value = value.strip()
+                                        if key and value:
+                                            onboarding_system.set_profile(key, value)
+                                            onboarding_system.mark_turn()
+                                            # Mirror the user's name into the .env so the rest of JARVIS uses it
+                                            if key == "name":
+                                                try:
+                                                    _write_env_key("USER_NAME", value)
+                                                    _set_user_name(value)
+                                                except Exception:
+                                                    pass
+                                            log.info(f"Profile set: {key}={value[:40]}")
+                                elif embedded_action["action"] == "recommend_skills":
+                                    goal = embedded_action["target"].strip()
+                                    recs = skills_system.recommend_skills(goal, limit=6)
+                                    for s in recs[:4]:
+                                        skills_system.set_skill_enabled(s["slug"], True)
+                                    # Also recommend matching MCP tools from the profile's tools
+                                    tools_text = onboarding_system.get_profile().get("tools", "") + " " + goal
+                                    for srv in mcp_registry.recommend_servers(tools_text, limit=3):
+                                        log.info(f"Onboarding suggests MCP: {srv['name']}")
+                                    log.info(f"Recommended/enabled skills for goal '{goal[:40]}': {[s['slug'] for s in recs[:4]]}")
+                                elif embedded_action["action"] == "onboard_done":
+                                    onboarding_system.complete()
+                                    log.info("Onboarding marked complete")
+                                elif embedded_action["action"] == "run_skill":
+                                    # [ACTION:RUN_SKILL] slug ||| optional json params
+                                    target = embedded_action["target"]
+                                    slug, _, raw = target.partition("|||")
+                                    slug = slug.strip()
+                                    params = {}
+                                    if raw.strip():
+                                        try:
+                                            params = json.loads(raw.strip())
+                                        except Exception:
+                                            params = {"description": raw.strip()}
+                                    result = skills_system.run_skill(slug, params)
+                                    action_log.record_action(
+                                        "run_skill",
+                                        f"Run skill {slug}",
+                                        status="failed" if result.get("error") else "completed",
+                                        risk="low",
+                                        target=slug,
+                                        details={"params": params},
+                                        result=result,
+                                    )
+                                    if result.get("error"):
+                                        log.warning(f"RUN_SKILL {slug} failed: {result['error']}")
+                                    else:
+                                        log.info(f"RUN_SKILL {slug}: {result.get('summary')}")
+                                elif embedded_action["action"] == "control_center":
+                                    parts = [p.strip() for p in embedded_action["target"].split("|||", 2)]
+                                    title = parts[0] if parts and parts[0] else "JARVIS update"
+                                    body = parts[1] if len(parts) > 1 else ""
+                                    category = parts[2] if len(parts) > 2 and parts[2] else "jarvis"
+                                    try:
+                                        await ws.send_json({"type": "control_center", "title": title, "body": body, "category": category})
+                                    except Exception:
+                                        pass
+                                elif embedded_action["action"] == "mcp_call":
+                                    # [ACTION:MCP_CALL] server_id ||| tool_name ||| optional json args
+                                    parts = [p.strip() for p in embedded_action["target"].split("|||", 2)]
+                                    if len(parts) >= 2:
+                                        server_id, tool_name = parts[0], parts[1]
+                                        args = {}
+                                        if len(parts) == 3 and parts[2]:
+                                            try:
+                                                args = json.loads(parts[2])
+                                            except Exception:
+                                                args = {"input": parts[2]}
+                                        risk = action_log.risk_for_tool(server_id, tool_name, args)
+                                        details = {"server_id": server_id, "tool": tool_name, "arguments": args}
+                                        title = f"Call {server_id}.{tool_name}"
+                                        if action_log.requires_confirmation(risk):
+                                            pending = action_log.create_pending("mcp_tool_call", title, risk=risk, target=server_id, details=details)
+                                            log.info(f"MCP call queued for confirmation: {pending['id']} {title}")
+                                            try:
+                                                await ws.send_json({"type": "action_pending", "action": pending})
+                                            except Exception:
+                                                pass
+                                        else:
+                                            try:
+                                                result = await _execute_mcp_tool_call(server_id, tool_name, args)
+                                                action_log.record_action("mcp_tool_call", title, risk=risk, target=server_id, details=details, result=result)
+                                                log.info(f"MCP call completed: {title}")
+                                            except Exception as e:
+                                                action_log.record_action("mcp_tool_call", title, status="failed", risk=risk, target=server_id, details=details, result={"error": str(e)})
+                                                log.warning(f"MCP call failed: {e}")
 
                 # Update history
                 history.append({"role": "user", "content": user_text})
@@ -2401,9 +2785,9 @@ async def voice_handler(ws: WebSocket):
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text, "reqId": req_id})
                 else:
-                    await ws.send_json({"type": "text", "text": response_text})
+                    await ws.send_json({"type": "text", "text": response_text, "reqId": req_id})
                     await ws.send_json({"type": "status", "state": "idle"})
                 log.info(f"JARVIS: {response_text}")
                 last_jarvis_response = response_text
@@ -2484,18 +2868,136 @@ class KeyUpdate(BaseModel):
 class KeyTest(BaseModel):
     key_value: str | None = None
 
+class ProviderTest(BaseModel):
+    provider: str
+    key_value: str | None = None
+
+class ActiveUpdate(BaseModel):
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    tts_provider: str | None = None
+
 class PreferencesUpdate(BaseModel):
     user_name: str = ""
     honorific: str = "sir"
     calendar_accounts: str = "auto"
+    interface_language: str = "en"
+    response_language: str = "en"
+    personality_preset: str = "stark"
+    personality_brief: str = ""
+    humor_level: str = "balanced"
+    formality_level: str = "butler"
+    proactive_mode: str = "smart"
+
+
+def _personalization_prompt() -> str:
+    """Runtime personality controls saved from Settings → Personalization."""
+    _, env = _read_env()
+    language_names = {
+        "en": "English",
+        "pl": "Polish",
+        "es": "Spanish",
+        "de": "German",
+        "fr": "French",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "uk": "Ukrainian",
+    }
+    preset = env.get("JARVIS_PERSONALITY_PRESET", "stark")
+    preset_lines = {
+        "stark": "Default: cinematic Stark-style JARVIS — polished British butler, loyal, calm, highly capable, with understated dry wit.",
+        "executive": "Executive operator — concise, strategic, numbers-first, ruthless about priorities.",
+        "coach": "Supportive coach — energetic, encouraging, habit-building, but still elegant.",
+        "engineer": "Senior engineer — precise, technical, skeptical of assumptions, prefers tests and evidence.",
+        "creative": "Creative director — visual, bold, idea-rich, brand-aware, and playful.",
+    }.get(preset, "Cinematic Stark-style JARVIS with elegant service and dry wit.")
+    response_language = env.get("JARVIS_RESPONSE_LANGUAGE", "en")
+    brief = env.get("JARVIS_PERSONALITY_BRIEF", "").strip()
+    speech_language = env.get("JARVIS_SPEECH_LANGUAGE", "browser-selected")
+    lines = [
+        "RUNTIME PERSONALIZATION:",
+        f"- Speak to the user in {language_names.get(response_language, response_language)} unless the user explicitly asks for another language.",
+        f"- Personality preset: {preset_lines}",
+        f"- Humor level: {env.get('JARVIS_HUMOR_LEVEL', 'balanced')} — keep it dry, never clownish.",
+        f"- Formality level: {env.get('JARVIS_FORMALITY_LEVEL', 'butler')}.",
+        f"- Proactive mode: {env.get('JARVIS_PROACTIVE_MODE', 'smart')} — take reasonable initiative without being intrusive.",
+        f"- Speech capture: browser-selected language is {speech_language}; keep replies easy to pronounce and pleasant when synthesized.",
+    ]
+    if brief:
+        lines.append(f"- Custom personality directive from the user: {brief[:1200]}")
+    return "\n".join(lines)
+
+def _rebuild_anthropic_client():
+    """Recreate the Anthropic client from the current env so a freshly-saved key
+    takes effect without a server restart."""
+    global anthropic_client
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    anthropic_client = anthropic.AsyncAnthropic(api_key=key) if key else None
+
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = (
+        provider_env_keys()
+        | {
+            "FISH_VOICE_ID",
+            "USER_NAME",
+            "HONORIFIC",
+            "CALENDAR_ACCOUNTS",
+            "JARVIS_UI_LANGUAGE",
+            "JARVIS_RESPONSE_LANGUAGE",
+            "JARVIS_PERSONALITY_PRESET",
+            "JARVIS_PERSONALITY_BRIEF",
+            "JARVIS_HUMOR_LEVEL",
+            "JARVIS_FORMALITY_LEVEL",
+            "JARVIS_PROACTIVE_MODE",
+            "JARVIS_SPEECH_LANGUAGE",
+            "WEATHER_LOCATION_LABEL",
+            "WEATHER_LATITUDE",
+            "WEATHER_LONGITUDE",
+            "WEATHER_UNIT",
+        }
+        | provider_config.extra_env_keys()
+        | mcp_registry.auth_env_keys()
+    )
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
+    if body.key_name == "ANTHROPIC_API_KEY":
+        _rebuild_anthropic_client()
     return {"success": True}
+
+
+@app.post("/api/settings/active")
+async def api_settings_active(body: ActiveUpdate):
+    """Persist the active LLM brain / model / voice provider."""
+    if body.llm_provider is not None:
+        if body.llm_provider not in provider_config.LLM_PROVIDERS:
+            return JSONResponse({"success": False, "error": "Unknown LLM provider"}, status_code=400)
+        _write_env_key("JARVIS_LLM_PROVIDER", body.llm_provider)
+    if body.llm_model is not None and body.llm_provider:
+        _write_env_key(provider_config.model_env_key(body.llm_provider), body.llm_model)
+    if body.tts_provider is not None:
+        if body.tts_provider not in provider_config.TTS_PROVIDERS:
+            return JSONResponse({"success": False, "error": "Unknown TTS provider"}, status_code=400)
+        _write_env_key("JARVIS_TTS_PROVIDER", body.tts_provider)
+    return {"success": True, "llm": provider_config.llm_status(), "tts": provider_config.tts_status()}
+
+
+@app.post("/api/settings/test-provider")
+async def api_test_provider(body: ProviderTest):
+    """Connectivity check for any LLM or TTS provider."""
+    if body.provider in provider_config.TTS_PROVIDERS:
+        return await provider_tts.test_provider(body.provider, body.key_value or None)
+    if body.provider in provider_config.LLM_PROVIDERS:
+        return await provider_llm.test_provider(body.provider, body.key_value or None)
+    return {"valid": False, "error": "Unknown provider"}
+
+
+@app.get("/api/settings/ollama-models")
+async def api_ollama_models():
+    models, error = await provider_llm.list_ollama_models()
+    return {"models": models, "error": error}
 
 @app.post("/api/settings/test-anthropic")
 async def api_test_anthropic(body: KeyTest):
@@ -2557,12 +3059,245 @@ async def api_settings_status():
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
+            "anthropic": is_configured(env_dict.get("ANTHROPIC_API_KEY", "")),
+            "fish_audio": is_configured(env_dict.get("FISH_API_KEY", "")),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
+            "interface_language": env_dict.get("JARVIS_UI_LANGUAGE", "en"),
+            "response_language": env_dict.get("JARVIS_RESPONSE_LANGUAGE", "en"),
         },
+        "providers": providers_for_status(env_dict),
+        "llm": provider_config.llm_status(),
+        "tts": provider_config.tts_status(),
+        "skills": skills_for_status(),
+        "skill_counts": skills_system.counts(),
+        "mcp_connected": len(mcp_registry.connected_servers()),
+        "onboarding": onboarding_system.get_state(),
+        "platform": platform.system(),
     }
+
+@app.get("/api/settings/providers")
+async def api_settings_providers():
+    _, env_dict = _read_env()
+    return {"providers": providers_for_status(env_dict)}
+
+
+# ---------------------------------------------------------------------------
+# Skills API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/skills")
+async def api_skills():
+    """Full skill catalog with categories and counts."""
+    return {
+        "skills": skills_system.list_skills(),
+        "categories": skills_system.categories_summary(),
+        "counts": skills_system.counts(),
+        "packs": skills_for_status(),
+    }
+
+
+@app.get("/api/skills/search")
+async def api_skills_search(q: str = ""):
+    return {"skills": skills_system.search_skills(q)}
+
+
+class SkillToggle(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/skills/{slug}/toggle")
+async def api_skill_toggle(slug: str, body: SkillToggle):
+    ok = skills_system.set_skill_enabled(slug, body.enabled)
+    if not ok:
+        return JSONResponse({"error": "Unknown skill"}, status_code=404)
+    return {"success": True, "slug": slug, "enabled": body.enabled, "counts": skills_system.counts()}
+
+
+class SkillRun(BaseModel):
+    params: dict = Field(default_factory=dict)
+
+
+@app.post("/api/skills/{slug}/run")
+async def api_skill_run(slug: str, body: SkillRun):
+    skill = skills_system.get_skill(slug)
+    if not skill:
+        return JSONResponse({"error": "Unknown skill"}, status_code=404)
+    if not skill["executable"]:
+        return JSONResponse({"error": "Skill is not executable"}, status_code=400)
+    result = skills_system.run_skill(slug, body.params)
+    action_log.record_action(
+        "run_skill",
+        f"Run skill {slug}",
+        status="failed" if result.get("error") else "completed",
+        risk="low",
+        target=slug,
+        details={"params": body.params},
+        result=result,
+    )
+    return result
+
+
+
+# ---------------------------------------------------------------------------
+# Artifacts and action log API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/artifacts")
+async def api_artifacts():
+    return {"artifacts": skills_system.list_artifacts()}
+
+
+@app.get("/api/artifacts/{name}")
+async def api_artifact_download(name: str):
+    safe = Path(name).name
+    path = skills_system.ARTIFACTS_DIR / safe
+    if not path.exists() or not path.is_file():
+        return JSONResponse({"error": "Artifact not found"}, status_code=404)
+    return FileResponse(str(path), filename=safe)
+
+
+@app.get("/api/artifacts/{name}/preview")
+async def api_artifact_preview(name: str):
+    result = skills_system.read_artifact(name)
+    if result.get("error"):
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@app.get("/api/action-log")
+async def api_action_log(limit: int = 50, status: str | None = None):
+    return {"actions": action_log.list_actions(limit=limit, status=status)}
+
+
+@app.post("/api/action-log/{action_id}/cancel")
+async def api_action_cancel(action_id: int):
+    action = action_log.mark_cancelled(action_id)
+    if not action:
+        return JSONResponse({"error": "Action not found"}, status_code=404)
+    return action
+
+# ---------------------------------------------------------------------------
+# MCP API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/mcp")
+async def api_mcp_list():
+    return {"servers": mcp_registry.list_servers()}
+
+
+class McpConnect(BaseModel):
+    config: dict = Field(default_factory=dict)
+
+
+@app.post("/api/mcp/{server_id}/connect")
+async def api_mcp_connect(server_id: str, body: McpConnect):
+    result = mcp_registry.connect(server_id, body.config)
+    if result.get("error"):
+        return JSONResponse(result, status_code=404)
+    action_log.record_action("mcp_connect", f"Connect MCP server {server_id}", target=server_id, details={"config": body.config}, result=result)
+    return result
+
+
+@app.post("/api/mcp/{server_id}/disconnect")
+async def api_mcp_disconnect(server_id: str):
+    result = mcp_registry.disconnect(server_id)
+    action_log.record_action("mcp_disconnect", f"Disconnect MCP server {server_id}", target=server_id, result=result)
+    return result
+
+
+@app.get("/api/mcp/{server_id}/tools")
+async def api_mcp_tools(server_id: str):
+    try:
+        return {"tools": await mcp_client.list_tools(server_id)}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+class McpToolCall(BaseModel):
+    tool: str
+    arguments: dict = Field(default_factory=dict)
+    confirm: bool = False
+
+
+async def _execute_mcp_tool_call(server_id: str, tool: str, arguments: dict) -> dict:
+    result = await mcp_client.call_tool(server_id, tool, arguments)
+    return {"server_id": server_id, "tool": tool, "result": result}
+
+
+@app.post("/api/mcp/{server_id}/call")
+async def api_mcp_call(server_id: str, body: McpToolCall):
+    risk = action_log.risk_for_tool(server_id, body.tool, body.arguments)
+    title = f"Call {server_id}.{body.tool}"
+    details = {"server_id": server_id, "tool": body.tool, "arguments": body.arguments}
+    if action_log.requires_confirmation(risk) and not body.confirm:
+        pending = action_log.create_pending("mcp_tool_call", title, risk=risk, target=server_id, details=details)
+        return {"requires_confirmation": True, "pending_action": pending}
+    try:
+        result = await _execute_mcp_tool_call(server_id, body.tool, body.arguments)
+        logged = action_log.record_action("mcp_tool_call", title, risk=risk, target=server_id, details=details, result=result)
+        return {"success": True, "action": logged, "result": result}
+    except Exception as e:
+        action_log.record_action("mcp_tool_call", title, status="failed", risk=risk, target=server_id, details=details, result={"error": str(e)})
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/action-log/{action_id}/confirm")
+async def api_action_confirm(action_id: int):
+    action = action_log.get_action(action_id)
+    if not action:
+        return JSONResponse({"error": "Action not found"}, status_code=404)
+    if action["status"] != "pending_confirmation":
+        return JSONResponse({"error": "Action is not pending confirmation"}, status_code=400)
+    if action["action_type"] != "mcp_tool_call":
+        return JSONResponse({"error": "Unsupported confirmation type"}, status_code=400)
+    details = action.get("details", {})
+    try:
+        result = await _execute_mcp_tool_call(details["server_id"], details["tool"], details.get("arguments") or {})
+        return action_log.mark_completed(action_id, result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+# ---------------------------------------------------------------------------
+# Onboarding API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/onboarding")
+async def api_onboarding_get():
+    return onboarding_system.export()
+
+
+class ProfileUpdate(BaseModel):
+    profile: dict = Field(default_factory=dict)
+
+
+@app.post("/api/onboarding/profile")
+async def api_onboarding_profile(body: ProfileUpdate):
+    onboarding_system.set_profile_many(body.profile)
+    name = body.profile.get("name")
+    if name and str(name).strip():
+        _write_env_key("USER_NAME", str(name).strip())
+        _set_user_name(str(name).strip())
+    return onboarding_system.export()
+
+
+@app.post("/api/onboarding/complete")
+async def api_onboarding_complete():
+    onboarding_system.complete()
+    return onboarding_system.get_state()
+
+
+@app.post("/api/onboarding/skip")
+async def api_onboarding_skip():
+    onboarding_system.skip()
+    return onboarding_system.get_state()
+
+
+@app.post("/api/onboarding/reset")
+async def api_onboarding_reset():
+    onboarding_system.reset()
+    return onboarding_system.get_state()
 
 @app.get("/api/settings/preferences")
 async def api_get_preferences():
@@ -2571,6 +3306,13 @@ async def api_get_preferences():
         "user_name": env_dict.get("USER_NAME", ""),
         "honorific": env_dict.get("HONORIFIC", "sir"),
         "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
+        "interface_language": env_dict.get("JARVIS_UI_LANGUAGE", "en"),
+        "response_language": env_dict.get("JARVIS_RESPONSE_LANGUAGE", "en"),
+        "personality_preset": env_dict.get("JARVIS_PERSONALITY_PRESET", "stark"),
+        "personality_brief": env_dict.get("JARVIS_PERSONALITY_BRIEF", ""),
+        "humor_level": env_dict.get("JARVIS_HUMOR_LEVEL", "balanced"),
+        "formality_level": env_dict.get("JARVIS_FORMALITY_LEVEL", "butler"),
+        "proactive_mode": env_dict.get("JARVIS_PROACTIVE_MODE", "smart"),
     }
 
 @app.post("/api/settings/preferences")
@@ -2578,7 +3320,281 @@ async def api_save_preferences(body: PreferencesUpdate):
     _write_env_key("USER_NAME", body.user_name)
     _write_env_key("HONORIFIC", body.honorific)
     _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
+    _write_env_key("JARVIS_UI_LANGUAGE", body.interface_language)
+    _write_env_key("JARVIS_RESPONSE_LANGUAGE", body.response_language)
+    _write_env_key("JARVIS_PERSONALITY_PRESET", body.personality_preset)
+    _write_env_key("JARVIS_PERSONALITY_BRIEF", body.personality_brief)
+    _write_env_key("JARVIS_HUMOR_LEVEL", body.humor_level)
+    _write_env_key("JARVIS_FORMALITY_LEVEL", body.formality_level)
+    _write_env_key("JARVIS_PROACTIVE_MODE", body.proactive_mode)
+    if body.user_name:
+        _set_user_name(body.user_name)
     return {"success": True}
+
+
+
+# ---------------------------------------------------------------------------
+# Voice sample capture API
+# ---------------------------------------------------------------------------
+
+VOICE_SAMPLE_DIR = Path(__file__).parent / "data" / "voice_samples"
+VOICE_SAMPLE_META = VOICE_SAMPLE_DIR / "samples.json"
+VOICE_SAMPLE_MAX_BYTES = 5 * 1024 * 1024
+VOICE_SAMPLE_MIME_EXT = {
+    "audio/webm": ".webm",
+    "audio/webm;codecs=opus": ".webm",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+}
+
+
+def _safe_voice_filename(name: str, mime_type: str) -> str:
+    stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in Path(name).stem).strip("-_")
+    stem = stem[:80] or f"jarvis-voice-sample-{int(time.time())}"
+    ext = VOICE_SAMPLE_MIME_EXT.get(mime_type, ".webm")
+    return f"{stem}{ext}"
+
+
+def _read_voice_sample_meta() -> list[dict]:
+    if not VOICE_SAMPLE_META.exists():
+        return []
+    try:
+        data = json.loads(VOICE_SAMPLE_META.read_text())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _write_voice_sample_meta(samples: list[dict]) -> None:
+    VOICE_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+    VOICE_SAMPLE_META.write_text(json.dumps(samples, indent=2))
+
+
+@app.get("/api/voice-samples")
+async def api_voice_samples():
+    VOICE_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+    samples = []
+    for item in _read_voice_sample_meta():
+        file_path = VOICE_SAMPLE_DIR / item.get("name", "")
+        if not file_path.exists():
+            continue
+        stat = file_path.stat()
+        samples.append({
+            "name": item.get("name"),
+            "mime_type": item.get("mime_type", "audio/webm"),
+            "duration_seconds": float(item.get("duration_seconds") or 0),
+            "size_bytes": stat.st_size,
+            "created_at": float(item.get("created_at") or stat.st_mtime),
+            "download_url": f"/api/voice-samples/{item.get('name')}",
+        })
+    samples.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"samples": samples}
+
+
+@app.post("/api/voice-samples")
+async def api_save_voice_sample(body: VoiceSampleRequest):
+    if body.mime_type not in VOICE_SAMPLE_MIME_EXT:
+        return JSONResponse({"success": False, "error": "Unsupported audio format"}, status_code=400)
+    try:
+        audio = base64.b64decode(body.data_base64, validate=True)
+    except Exception:
+        return JSONResponse({"success": False, "error": "Invalid audio payload"}, status_code=400)
+    if not audio:
+        return JSONResponse({"success": False, "error": "Empty audio sample"}, status_code=400)
+    if len(audio) > VOICE_SAMPLE_MAX_BYTES:
+        return JSONResponse({"success": False, "error": "Voice sample is larger than 5 MB"}, status_code=400)
+
+    VOICE_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_voice_filename(body.filename, body.mime_type)
+    target = VOICE_SAMPLE_DIR / safe_name
+    counter = 2
+    while target.exists():
+        safe_name = f"{target.stem}-{counter}{target.suffix}"
+        target = VOICE_SAMPLE_DIR / safe_name
+        counter += 1
+    target.write_bytes(audio)
+
+    samples = _read_voice_sample_meta()
+    entry = {
+        "name": safe_name,
+        "mime_type": body.mime_type,
+        "duration_seconds": round(float(body.duration_seconds), 2),
+        "size_bytes": len(audio),
+        "created_at": time.time(),
+    }
+    samples.insert(0, entry)
+    _write_voice_sample_meta(samples[:25])
+    return {"success": True, "sample": {**entry, "download_url": f"/api/voice-samples/{safe_name}"}}
+
+
+@app.get("/api/voice-samples/{name}")
+async def api_download_voice_sample(name: str):
+    safe_name = _safe_voice_filename(name, "audio/webm") if Path(name).suffix == "" else Path(name).name
+    target = VOICE_SAMPLE_DIR / safe_name
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "Voice sample not found"}, status_code=404)
+    return FileResponse(target, media_type="application/octet-stream", filename=target.name)
+
+
+# ---------------------------------------------------------------------------
+# Memory API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memories")
+async def api_memories(limit: int = 100, offset: int = 0, type: str | None = None):
+    """List memories with pagination and optional type filter."""
+    from memory import get_all_memories, memory_stats
+    return {
+        "memories": get_all_memories(limit=limit, offset=offset, mem_type=type),
+        "stats": memory_stats(),
+    }
+
+
+@app.get("/api/memories/stats")
+async def api_memory_stats():
+    from memory import memory_stats
+    return memory_stats()
+
+
+@app.get("/api/memories/search")
+async def api_memory_search(q: str = ""):
+    if not q.strip():
+        return {"memories": []}
+    return {"memories": recall(q, limit=20)}
+
+
+class MemoryCreate(BaseModel):
+    content: str
+    type: str = "fact"
+    importance: int = 5
+    source: str = "manual"
+
+
+@app.post("/api/memories")
+async def api_memory_create(body: MemoryCreate):
+    mem_id = remember(body.content, mem_type=body.type, source=body.source, importance=body.importance)
+    return {"id": mem_id, "success": True}
+
+
+@app.delete("/api/memories/{mem_id}")
+async def api_memory_delete(mem_id: int):
+    from memory import delete_memory
+    ok = delete_memory(mem_id)
+    if not ok:
+        return JSONResponse({"error": "Memory not found"}, status_code=404)
+    return {"success": True, "id": mem_id}
+
+
+# ---------------------------------------------------------------------------
+# Task-Memory API (JARVIS internal task system, distinct from Claude Code tasks)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/tasks-memory")
+async def api_tasks_memory(project: str | None = None):
+    tasks = get_open_tasks(project=project)
+    return {"tasks": tasks}
+
+
+class TaskMemoryCreate(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "medium"
+    due_date: str = ""
+    due_time: str = ""
+    project: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/tasks-memory")
+async def api_task_memory_create(body: TaskMemoryCreate):
+    task_id = create_task(
+        title=body.title, description=body.description,
+        priority=body.priority, due_date=body.due_date,
+        due_time=body.due_time, project=body.project, tags=body.tags,
+    )
+    return {"id": task_id, "success": True}
+
+
+@app.post("/api/tasks-memory/{task_id}/complete")
+async def api_task_memory_complete(task_id: int):
+    complete_task(task_id)
+    return {"success": True, "id": task_id}
+
+
+# ---------------------------------------------------------------------------
+# Agent / Workflow Status API
+# ---------------------------------------------------------------------------
+
+# In-memory agent state (shared across the process)
+_agent_state = {
+    "status": "idle",  # idle, planning, executing, verifying
+    "current_goal": None,
+    "last_action": None,
+    "action_count": 0,
+    "started_at": time.time(),
+}
+_agent_history: list[dict] = []  # Recent agent actions
+
+
+@app.get("/api/agent/status")
+async def api_agent_status():
+    actions = action_log.list_actions(limit=10)
+    return {
+        **_agent_state,
+        "uptime": int(time.time() - _agent_state["started_at"]),
+        "recent_actions": actions,
+    }
+
+
+@app.get("/api/agent/history")
+async def api_agent_history(limit: int = 30):
+    return {"history": action_log.list_actions(limit=limit)}
+
+
+class GoalSubmit(BaseModel):
+    goal: str
+    priority: str = "medium"
+
+
+@app.post("/api/agent/goal")
+async def api_agent_goal(body: GoalSubmit):
+    """Submit a high-level goal. Creates a task and logs it."""
+    task_id = create_task(
+        title=body.goal,
+        description=f"Goal submitted via UI: {body.goal}",
+        priority=body.priority,
+    )
+    _agent_state["current_goal"] = body.goal
+    _agent_state["status"] = "planning"
+    action_log.record_action(
+        "goal_submitted", f"Goal: {body.goal}",
+        risk="low", target="agent",
+        details={"goal": body.goal, "priority": body.priority, "task_id": task_id},
+    )
+    return {"success": True, "task_id": task_id, "goal": body.goal}
+
+
+@app.get("/api/conversation/summary")
+async def api_conversation_summary():
+    """Get token usage and conversation stats."""
+    uptime = int(time.time() - _session_start)
+    today = _get_usage_for_period(86400)
+    mapped_session = {
+        "input_tokens": _session_tokens.get("input", 0),
+        "output_tokens": _session_tokens.get("output", 0),
+        "api_calls": _session_tokens.get("api_calls", 0),
+        "tts_calls": _session_tokens.get("tts_calls", 0),
+    }
+    return {
+        "uptime_seconds": uptime,
+        "session_tokens": mapped_session,
+        "today_tokens": today,
+        "today_cost": round(_cost_from_tokens(today["input_tokens"], today["output_tokens"]), 4),
+        "agent_status": _agent_state["status"],
+    }
+
 
 # ---------------------------------------------------------------------------
 # Control endpoints (restart, fix-self)

@@ -1,0 +1,17 @@
+{
+  "name": "JARVIS — Virtual AI Assistant",
+  "short_name": "JARVIS",
+  "description": "Voice-first desktop assistant by AI Evolution Labs.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

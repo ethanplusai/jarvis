@@ -93,9 +93,50 @@ def init_db():
 # Memories — facts JARVIS learns
 # ---------------------------------------------------------------------------
 
+def _normalize(text: str) -> set[str]:
+    """Lowercased word set for cheap similarity checks."""
+    return {w for w in "".join(c if c.isalnum() else " " for c in text.lower()).split() if len(w) > 2}
+
+
+def _find_duplicate(conn: sqlite3.Connection, content: str, mem_type: str) -> dict | None:
+    """Find an existing near-duplicate memory of the same type (Jaccard >= 0.7)."""
+    target = _normalize(content)
+    if not target:
+        return None
+    rows = conn.execute(
+        "SELECT id, content, importance FROM memories WHERE type = ? ORDER BY created_at DESC LIMIT 200",
+        (mem_type,),
+    ).fetchall()
+    for r in rows:
+        other = _normalize(r["content"])
+        if not other:
+            continue
+        overlap = len(target & other) / len(target | other)
+        if overlap >= 0.7:
+            return dict(r)
+    return None
+
+
 def remember(content: str, mem_type: str = "fact", source: str = "", importance: int = 5) -> int:
-    """Store a memory. Returns the memory ID."""
+    """Store a memory, de-duplicating near-identical facts. Returns the memory ID."""
+    content = (content or "").strip()
+    if not content:
+        return -1
     conn = _get_db()
+
+    # De-dup: if a near-identical memory of the same type exists, refresh it instead.
+    dup = _find_duplicate(conn, content, mem_type)
+    if dup:
+        new_importance = max(int(dup["importance"] or 5), int(importance))
+        conn.execute(
+            "UPDATE memories SET importance = ?, last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
+            (new_importance, time.time(), dup["id"]),
+        )
+        conn.commit()
+        conn.close()
+        log.info(f"Memory deduped [{mem_type}]: {content[:50]} -> #{dup['id']}")
+        return int(dup["id"])
+
     cur = conn.execute(
         "INSERT INTO memories (type, content, source, importance, created_at) VALUES (?, ?, ?, ?, ?)",
         (mem_type, content, source, importance, time.time())
@@ -125,32 +166,76 @@ def _sanitize_fts_query(query: str) -> str:
 
 
 def recall(query: str, limit: int = 5) -> list[dict]:
-    """Search memories by relevance. Returns most relevant matches."""
+    """Search memories by relevance.
+
+    Combines FTS text rank with importance, recency, and how often a memory has
+    been used — so the most useful matches surface, not just the closest text.
+    """
     fts_query = _sanitize_fts_query(query)
     if not fts_query:
         return []
     conn = _get_db()
     try:
-        results = conn.execute("""
-            SELECT m.id, m.type, m.content, m.importance, m.created_at, m.access_count
+        # Pull a wider candidate pool, then re-rank with multiple signals.
+        candidates = conn.execute("""
+            SELECT m.id, m.type, m.content, m.importance, m.created_at,
+                   m.access_count, m.last_accessed, f.rank AS fts_rank
             FROM memory_fts f
             JOIN memories m ON f.rowid = m.id
             WHERE memory_fts MATCH ?
             ORDER BY rank
             LIMIT ?
-        """, (fts_query, limit)).fetchall()
+        """, (fts_query, limit * 4)).fetchall()
     except Exception:
-        results = []
+        candidates = []
 
-    # Update access counts
+    now = time.time()
+    scored = []
+    for r in candidates:
+        # FTS rank is negative (more negative = better); invert to a positive base.
+        text_score = -float(r["fts_rank"] or 0)
+        importance = (int(r["importance"] or 5)) / 10.0          # 0..1
+        age_days = max(0.0, (now - float(r["created_at"])) / 86400.0)
+        recency = 1.0 / (1.0 + age_days / 30.0)                  # ~half-life of a month
+        usage = min(1.0, (int(r["access_count"] or 0)) / 10.0)
+        score = text_score + 1.5 * importance + 0.8 * recency + 0.4 * usage
+        scored.append((score, dict(r)))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [d for _, d in scored[:limit]]
+
+    # Update access counts for what we surfaced.
     for r in results:
         conn.execute(
             "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
-            (time.time(), r["id"])
+            (now, r["id"])
         )
     conn.commit()
     conn.close()
-    return [dict(r) for r in results]
+    return results
+
+
+def decay_importance(half_life_days: float = 90.0, floor: int = 1) -> int:
+    """Gently age out rarely-used memories so stale facts stop dominating.
+
+    Reduces importance of memories not accessed within the half-life window,
+    unless they are frequently used. Returns the number adjusted.
+    """
+    conn = _get_db()
+    cutoff = time.time() - half_life_days * 86400.0
+    rows = conn.execute(
+        "SELECT id, importance, access_count FROM memories "
+        "WHERE importance > ? AND (last_accessed IS NULL OR last_accessed < ?) AND access_count < 3",
+        (floor, cutoff),
+    ).fetchall()
+    for r in rows:
+        conn.execute("UPDATE memories SET importance = ? WHERE id = ?",
+                     (max(floor, int(r["importance"]) - 1), r["id"]))
+    conn.commit()
+    conn.close()
+    if rows:
+        log.info(f"Decayed importance of {len(rows)} stale memories")
+    return len(rows)
 
 
 def get_recent_memories(limit: int = 10) -> list[dict]:
@@ -171,6 +256,64 @@ def get_important_memories(limit: int = 10) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in results]
+
+
+def delete_memory(mem_id: int) -> bool:
+    """Delete a memory by ID. Returns True if deleted."""
+    conn = _get_db()
+    cur = conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+    # Also remove from FTS
+    try:
+        conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (mem_id,))
+    except Exception:
+        pass
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    if deleted:
+        log.info(f"Deleted memory #{mem_id}")
+    return deleted
+
+
+def get_all_memories(limit: int = 100, offset: int = 0, mem_type: str | None = None) -> list[dict]:
+    """Get memories with pagination and optional type filter."""
+    conn = _get_db()
+    q = "SELECT * FROM memories"
+    params: list = []
+    if mem_type:
+        q += " WHERE type = ?"
+        params.append(mem_type)
+    q += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    results = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in results]
+
+
+def memory_stats() -> dict:
+    """Get memory statistics."""
+    conn = _get_db()
+    total = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
+    by_type = conn.execute(
+        "SELECT type, COUNT(*) as c FROM memories GROUP BY type ORDER BY c DESC"
+    ).fetchall()
+    recent = conn.execute(
+        "SELECT COUNT(*) as c FROM memories WHERE created_at > ?",
+        (time.time() - 86400,)
+    ).fetchone()["c"]
+    task_count = conn.execute(
+        "SELECT COUNT(*) as c FROM tasks WHERE status IN ('open', 'in_progress')"
+    ).fetchone()["c"]
+    note_count = conn.execute("SELECT COUNT(*) as c FROM notes").fetchone()["c"]
+    conn.close()
+    return {
+        "total_memories": total,
+        "by_type": {r["type"]: r["c"] for r in by_type},
+        "last_24h": recent,
+        "open_tasks": task_count,
+        "total_notes": note_count,
+    }
+
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +465,9 @@ def build_memory_context(user_message: str) -> str:
     Searches for relevant memories based on what the user is talking about.
     Fast — runs FTS queries, no heavy computation.
     """
-    parts = []
+    parts = [
+        "MEMORY PROTOCOL: use stored memories as helpful context, never as an excuse to reveal private data unnecessarily; update memory only through explicit action tags when the user shares durable facts, preferences, decisions, or plans."
+    ]
 
     # Always include: open high-priority tasks
     high_tasks = [t for t in get_open_tasks() if t["priority"] == "high"]
@@ -347,7 +492,7 @@ def build_memory_context(user_message: str) -> str:
         if imp_lines:
             parts.append("KEY FACTS:\n" + "\n".join(imp_lines[:3]))
 
-    return "\n\n".join(parts) if parts else ""
+    return "\n\n".join(parts)
 
 
 def format_tasks_for_voice(tasks: list[dict]) -> str:
