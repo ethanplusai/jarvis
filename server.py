@@ -39,7 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal
+from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
 from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
@@ -66,6 +66,7 @@ FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -239,29 +240,102 @@ KNOWN PROJECTS:
 
 
 # ---------------------------------------------------------------------------
-# Weather (wttr.in)
+# Weather
 # ---------------------------------------------------------------------------
+# Location is resolved from (in order): WEATHER_LATITUDE + WEATHER_LONGITUDE
+# env vars, a cached IP-geolocation lookup, or a fresh ipwho.is lookup.
+# Temperature unit defaults to Fahrenheit; override with WEATHER_UNIT=celsius.
 
 _cached_weather: Optional[str] = None
 _weather_fetched: bool = False
+_cached_weather_location: Optional[dict] = None
+_weather_location_fetched_at: float = 0.0
+_WEATHER_LOCATION_TTL_SECONDS = 60 * 15
 
 
-async def fetch_weather() -> str:
-    """Fetch current weather from wttr.in. Cached for the session."""
-    global _cached_weather, _weather_fetched
-    if _weather_fetched:
-        return _cached_weather or "Weather data unavailable."
-    _weather_fetched = True
+def _format_location_label(city: str, region: str, country: str) -> str:
+    parts = [p.strip() for p in (city, region) if p and p.strip()]
+    if parts:
+        return ", ".join(parts[:2])
+    return (country or "your area").strip() or "your area"
+
+
+def _get_weather_location() -> Optional[dict]:
+    """Resolve weather location: env override → cached lookup → fresh IP lookup."""
+    global _cached_weather_location, _weather_location_fetched_at
+
+    lat_raw = os.getenv("WEATHER_LATITUDE", "").strip()
+    lon_raw = os.getenv("WEATHER_LONGITUDE", "").strip()
+    label_override = os.getenv("WEATHER_LOCATION_LABEL", "").strip()
+    if lat_raw and lon_raw:
+        try:
+            return {
+                "latitude": float(lat_raw),
+                "longitude": float(lon_raw),
+                "label": label_override or "your area",
+            }
+        except ValueError:
+            log.warning("Invalid WEATHER_LATITUDE / WEATHER_LONGITUDE in environment")
+
+    if (
+        _cached_weather_location is not None
+        and (time.time() - _weather_location_fetched_at) < _WEATHER_LOCATION_TTL_SECONDS
+    ):
+        return _cached_weather_location
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            resp = await http.get("https://wttr.in/?format=%l:+%C,+%t", headers={"User-Agent": "curl"})
-            if resp.status_code == 200:
-                _cached_weather = resp.text.strip()
-                return _cached_weather
+        import urllib.request as _ureq
+        with _ureq.urlopen(
+            "https://ipwho.is/?fields=success,city,region,country,latitude,longitude",
+            timeout=3,
+        ) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get("success") is True:
+            location = {
+                "latitude": float(data["latitude"]),
+                "longitude": float(data["longitude"]),
+                "label": label_override or _format_location_label(
+                    str(data.get("city", "")),
+                    str(data.get("region", "")),
+                    str(data.get("country", "")),
+                ),
+            }
+            _cached_weather_location = location
+            _weather_location_fetched_at = time.time()
+            return location
     except Exception as e:
-        log.warning(f"Weather fetch failed: {e}")
-    _cached_weather = None
-    return "Weather data unavailable."
+        log.debug(f"IP-geolocation lookup failed: {e}")
+
+    return _cached_weather_location
+
+
+def _fetch_weather_string_sync() -> Optional[str]:
+    """Sync weather fetch — safe to call from a threaded worker."""
+    location = _get_weather_location()
+    if not location:
+        return None
+
+    unit = os.getenv("WEATHER_UNIT", "fahrenheit").strip().lower()
+    if unit not in ("fahrenheit", "celsius"):
+        unit = "fahrenheit"
+    unit_symbol = "°F" if unit == "fahrenheit" else "°C"
+
+    try:
+        import urllib.request as _ureq
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={location['latitude']}&longitude={location['longitude']}"
+            f"&current=temperature_2m,weathercode&temperature_unit={unit}"
+        )
+        with _ureq.urlopen(url, timeout=3) as resp:
+            current = json.loads(resp.read()).get("current", {})
+        temp = current.get("temperature_2m")
+        if temp is None:
+            return None
+        return f"Current weather in {location['label']}: {temp}{unit_symbol}"
+    except Exception as e:
+        log.debug(f"Weather fetch failed: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -392,10 +466,12 @@ class ClaudeTaskManager:
         prompt_file.write_text(task.prompt)
 
         # Open Terminal.app with claude running in the project directory
+        skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+        escaped_work_dir = applescript_escape(work_dir)
         applescript = f'''
         tell application "Terminal"
             activate
-            set newTab to do script "cd {work_dir} && cat .jarvis_prompt.md | claude -p --dangerously-skip-permissions | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
+            set newTab to do script "cd {escaped_work_dir} && cat .jarvis_prompt.md | claude -p{skip_flag} | tee .jarvis_output.txt; echo '\\n--- JARVIS TASK COMPLETE ---'"
         end tell
         '''
 
@@ -786,8 +862,11 @@ async def _execute_research(target: str, ws=None):
 
         log.info(f"Research started via claude -p in {path}")
 
+        cmd = ["claude", "-p", "--output-format", "text"]
+        if _SKIP_PERMISSIONS:
+            cmd.append("--dangerously-skip-permissions")
         process = await asyncio.create_subprocess_exec(
-            "claude", "-p", "--output-format", "text", "--dangerously-skip-permissions",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -844,7 +923,7 @@ async def _execute_research(target: str, ws=None):
 
 async def _focus_terminal_window(project_name: str):
     """Bring a Terminal window matching the project name to front."""
-    escaped = project_name.replace('"', '\\"')
+    escaped = applescript_escape(project_name)
     script = f'''
 tell application "Terminal"
     repeat with w in windows
@@ -1316,16 +1395,11 @@ return windowList
             except Exception as e:
                 log.debug(f"Context thread error: {e}")
 
-            # Weather — refresh every loop (30s is fine, API is fast)
-            try:
-                import urllib.request, json as _json
-                url = "https://api.open-meteo.com/v1/forecast?latitude=27.77&longitude=-82.64&current=temperature_2m,weathercode&temperature_unit=fahrenheit"
-                with urllib.request.urlopen(url, timeout=3) as resp:
-                    d = _json.loads(resp.read()).get("current", {})
-                    temp = d.get("temperature_2m", "?")
-                    _ctx_cache["weather"] = f"Current weather in St. Petersburg, FL: {temp}°F"
-            except Exception:
-                pass
+            # Weather — refresh every loop (30s is fine, API is fast).
+            # Location resolves from env override → cached lookup → IP geolocation.
+            weather_string = _fetch_weather_string_sync()
+            if weather_string:
+                _ctx_cache["weather"] = weather_string
 
             time.sleep(30)
 
@@ -1521,7 +1595,8 @@ def detect_action_fast(text: str) -> dict | None:
 # -- Action Handlers -------------------------------------------------------
 
 async def handle_open_terminal() -> str:
-    result = await open_terminal("claude --dangerously-skip-permissions")
+    claude_cmd = "claude --dangerously-skip-permissions" if _SKIP_PERMISSIONS else "claude"
+    result = await open_terminal(claude_cmd)
     return result["confirmation"]
 
 
@@ -1539,10 +1614,12 @@ async def handle_build(target: str) -> str:
     prompt_file = Path(path) / ".jarvis_prompt.txt"
     prompt_file.write_text(target)
 
+    skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    escaped_path = applescript_escape(path)
     script = (
         'tell application "Terminal"\n'
         "    activate\n"
-        f'    do script "cd {path} && cat .jarvis_prompt.txt | claude -p --dangerously-skip-permissions"\n'
+        f'    do script "cd {escaped_path} && cat .jarvis_prompt.txt | claude -p{skip_flag}"\n'
         "end tell"
     )
     await asyncio.create_subprocess_exec(
@@ -1575,7 +1652,8 @@ async def handle_show_recent() -> str:
         return f"Opened {html_files[0].name} from {last['name']}, sir."
 
     # Fall back to opening the folder in Finder
-    script = f'tell application "Finder"\nactivate\nopen POSIX file "{last["path"]}"\nend tell'
+    escaped_last_path = applescript_escape(last["path"])
+    script = f'tell application "Finder"\nactivate\nopen POSIX file "{escaped_last_path}"\nend tell'
     await asyncio.create_subprocess_exec("osascript", "-e", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     return f"Opened the {last['name']} folder in Finder, sir."
 
@@ -2524,10 +2602,12 @@ async def api_fix_self():
     jarvis_dir = str(Path(__file__).parent)
     # The work_session is per-WebSocket, so we set a flag that the handler picks up
     # For now, also open Terminal so user can see
+    skip_flag = " --dangerously-skip-permissions" if _SKIP_PERMISSIONS else ""
+    escaped_jarvis_dir = applescript_escape(jarvis_dir)
     script = (
         'tell application "Terminal"\n'
         '    activate\n'
-        f'    do script "cd {jarvis_dir} && claude --dangerously-skip-permissions"\n'
+        f'    do script "cd {escaped_jarvis_dir} && claude{skip_flag}"\n'
         'end tell'
     )
     await asyncio.create_subprocess_exec(

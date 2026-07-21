@@ -267,7 +267,7 @@ async def search_mail(query: str, count: int = 10) -> list[dict]:
     Uses AppleScript filtering on subject. For broader search,
     we check both subject and sender.
     """
-    escaped = query.replace('"', '\\"').replace("\\", "\\\\")
+    escaped = query.replace("\\", "\\\\").replace('"', '\\"')
     script = f"""
 tell application "Mail"
     set output to ""
@@ -309,7 +309,7 @@ async def read_message(subject_match: str) -> dict | None:
 
     Returns {"sender", "subject", "date", "content"} or None.
     """
-    escaped = subject_match.replace('"', '\\"').replace("\\", "\\\\")
+    escaped = subject_match.replace("\\", "\\\\").replace('"', '\\"')
     script = f"""
 tell application "Mail"
     set allMsgs to messages of inbox
