@@ -8,7 +8,7 @@
 import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer } from "./voice";
 import { createSocket } from "./ws";
-import { openSettings, checkFirstTimeSetup } from "./settings";
+import { openSettings, checkFirstTimeSetup, SPEECH_LANG_EVENT } from "./settings";
 import "./style.css";
 
 // ---------------------------------------------------------------------------
@@ -21,6 +21,7 @@ let isMuted = false;
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
+const captionEl = document.getElementById("jarvis-caption")!;
 
 function showError(msg: string) {
   errorEl.textContent = msg;
@@ -28,6 +29,28 @@ function showError(msg: string) {
   setTimeout(() => {
     errorEl.style.opacity = "0";
   }, 5000);
+}
+
+let captionTimer: number | undefined;
+
+/**
+ * Put what JARVIS said on screen.
+ *
+ * Shown whether or not TTS produced audio: with a voice it reads as
+ * subtitles, and without one it is the only way to see the reply — the
+ * response used to reach nothing but the devtools console.
+ */
+function showCaption(text: unknown) {
+  if (typeof text !== "string" || !text.trim()) return;
+  clearTimeout(captionTimer);
+  captionEl.textContent = text;
+  captionEl.style.opacity = "1";
+  // Hold long enough to read the line, since a caption may be all the user
+  // gets. Replies are a sentence or two, so length is a fair proxy.
+  const holdMs = Math.min(20000, 4000 + text.length * 60);
+  captionTimer = window.setTimeout(() => {
+    captionEl.style.opacity = "0";
+  }, holdMs);
 }
 
 function updateStatus(state: State) {
@@ -80,13 +103,59 @@ function transition(newState: State) {
 // Voice input
 // ---------------------------------------------------------------------------
 
+/**
+ * Fragment accumulation.
+ *
+ * Chrome closes a recognition segment at every pause, so a sentence spoken
+ * with any hesitation arrives as several "final" results. Sending each one
+ * immediately made JARVIS answer half a thought and then receive the rest as
+ * a separate question. Instead, collect the pieces and send once the speaker
+ * has actually stopped.
+ */
+const UTTERANCE_GAP_MS = 1000;
+// A pause never arrives while someone is dictating steadily, so cap the wait
+// rather than let a long sentence hold the whole conversation open.
+const UTTERANCE_MAX_MS = 6000;
+
+let pendingFragments: string[] = [];
+let gapTimer: number | undefined;
+let maxTimer: number | undefined;
+
+function discardUtterance() {
+  clearTimeout(gapTimer);
+  clearTimeout(maxTimer);
+  gapTimer = undefined;
+  maxTimer = undefined;
+  pendingFragments = [];
+}
+
+function flushUtterance() {
+  clearTimeout(gapTimer);
+  clearTimeout(maxTimer);
+  gapTimer = undefined;
+  maxTimer = undefined;
+
+  const text = pendingFragments.join(" ").replace(/\s+/g, " ").trim();
+  pendingFragments = [];
+  if (!text) return;
+
+  socket.send({ type: "transcript", text, isFinal: true });
+  transition("thinking");
+}
+
 const voiceInput = createVoiceInput(
   (text: string) => {
-    // Cancel any current JARVIS response before sending new input
+    // Cancel any current JARVIS response before sending new input. Done on the
+    // first fragment, not at flush time: cutting him off is what the user
+    // wanted the moment they started talking.
     audioPlayer.stop();
-    // User spoke — send transcript
-    socket.send({ type: "transcript", text, isFinal: true });
-    transition("thinking");
+
+    pendingFragments.push(text);
+    clearTimeout(gapTimer);
+    gapTimer = window.setTimeout(flushUtterance, UTTERANCE_GAP_MS);
+    if (maxTimer === undefined) {
+      maxTimer = window.setTimeout(flushUtterance, UTTERANCE_MAX_MS);
+    }
   },
   (msg: string) => {
     showError(msg);
@@ -123,6 +192,7 @@ socket.onMessage((msg) => {
     }
     // Log text for debugging
     if (msg.text) console.log("[JARVIS]", msg.text);
+    showCaption(msg.text);
   } else if (type === "status") {
     const state = msg.state as string;
     if (state === "thinking" && currentState !== "thinking") {
@@ -137,6 +207,7 @@ socket.onMessage((msg) => {
   } else if (type === "text") {
     // Text fallback when TTS fails
     console.log("[JARVIS]", msg.text);
+    showCaption(msg.text);
   } else if (type === "task_spawned") {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {
@@ -148,11 +219,39 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
+/**
+ * Read the speech language chosen in the settings panel.
+ *
+ * Resolved before the microphone opens so the first session is built in the
+ * right language: switching a live session means tearing it down and racing
+ * for the microphone, which is worth avoiding on every page load. Bounded, so
+ * an unreachable server costs a moment rather than the microphone.
+ */
+async function fetchSpeechLanguage(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/settings/preferences", {
+      signal: AbortSignal.timeout(2000),
+    });
+    const prefs = (await res.json()) as { speech_lang?: string };
+    return prefs.speech_lang || null;
+  } catch {
+    return null; // Server not ready — keep the default language.
+  }
+}
+
 // Start listening after a brief delay for the orb to render
-setTimeout(() => {
+setTimeout(async () => {
+  const lang = await fetchSpeechLanguage();
+  if (lang) voiceInput.setLanguage(lang);
   voiceInput.start();
   transition("listening");
 }, 1000);
+
+// Saving the setting re-tunes the running session — no reload needed.
+document.addEventListener(SPEECH_LANG_EVENT, (e) => {
+  const lang = (e as CustomEvent<string>).detail;
+  if (lang) voiceInput.setLanguage(lang);
+});
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
 function ensureAudioContext() {
@@ -183,6 +282,8 @@ btnMute.addEventListener("click", (e) => {
   isMuted = !isMuted;
   btnMute.classList.toggle("muted", isMuted);
   if (isMuted) {
+    // Half-spoken words must not arrive a second after the user silenced him.
+    discardUtterance();
     voiceInput.pause();
     transition("idle");
   } else {

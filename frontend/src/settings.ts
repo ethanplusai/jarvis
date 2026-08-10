@@ -30,7 +30,15 @@ interface PreferencesResponse {
   user_name: string;
   honorific: string;
   calendar_accounts: string;
+  speech_lang: string;
 }
+
+/**
+ * Event fired when the speech language changes, so the live recognition
+ * session picks it up without a reload. Used instead of importing the voice
+ * input directly, which would make settings and main circular.
+ */
+export const SPEECH_LANG_EVENT = "jarvis:speech-lang";
 
 // ---------------------------------------------------------------------------
 // State
@@ -136,10 +144,29 @@ function buildPanelHTML(): string {
 
           <div class="settings-field">
             <label>Honorific</label>
-            <select id="input-honorific">
-              <option value="sir">Sir</option>
-              <option value="ma'am">Ma'am</option>
-              <option value="none">None</option>
+            <input type="text" id="input-honorific" placeholder="sir" list="honorific-suggestions" />
+            <datalist id="honorific-suggestions">
+              <option value="sir"></option>
+              <option value="ma'am"></option>
+              <option value="signore"></option>
+              <option value="señor"></option>
+              <option value="monsieur"></option>
+            </datalist>
+          </div>
+
+          <div class="settings-field">
+            <label>Spoken Language</label>
+            <select id="input-speech-lang">
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+              <option value="it-IT">Italiano</option>
+              <option value="es-ES">Español</option>
+              <option value="fr-FR">Français</option>
+              <option value="de-DE">Deutsch</option>
+              <option value="pt-BR">Português (Brasil)</option>
+              <option value="nl-NL">Nederlands</option>
+              <option value="ja-JP">日本語</option>
+              <option value="zh-CN">中文</option>
             </select>
           </div>
 
@@ -240,11 +267,13 @@ async function loadPreferences() {
   try {
     const prefs = await apiGet<PreferencesResponse>("/api/settings/preferences");
     const nameEl = document.getElementById("input-user-name") as HTMLInputElement;
-    const honEl = document.getElementById("input-honorific") as HTMLSelectElement;
+    const honEl = document.getElementById("input-honorific") as HTMLInputElement;
     const calEl = document.getElementById("input-calendar-accounts") as HTMLTextAreaElement;
+    const langEl = document.getElementById("input-speech-lang") as HTMLSelectElement;
     if (nameEl) nameEl.value = prefs.user_name || "";
     if (honEl) honEl.value = prefs.honorific || "sir";
     if (calEl) calEl.value = prefs.calendar_accounts || "auto";
+    if (langEl) langEl.value = prefs.speech_lang || "en-US";
   } catch (e) {
     console.error("[settings] failed to load preferences:", e);
   }
@@ -304,9 +333,11 @@ function wireEvents() {
   // Save preferences
   document.getElementById("btn-save-prefs")?.addEventListener("click", async () => {
     const user_name = (document.getElementById("input-user-name") as HTMLInputElement).value.trim();
-    const honorific = (document.getElementById("input-honorific") as HTMLSelectElement).value;
+    const honorific = (document.getElementById("input-honorific") as HTMLInputElement).value;
     const calendar_accounts = (document.getElementById("input-calendar-accounts") as HTMLTextAreaElement).value.trim();
-    await apiPost("/api/settings/preferences", { user_name, honorific, calendar_accounts });
+    const speech_lang = (document.getElementById("input-speech-lang") as HTMLSelectElement).value;
+    await apiPost("/api/settings/preferences", { user_name, honorific, calendar_accounts, speech_lang });
+    document.dispatchEvent(new CustomEvent(SPEECH_LANG_EVENT, { detail: speech_lang }));
     await loadStatus();
   });
 
