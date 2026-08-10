@@ -183,12 +183,14 @@ INSTEAD SAY:
 
 ACTION SYSTEM:
 When you decide the user needs something DONE (not just discussed), include an action tag in your response:
-- [ACTION:SCREEN] — capture and describe what's visible on the user's screen. Use when user says "look at my screen", "what's running", "what do you see", etc. Do NOT use PROMPT_PROJECT for screen requests.
+- [ACTION:SCREEN] — capture and describe the user's display. ONLY for questions about the screen itself: what is visible, what is open, what app is running. It photographs the monitor, so it can tell you nothing about a calendar, an inbox, or anything else you cannot see on screen. Do NOT use PROMPT_PROJECT for screen requests.
+- [ACTION:CALENDAR] — re-read Apple Calendar. Use whenever the user asks about their schedule, meetings, appointments, or what the day holds, and the SCHEDULE section below is empty, stale, or does not answer them.
+- [ACTION:MAIL] — re-read Apple Mail. Use whenever the user asks about email, unread messages, or their inbox, and the EMAIL section below does not answer them.
 - [ACTION:BUILD] description — when user wants a project built. Claude Code does the work.
 - [ACTION:BROWSE] url or search query — when user wants to see a webpage or search result in Chrome
 - [ACTION:RESEARCH] detailed research brief — when user wants real research with real data. Claude Code will browse the web, find real listings/data, and create a report document. Give it a detailed brief of what to find.
 - [ACTION:OPEN_TERMINAL] — when user just wants a fresh Claude Code terminal with no specific project
-CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects.
+CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're LOOKING AT — ALWAYS use [ACTION:SCREEN] or let the fast action system handle it. NEVER use [ACTION:PROMPT_PROJECT] for screen requests. PROMPT_PROJECT is ONLY for working on code projects. Equally, never reach for SCREEN to answer a question about the calendar or the inbox — CALENDAR and MAIL are the actions that read those.
 
 - [ACTION:PROMPT_PROJECT] project_name ||| prompt — THIS IS YOUR MOST POWERFUL ACTION. Use it whenever the user wants to work on, jump into, resume, check on, or interact with ANY existing project. You connect directly to Claude Code in that project and can read its response. Craft a clear prompt based on what the user wants. Examples:
   "jump into client engine" → [ACTION:PROMPT_PROJECT] The Client Engine ||| What is the current state of this project? Summarize what was being worked on most recently.
@@ -814,7 +816,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|CALENDAR|MAIL)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -2249,6 +2251,10 @@ async def voice_handler(ws: WebSocket):
                                         response_text = "On it, sir."
                                     elif action_type == "research":
                                         response_text = "Looking into that now, sir."
+                                    elif action_type == "calendar":
+                                        response_text = "Checking your calendar now, sir."
+                                    elif action_type == "mail":
+                                        response_text = "Checking your inbox now, sir."
                                     else:
                                         response_text = "Right away, sir."
 
@@ -2349,6 +2355,10 @@ async def voice_handler(ws: WebSocket):
                                         asyncio.create_task(create_apple_note("JARVIS Note", target))
                                 elif embedded_action["action"] == "screen":
                                     asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "calendar":
+                                    asyncio.create_task(_lookup_and_report("calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state))
+                                elif embedded_action["action"] == "mail":
+                                    asyncio.create_task(_lookup_and_report("mail", _do_mail_lookup, ws, history=history, voice_state=voice_state))
                                 elif embedded_action["action"] == "read_note":
                                     # Read note in background and report back
                                     async def _read_and_report(search_term, _ws):
