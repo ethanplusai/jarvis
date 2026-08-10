@@ -33,19 +33,42 @@ async def _run_notes_script(script: str, timeout: float = 10) -> str:
 
 
 async def get_recent_notes(count: int = 10) -> list[dict]:
-    """Get most recent notes (title + creation date)."""
+    """Get most recent notes (title + creation date).
+
+    Individual notes are read defensively, because an unguarded property
+    access aborts the entire script and one unreadable note would otherwise
+    cost every note.
+
+    "folder" is best-effort and is currently empty in practice: on recent
+    macOS, `name of container of note` fails with -1728 for every note (the
+    container resolves, but as a bare `item` whose name is not exposed). Real
+    folder names are only reachable by walking `every note of folder`, which
+    means scanning the whole library on every call — not worth it while no
+    caller reads the field. Guarding the lookup rather than dropping it keeps
+    this self-healing if Apple restores the property.
+    """
+    # Bound the scan so a run of unreadable notes can't walk a whole library.
+    scan_limit = count + 50
     script = f'''
 tell application "Notes"
     set output to ""
     set allNotes to every note
-    set limit to count of allNotes
-    if limit > {count} then set limit to {count}
-    repeat with i from 1 to limit
-        set n to item i of allNotes
-        set nName to name of n
-        set nDate to creation date of n as string
-        set nFolder to name of container of n
-        set output to output & nName & "|||" & nDate & "|||" & nFolder & linefeed
+    set scanCount to count of allNotes
+    if scanCount > {scan_limit} then set scanCount to {scan_limit}
+    set collected to 0
+    repeat with i from 1 to scanCount
+        if collected >= {count} then exit repeat
+        try
+            set n to item i of allNotes
+            set nName to name of n
+            set nDate to creation date of n as string
+            set nFolder to ""
+            try
+                set nFolder to name of container of n
+            end try
+            set output to output & nName & "|||" & nDate & "|||" & nFolder & linefeed
+            set collected to collected + 1
+        end try
     end repeat
     return output
 end tell

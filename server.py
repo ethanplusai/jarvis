@@ -49,7 +49,7 @@ from memory import (
     create_note, search_notes, get_tasks_for_date, build_memory_context,
     format_tasks_for_voice, extract_memories, get_important_memories,
 )
-from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
+from notes_access import get_recent_notes, get_note_folders, read_note, search_notes_apple, create_apple_note
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 
@@ -2554,13 +2554,18 @@ async def api_settings_status():
     claude_installed = _shutil.which("claude") is not None
     # Probed concurrently — they touch three separate apps and don't depend on
     # each other, so the endpoint costs one budget rather than three.
-    # Calendar is probed by listing names rather than by fetching today's
-    # events: the latter fans a cold cache out over every calendar in batches
-    # of two, which alone outruns the budget on a well-populated account.
+    #
+    # Calendar and Notes are probed by listing containers, and their empty
+    # result is read as a failure. Both modules answer an unreachable app with
+    # the same empty value they use for "nothing found", so a probe that only
+    # checked for a raised exception would report an app as healthy while it
+    # was in fact failing. Listing also avoids the expensive paths: fetching
+    # today's events fans a cold cache out over every calendar in batches of
+    # two, which alone outruns the budget on a well-populated account.
     calendar_ok, mail_ok, notes_ok = await asyncio.gather(
         _probe_integration(get_calendar_names(), ok=bool),
         _probe_integration(get_unread_count()),
-        _probe_integration(get_recent_notes(count=1)),
+        _probe_integration(get_note_folders(), ok=bool),
     )
     memory_count = task_count = 0
     try: memory_count = len(get_important_memories(limit=9999))
