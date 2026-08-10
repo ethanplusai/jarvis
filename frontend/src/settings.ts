@@ -144,11 +144,14 @@ function buildPanelHTML(): string {
 
           <div class="settings-field">
             <label>Honorific</label>
-            <select id="input-honorific">
-              <option value="sir">Sir</option>
-              <option value="ma'am">Ma'am</option>
-              <option value="none">None</option>
-            </select>
+            <input type="text" id="input-honorific" placeholder="sir" list="honorific-suggestions" />
+            <datalist id="honorific-suggestions">
+              <option value="sir"></option>
+              <option value="ma'am"></option>
+              <option value="signore"></option>
+              <option value="señor"></option>
+              <option value="monsieur"></option>
+            </datalist>
           </div>
 
           <div class="settings-field">
@@ -264,7 +267,7 @@ async function loadPreferences() {
   try {
     const prefs = await apiGet<PreferencesResponse>("/api/settings/preferences");
     const nameEl = document.getElementById("input-user-name") as HTMLInputElement;
-    const honEl = document.getElementById("input-honorific") as HTMLSelectElement;
+    const honEl = document.getElementById("input-honorific") as HTMLInputElement;
     const calEl = document.getElementById("input-calendar-accounts") as HTMLTextAreaElement;
     const langEl = document.getElementById("input-speech-lang") as HTMLSelectElement;
     if (nameEl) nameEl.value = prefs.user_name || "";
@@ -330,7 +333,7 @@ function wireEvents() {
   // Save preferences
   document.getElementById("btn-save-prefs")?.addEventListener("click", async () => {
     const user_name = (document.getElementById("input-user-name") as HTMLInputElement).value.trim();
-    const honorific = (document.getElementById("input-honorific") as HTMLSelectElement).value;
+    const honorific = (document.getElementById("input-honorific") as HTMLInputElement).value;
     const calendar_accounts = (document.getElementById("input-calendar-accounts") as HTMLTextAreaElement).value.trim();
     const speech_lang = (document.getElementById("input-speech-lang") as HTMLSelectElement).value;
     await apiPost("/api/settings/preferences", { user_name, honorific, calendar_accounts, speech_lang });

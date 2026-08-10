@@ -88,6 +88,35 @@ SPEECH_LANGUAGES = {
 def _current_speech_lang() -> str:
     """The configured speech language, read live so the panel needs no restart."""
     return os.getenv("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG
+
+
+def _current_honorific() -> str:
+    """How the user has asked to be addressed. Read live, like the language."""
+    return os.getenv("HONORIFIC", "sir").strip() or "sir"
+
+
+# Spoken at the top of a session, so it is the one line a user hears every
+# single time. Left in English it announced the wrong language before JARVIS
+# had said anything else.
+GREETINGS = {
+    "en": ("Good morning", "Good afternoon", "Good evening"),
+    "it": ("Buongiorno", "Buon pomeriggio", "Buonasera"),
+    "es": ("Buenos días", "Buenas tardes", "Buenas noches"),
+    "fr": ("Bonjour", "Bon après-midi", "Bonsoir"),
+    "de": ("Guten Morgen", "Guten Tag", "Guten Abend"),
+    "pt": ("Bom dia", "Boa tarde", "Boa noite"),
+    "nl": ("Goedemorgen", "Goedemiddag", "Goedenavond"),
+    "ja": ("おはようございます", "こんにちは", "こんばんは"),
+    "zh": ("早上好", "下午好", "晚上好"),
+}
+
+
+def build_greeting(hour: int) -> str:
+    """The time-of-day greeting, in the configured language."""
+    slot = 0 if hour < 12 else (1 if hour < 17 else 2)
+    lang = _current_speech_lang().split("-")[0].lower()
+    words = GREETINGS.get(lang, GREETINGS["en"])
+    return f"{words[slot]}, {_current_honorific()}."
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -98,7 +127,7 @@ You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_nam
 
 VOICE & PERSONALITY:
 - British butler elegance with understated dry wit
-- Address {user_name} as "sir" naturally — not every sentence, but regularly
+- Address {user_name} as "{honorific}" naturally — not every sentence, but regularly. Use that word exactly as written, in every language: it is how he has asked to be addressed, not a word to translate or inflect. The examples below happen to say "sir"; say "{honorific}" instead.
 - Never say "How can I help you?" or "Is there anything else?" — just act
 - Deliver bad news calmly, like reporting weather: "We have a slight problem, sir."
 - Your humor is observational, never jokes: state facts and let implications land
@@ -719,6 +748,18 @@ STT_CORRECTIONS = {
     r"\bquad\b": "Claude",
     r"\btravis\b": "JARVIS",
     r"\bjarves\b": "JARVIS",
+    # Non-English recognisers hear an English name badly. These are the exact
+    # forms observed in the logs, not guesses: an Italian session produced
+    # "arbiss", "e gli arbis" and "hey Yaris" while the user was plainly
+    # saying JARVIS. Matched as whole words so ordinary vocabulary is safe.
+    r"\bgli arbis\b": "JARVIS",
+    r"\barbiss?\b": "JARVIS",
+    r"\bgiarvis\b": "JARVIS",
+    r"\bjarvi\b": "JARVIS",
+    # "yaris" is a Toyota, and a common one — correcting it outright would
+    # rewrite "la mia auto Yaris". Only fix it where the sentence is plainly
+    # addressing someone.
+    r"\b(hey|hi|ehi|ciao|ok|senti)\s+yaris\b": r"\1 JARVIS",
 }
 
 
@@ -1232,6 +1273,7 @@ async def generate_response(
         dispatch_context=dispatch_registry.format_for_prompt(),
         known_projects=format_projects_for_prompt(projects),
         user_name=USER_NAME,
+        honorific=_current_honorific(),
         project_dir=PROJECT_DIR,
     )
     # The prompt above is written in English and would answer an Italian
@@ -1243,9 +1285,13 @@ async def generate_response(
     speech_lang = _current_speech_lang()
     if not speech_lang.startswith("en"):
         language = SPEECH_LANGUAGES.get(speech_lang, speech_lang)
+        honorific = _current_honorific()
         system += (
             f"\n\nLANGUAGE: The user speaks {language}. Write every spoken reply in {language}, "
-            f"keeping the same dry, economical butler voice."
+            f"keeping the same dry, economical butler voice. One exception: address him as "
+            f'"{honorific}" — that exact word, letter for letter. It is his chosen form of '
+            f"address, not vocabulary to translate into {language} or to inflect for gender. "
+            f'Writing anything other than "{honorific}" is an error.'
         )
 
     if lookup_status:
@@ -2030,13 +2076,7 @@ async def voice_handler(ws: WebSocket):
     try:
         # ── Greeting — always start in conversation mode ──
         now = datetime.now()
-        hour = now.hour
-        if hour < 12:
-            greeting = "Good morning, sir."
-        elif hour < 17:
-            greeting = "Good afternoon, sir."
-        else:
-            greeting = "Good evening, sir."
+        greeting = build_greeting(now.hour)
 
         global _last_greeting_time
         should_greet = (time.time() - _last_greeting_time) > 60
