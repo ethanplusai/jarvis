@@ -21,6 +21,7 @@ let isMuted = false;
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
+const captionEl = document.getElementById("jarvis-caption")!;
 
 function showError(msg: string) {
   errorEl.textContent = msg;
@@ -28,6 +29,28 @@ function showError(msg: string) {
   setTimeout(() => {
     errorEl.style.opacity = "0";
   }, 5000);
+}
+
+let captionTimer: number | undefined;
+
+/**
+ * Put what JARVIS said on screen.
+ *
+ * Shown whether or not TTS produced audio: with a voice it reads as
+ * subtitles, and without one it is the only way to see the reply — the
+ * response used to reach nothing but the devtools console.
+ */
+function showCaption(text: unknown) {
+  if (typeof text !== "string" || !text.trim()) return;
+  clearTimeout(captionTimer);
+  captionEl.textContent = text;
+  captionEl.style.opacity = "1";
+  // Hold long enough to read the line, since a caption may be all the user
+  // gets. Replies are a sentence or two, so length is a fair proxy.
+  const holdMs = Math.min(20000, 4000 + text.length * 60);
+  captionTimer = window.setTimeout(() => {
+    captionEl.style.opacity = "0";
+  }, holdMs);
 }
 
 function updateStatus(state: State) {
@@ -123,6 +146,7 @@ socket.onMessage((msg) => {
     }
     // Log text for debugging
     if (msg.text) console.log("[JARVIS]", msg.text);
+    showCaption(msg.text);
   } else if (type === "status") {
     const state = msg.state as string;
     if (state === "thinking" && currentState !== "thinking") {
@@ -137,6 +161,7 @@ socket.onMessage((msg) => {
   } else if (type === "text") {
     // Text fallback when TTS fails
     console.log("[JARVIS]", msg.text);
+    showCaption(msg.text);
   } else if (type === "task_spawned") {
     console.log("[task]", "spawned:", msg.task_id, msg.prompt);
   } else if (type === "task_complete") {
