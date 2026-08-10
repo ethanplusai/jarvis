@@ -103,13 +103,59 @@ function transition(newState: State) {
 // Voice input
 // ---------------------------------------------------------------------------
 
+/**
+ * Fragment accumulation.
+ *
+ * Chrome closes a recognition segment at every pause, so a sentence spoken
+ * with any hesitation arrives as several "final" results. Sending each one
+ * immediately made JARVIS answer half a thought and then receive the rest as
+ * a separate question. Instead, collect the pieces and send once the speaker
+ * has actually stopped.
+ */
+const UTTERANCE_GAP_MS = 1000;
+// A pause never arrives while someone is dictating steadily, so cap the wait
+// rather than let a long sentence hold the whole conversation open.
+const UTTERANCE_MAX_MS = 6000;
+
+let pendingFragments: string[] = [];
+let gapTimer: number | undefined;
+let maxTimer: number | undefined;
+
+function discardUtterance() {
+  clearTimeout(gapTimer);
+  clearTimeout(maxTimer);
+  gapTimer = undefined;
+  maxTimer = undefined;
+  pendingFragments = [];
+}
+
+function flushUtterance() {
+  clearTimeout(gapTimer);
+  clearTimeout(maxTimer);
+  gapTimer = undefined;
+  maxTimer = undefined;
+
+  const text = pendingFragments.join(" ").replace(/\s+/g, " ").trim();
+  pendingFragments = [];
+  if (!text) return;
+
+  socket.send({ type: "transcript", text, isFinal: true });
+  transition("thinking");
+}
+
 const voiceInput = createVoiceInput(
   (text: string) => {
-    // Cancel any current JARVIS response before sending new input
+    // Cancel any current JARVIS response before sending new input. Done on the
+    // first fragment, not at flush time: cutting him off is what the user
+    // wanted the moment they started talking.
     audioPlayer.stop();
-    // User spoke — send transcript
-    socket.send({ type: "transcript", text, isFinal: true });
-    transition("thinking");
+
+    pendingFragments.push(text);
+    clearTimeout(gapTimer);
+    gapTimer = window.setTimeout(flushUtterance, UTTERANCE_GAP_MS);
+    if (maxTimer === undefined) {
+      maxTimer = window.setTimeout(flushUtterance, UTTERANCE_MAX_MS);
+    }
   },
   (msg: string) => {
     showError(msg);
@@ -236,6 +282,8 @@ btnMute.addEventListener("click", (e) => {
   isMuted = !isMuted;
   btnMute.classList.toggle("muted", isMuted);
   if (isMuted) {
+    // Half-spoken words must not arrive a second after the user silenced him.
+    discardUtterance();
     voiceInput.pause();
     transition("idle");
   } else {
