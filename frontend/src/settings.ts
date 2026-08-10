@@ -14,6 +14,8 @@ interface StatusResponse {
   calendar_accessible: boolean;
   mail_accessible: boolean;
   notes_accessible: boolean;
+  vault_accessible: boolean;
+  vault_notes: number;
   memory_count: number;
   task_count: number;
   server_port: number;
@@ -121,6 +123,7 @@ function buildPanelHTML(): string {
             <div class="status-row"><span class="status-dot" id="status-calendar"></span><span>Apple Calendar</span></div>
             <div class="status-row"><span class="status-dot" id="status-mail"></span><span>Apple Mail</span></div>
             <div class="status-row"><span class="status-dot" id="status-notes"></span><span>Apple Notes</span></div>
+            <div class="status-row"><span class="status-dot" id="status-vault"></span><span>Obsidian Vault</span><span class="status-detail" id="status-vault-detail"></span></div>
             <div class="status-row"><span class="status-dot" id="status-server"></span><span>Server</span><span class="status-detail" id="status-server-detail"></span></div>
           </div>
         </section>
@@ -209,6 +212,14 @@ async function loadStatus() {
     setDotStatus("status-calendar", status.calendar_accessible ? "green" : "red");
     setDotStatus("status-mail", status.mail_accessible ? "green" : "red");
     setDotStatus("status-notes", status.notes_accessible ? "green" : "red");
+    // An unconfigured vault is off rather than red — it is opt-in, not broken.
+    setDotStatus("status-vault", status.vault_accessible ? "green" : "off");
+    const vaultDetail = document.getElementById("status-vault-detail");
+    if (vaultDetail) {
+      vaultDetail.textContent = status.vault_accessible
+        ? `${status.vault_notes} notes`
+        : "set OBSIDIAN_VAULT";
+    }
     setDotStatus("status-server", "green");
 
     const serverDetail = document.getElementById("status-server-detail");
