@@ -65,6 +65,29 @@ FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
+# BCP-47 tag the browser's speech recognition listens in, and the language
+# JARVIS is told to reply in. Read per-request rather than cached, so changing
+# it in the settings panel takes effect without a restart.
+DEFAULT_SPEECH_LANG = "en-US"
+# Offered in the settings panel, mapped to the name used to tell JARVIS which
+# language to answer in.
+SPEECH_LANGUAGES = {
+    "en-US": "English",
+    "en-GB": "English",
+    "it-IT": "Italian",
+    "es-ES": "Spanish",
+    "fr-FR": "French",
+    "de-DE": "German",
+    "pt-BR": "Portuguese",
+    "nl-NL": "Dutch",
+    "ja-JP": "Japanese",
+    "zh-CN": "Chinese",
+}
+
+
+def _current_speech_lang() -> str:
+    """The configured speech language, read live so the panel needs no restart."""
+    return os.getenv("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -1211,6 +1234,20 @@ async def generate_response(
         user_name=USER_NAME,
         project_dir=PROJECT_DIR,
     )
+    # The prompt above is written in English and would answer an Italian
+    # question in English, which makes the speech-language setting only half
+    # work. Kept to a bare language directive on purpose: wording that also
+    # discussed action selection measurably weakened the language adherence it
+    # was appended to enforce. Action routing is less reliable outside English
+    # regardless — see the non-English caveat in the README.
+    speech_lang = _current_speech_lang()
+    if not speech_lang.startswith("en"):
+        language = SPEECH_LANGUAGES.get(speech_lang, speech_lang)
+        system += (
+            f"\n\nLANGUAGE: The user speaks {language}. Write every spoken reply in {language}, "
+            f"keeping the same dry, economical butler voice."
+        )
+
     if lookup_status:
         system += f"\n\nACTIVE LOOKUPS:\n{lookup_status}\nIf asked about progress, report this status."
 
@@ -2509,10 +2546,11 @@ class PreferencesUpdate(BaseModel):
     user_name: str = ""
     honorific: str = "sir"
     calendar_accounts: str = "auto"
+    speech_lang: str = DEFAULT_SPEECH_LANG
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "SPEECH_LANG"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2592,6 +2630,7 @@ async def api_get_preferences():
         "user_name": env_dict.get("USER_NAME", ""),
         "honorific": env_dict.get("HONORIFIC", "sir"),
         "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
+        "speech_lang": env_dict.get("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG,
     }
 
 @app.post("/api/settings/preferences")
@@ -2599,6 +2638,7 @@ async def api_save_preferences(body: PreferencesUpdate):
     _write_env_key("USER_NAME", body.user_name)
     _write_env_key("HONORIFIC", body.honorific)
     _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
+    _write_env_key("SPEECH_LANG", body.speech_lang or DEFAULT_SPEECH_LANG)
     return {"success": True}
 
 # ---------------------------------------------------------------------------

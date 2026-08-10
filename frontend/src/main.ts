@@ -8,7 +8,7 @@
 import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer } from "./voice";
 import { createSocket } from "./ws";
-import { openSettings, checkFirstTimeSetup } from "./settings";
+import { openSettings, checkFirstTimeSetup, SPEECH_LANG_EVENT } from "./settings";
 import "./style.css";
 
 // ---------------------------------------------------------------------------
@@ -173,11 +173,39 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
+/**
+ * Read the speech language chosen in the settings panel.
+ *
+ * Resolved before the microphone opens so the first session is built in the
+ * right language: switching a live session means tearing it down and racing
+ * for the microphone, which is worth avoiding on every page load. Bounded, so
+ * an unreachable server costs a moment rather than the microphone.
+ */
+async function fetchSpeechLanguage(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/settings/preferences", {
+      signal: AbortSignal.timeout(2000),
+    });
+    const prefs = (await res.json()) as { speech_lang?: string };
+    return prefs.speech_lang || null;
+  } catch {
+    return null; // Server not ready — keep the default language.
+  }
+}
+
 // Start listening after a brief delay for the orb to render
-setTimeout(() => {
+setTimeout(async () => {
+  const lang = await fetchSpeechLanguage();
+  if (lang) voiceInput.setLanguage(lang);
   voiceInput.start();
   transition("listening");
 }, 1000);
+
+// Saving the setting re-tunes the running session — no reload needed.
+document.addEventListener(SPEECH_LANG_EVENT, (e) => {
+  const lang = (e as CustomEvent<string>).detail;
+  if (lang) voiceInput.setLanguage(lang);
+});
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
 function ensureAudioContext() {
