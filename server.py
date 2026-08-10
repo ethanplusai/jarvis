@@ -42,7 +42,7 @@ from pydantic import BaseModel
 from actions import execute_action, monitor_build, open_terminal, open_browser, open_claude_in_project, _generate_project_name, prompt_existing_terminal, applescript_escape
 from work_mode import WorkSession, is_casual_question
 from screen import get_active_windows, take_screenshot, describe_screen, format_windows_for_context
-from calendar_access import get_todays_events, get_upcoming_events, get_next_event, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
+from calendar_access import get_todays_events, get_upcoming_events, get_next_event, get_calendar_names, format_events_for_context, format_schedule_summary, refresh_cache as refresh_calendar_cache
 from mail_access import get_unread_count, get_unread_messages, get_recent_messages, search_mail, read_message, format_unread_summary, format_messages_for_context, format_messages_for_voice
 from memory import (
     remember, recall, get_open_tasks, create_task, complete_task, search_tasks,
@@ -67,6 +67,9 @@ FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
+# Per-integration ceiling for the /api/settings/status probes, so the settings
+# panel stays responsive when Calendar/Mail/Notes are slow or unauthorized.
+_SETTINGS_PROBE_TIMEOUT = 8.0
 
 DESKTOP_PATH = Path.home() / "Desktop"
 
@@ -2530,18 +2533,35 @@ async def api_test_fish(body: KeyTest):
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
+async def _probe_integration(coro, ok=lambda _: True, timeout: float = _SETTINGS_PROBE_TIMEOUT) -> bool:
+    """Return whether a macOS integration answered within the time budget.
+
+    Individual osascript calls are already bounded, but the totals are not, and
+    before the user grants TCC permission they block on a system dialog. The
+    settings panel only needs a reachable/unreachable flag, so cap the wait and
+    report a slow integration the same as a broken one.
+    """
+    try:
+        return bool(ok(await asyncio.wait_for(coro, timeout=timeout)))
+    except Exception:
+        return False
+
+
 @app.get("/api/settings/status")
 async def api_settings_status():
     import shutil as _shutil
     _, env_dict = _read_env()
     claude_installed = _shutil.which("claude") is not None
-    calendar_ok = mail_ok = notes_ok = False
-    try: await get_todays_events(); calendar_ok = True
-    except Exception: pass
-    try: await get_unread_count(); mail_ok = True
-    except Exception: pass
-    try: await get_recent_notes(count=1); notes_ok = True
-    except Exception: pass
+    # Probed concurrently — they touch three separate apps and don't depend on
+    # each other, so the endpoint costs one budget rather than three.
+    # Calendar is probed by listing names rather than by fetching today's
+    # events: the latter fans a cold cache out over every calendar in batches
+    # of two, which alone outruns the budget on a well-populated account.
+    calendar_ok, mail_ok, notes_ok = await asyncio.gather(
+        _probe_integration(get_calendar_names(), ok=bool),
+        _probe_integration(get_unread_count()),
+        _probe_integration(get_recent_notes(count=1)),
+    )
     memory_count = task_count = 0
     try: memory_count = len(get_important_memories(limit=9999))
     except Exception: pass
