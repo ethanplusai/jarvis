@@ -2649,12 +2649,18 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8340, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on changes")
     parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem")
+    parser.add_argument(
+        "--no-ssl", action="store_true",
+        help="Serve plain HTTP even when key.pem/cert.pem exist. Browsers treat "
+             "localhost as a secure context either way, so the microphone still "
+             "works — without a self-signed certificate warning on every visit.",
+    )
     args = parser.parse_args()
 
     # Auto-detect SSL certs
     cert_file = Path(__file__).parent / "cert.pem"
     key_file = Path(__file__).parent / "key.pem"
-    use_ssl = args.ssl or (cert_file.exists() and key_file.exists())
+    use_ssl = not args.no_ssl and (args.ssl or (cert_file.exists() and key_file.exists()))
 
     proto = "https" if use_ssl else "http"
     ws_proto = "wss" if use_ssl else "ws"
