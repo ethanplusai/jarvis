@@ -17,9 +17,12 @@ from pathlib import Path
 
 log = logging.getLogger("jarvis.tts")
 
-# WAV, which every browser's decodeAudioData accepts. The `say` default is
-# AIFF-C, which Chrome does not reliably decode.
-_DATA_FORMAT = "LEI16@22050"
+# AAC in an MP4 container. The `say` default is AIFF-C, which Chrome does not
+# reliably decode; uncompressed WAV decodes fine but is roughly five times the
+# size, and since every reply crosses a WebSocket as base64, a long one built
+# frames over a megabyte. AAC-LC is decoded by every browser that runs this app.
+_FILE_FORMAT = "m4af"
+_DATA_FORMAT = "aac"
 
 # Preferred voice per language, used when installed. Everything else falls back
 # to the first voice matching the language. Daniel is the British voice, which
@@ -110,16 +113,21 @@ async def resolve_voice(speech_lang: str, configured: str = "") -> str | None:
 
 
 async def speak(text: str, voice: str | None = None, timeout: float = 30) -> bytes | None:
-    """Render text to WAV bytes with the macOS speech synthesiser."""
+    """Render text to AAC bytes with the macOS speech synthesiser."""
     clean = _SAY_COMMAND.sub("", text).strip()
     if not clean:
         return None
 
     with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "speech.wav"
+        out = Path(tmp) / "speech.m4a"
         # Arguments are passed directly to exec, never through a shell, so the
         # text cannot break out into a command.
-        args = ["say", "--data-format=" + _DATA_FORMAT, "-o", str(out)]
+        args = [
+            "say",
+            "--file-format=" + _FILE_FORMAT,
+            "--data-format=" + _DATA_FORMAT,
+            "-o", str(out),
+        ]
         if voice:
             args += ["-v", voice]
         args += ["--", clean]
