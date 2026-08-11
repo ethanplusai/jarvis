@@ -1133,7 +1133,11 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
                 try:
                     summary = await anthropic_client.messages.create(
                         model="claude-haiku-4-5-20251001",
-                        max_tokens=150,
+                        # Sized for the spoken summary in any language, not just
+                        # English: the same two sentences cost noticeably more
+                        # tokens in Italian, and the old ceiling cut them mid-word.
+                        # The prompt caps the length; this is only a safety net.
+                        max_tokens=400,
                         system=(
                             "You are JARVIS reporting back on what you found or built in a project. "
                             "Speak in first person — 'I found', 'I built', 'I reviewed'. "
@@ -1205,7 +1209,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
             try:
                 summary = await anthropic_client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=100,
+                    max_tokens=250,
                     system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'." + _language_directive(),
                     messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
                 )
@@ -2363,7 +2367,7 @@ async def voice_handler(ws: WebSocket):
                             try:
                                 summary = await anthropic_client.messages.create(
                                     model="claude-haiku-4-5-20251001",
-                                    max_tokens=100,
+                                    max_tokens=250,
                                     system=(
                                         f"You are JARVIS reporting to the user ({USER_NAME}). Summarize what happened in 1-2 sentences. "
                                         "Speak in first person — 'I built', 'I found', 'I set up'. "
