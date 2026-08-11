@@ -102,6 +102,26 @@ async def _refresh_phrases() -> None:
         log.warning(f"Could not prepare phrases for {lang}: {e}")
 
 
+def _language_directive() -> str:
+    """A sentence appended to any prompt whose output is spoken to the user.
+
+    The main conversation gets its language from the system prompt, but the
+    summarisers that relay Claude Code's work do not: they were handed English
+    subprocess output with an English-only prompt, so a session in Italian
+    turned English the moment it entered work mode. Empty for English, so
+    nothing changes for the default configuration.
+    """
+    lang = _current_speech_lang()
+    if lang.startswith("en"):
+        return ""
+    language = SPEECH_LANGUAGES.get(lang, lang)
+    return (
+        f" Write your reply in {language}, even though the material you are "
+        f'summarising is in English. Address him as "{_current_honorific()}" — '
+        f"that exact word, never translated."
+    )
+
+
 def _current_honorific() -> str:
     """How the user has asked to be addressed. Read live, like the language."""
     return os.getenv("HONORIFIC", "sir").strip() or "sir"
@@ -1123,6 +1143,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
                             "End by asking how the user wants to proceed. "
                             "NEVER read out URLs or localhost addresses. NEVER say 'Claude Code'. "
                             "2-3 sentences max. No markdown. Natural spoken voice."
+                            + _language_directive()
                         ),
                         messages=[{"role": "user", "content": f"Project: {project_name}\nClaude Code reported:\n{full_response[:3000]}"}],
                     )
@@ -1185,7 +1206,7 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
                 summary = await anthropic_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=100,
-                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'.",
+                    system="You are JARVIS. Summarize what you just completed in 1 sentence. First person — 'I built', 'I set up'. No markdown. Never say 'Claude Code'." + _language_directive(),
                     messages=[{"role": "user", "content": f"Claude Code completed:\n{full_response[:2000]}"}],
                 )
                 msg = summary.content[0].text
@@ -2350,6 +2371,7 @@ async def voice_handler(ws: WebSocket):
                                         "NEVER give instructions like 'go ahead and build' or 'set up the frontend' — those are NOT for the user. "
                                         "NEVER say 'Claude Code'. NEVER output [ACTION:...] tags. "
                                         "NEVER read out URLs. No markdown. British precision."
+                                        + _language_directive()
                                     ),
                                     messages=[{"role": "user", "content": f"Claude Code said:\n{full_response[:2000]}"}],
                                 )
