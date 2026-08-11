@@ -93,8 +93,20 @@ def init_db():
 # Memories — facts JARVIS learns
 # ---------------------------------------------------------------------------
 
-def remember(content: str, mem_type: str = "fact", source: str = "", importance: int = 5) -> int:
-    """Store a memory. Returns the memory ID."""
+def remember(
+    content: str,
+    mem_type: str = "fact",
+    source: str = "",
+    importance: int = 5,
+    supersedes: list[int] | None = None,
+) -> int:
+    """Store a memory, optionally retiring the ones it replaces.
+
+    Without `supersedes` a correction lands *beside* the mistake rather than
+    over it, and both are then recalled as fact. This database held "the user
+    is called Martina Bologna" — invented, never said — next to the correction
+    naming him Luca, and went on addressing him by the wrong one.
+    """
     conn = _get_db()
     cur = conn.execute(
         "INSERT INTO memories (type, content, source, importance, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -106,26 +118,70 @@ def remember(content: str, mem_type: str = "fact", source: str = "", importance:
         "INSERT INTO memory_fts (rowid, content, type, source) VALUES (?, ?, ?, ?)",
         (mem_id, content, mem_type, source)
     )
+
+    # Retire the superseded memories in the same transaction, so a crash can
+    # never leave both the old and the new fact live at once.
+    for old_id in supersedes or []:
+        if old_id == mem_id:
+            continue
+        row = conn.execute("SELECT content FROM memories WHERE id = ?", (old_id,)).fetchone()
+        if not row:
+            continue
+        conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (old_id,))
+        conn.execute("DELETE FROM memories WHERE id = ?", (old_id,))
+        log.info(f"Superseded memory #{old_id}: {row['content'][:60]}")
+
     conn.commit()
     conn.close()
     log.info(f"Stored memory [{mem_type}]: {content[:60]}")
     return mem_id
 
 
+def forget(mem_id: int) -> bool:
+    """Delete one memory outright. Returns whether it existed."""
+    conn = _get_db()
+    row = conn.execute("SELECT content FROM memories WHERE id = ?", (mem_id,)).fetchone()
+    if row:
+        conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (mem_id,))
+        conn.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
+        conn.commit()
+        log.info(f"Forgot memory #{mem_id}: {row['content'][:60]}")
+    conn.close()
+    return bool(row)
+
+
 def _sanitize_fts_query(query: str) -> str:
-    """Clean a query string for FTS5 — remove special characters that break it."""
-    # Remove apostrophes, quotes, and FTS operators
-    cleaned = query.replace("'", "").replace('"', "").replace("*", "").replace("-", " ")
-    # Take meaningful words only
-    words = [w for w in cleaned.split() if len(w) > 2]
-    if not words:
+    """Clean a query string for FTS5 — remove characters that break it.
+
+    Terms are chosen longest-first rather than in the order they were spoken.
+    A sentence leads with connectives and reaches its subject late, so taking
+    the first few words searched on "sbagli, ancora, non, esiste, nessuna" and
+    dropped the names the sentence was actually about — and matched nothing.
+    Longer words are the more distinctive ones and make better search terms.
+
+    Punctuation is stripped from each token too: "Bologna." and "Bologna" are
+    different terms to FTS, and the trailing one never matched.
+    """
+    import re as _re
+
+    seen: list[str] = []
+    for raw in query.split():
+        word = _re.sub(r"[^\w]", "", raw, flags=_re.UNICODE)
+        if len(word) > 2 and word.lower() not in (w.lower() for w in seen):
+            seen.append(word)
+    if not seen:
         return ""
-    # Join with OR for broader matching
-    return " OR ".join(words[:5])
+    terms = sorted(seen, key=len, reverse=True)[:10]
+    # OR keeps it a broad relevance search; FTS ranks the closest matches first.
+    return " OR ".join(terms)
 
 
-def recall(query: str, limit: int = 5) -> list[dict]:
-    """Search memories by relevance. Returns most relevant matches."""
+def recall(query: str, limit: int = 5, touch: bool = True) -> list[dict]:
+    """Search memories by relevance. Returns most relevant matches.
+
+    `touch` records the read. Internal lookups pass False so that housekeeping
+    doesn't inflate the access counts used to judge which memories matter.
+    """
     fts_query = _sanitize_fts_query(query)
     if not fts_query:
         return []
@@ -143,11 +199,12 @@ def recall(query: str, limit: int = 5) -> list[dict]:
         results = []
 
     # Update access counts
-    for r in results:
-        conn.execute(
-            "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
-            (time.time(), r["id"])
-        )
+    if touch:
+        for r in results:
+            conn.execute(
+                "UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?",
+                (time.time(), r["id"])
+            )
     conn.commit()
     conn.close()
     return [dict(r) for r in results]
@@ -411,34 +468,83 @@ async def extract_memories(user_text: str, jarvis_response: str, anthropic_clien
     if not anthropic_client or len(user_text) < 15:
         return []
 
+    # Show the model what is already on file about this topic, so a correction
+    # can replace the thing it corrects. Fetched with FTS — no API call — and
+    # folded into the extraction request that was happening anyway, so
+    # superseding costs nothing per turn.
+    existing = recall(user_text, limit=6, touch=False)
+    offered = {m["id"]: m["content"] for m in existing}
+    known = (
+        "\n\nAlready stored:\n"
+        + "\n".join(f'#{i}: {c}' for i, c in offered.items())
+        + "\nIf a new fact corrects or replaces any of these, list their numbers "
+          'in "supersedes". If one of them is now wrong and you have nothing new '
+          'to add, return {"type": "retraction", "supersedes": [ids]} on its own. '
+          "Only list a number when the old entry is actually wrong or out of "
+          "date — not merely related."
+        if offered else ""
+    )
+
     try:
         response = await anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=400,
             system=(
                 "Extract facts worth remembering from this conversation. "
                 "Only extract CONCRETE facts: preferences, decisions, names, dates, plans, goals. "
                 "NOT opinions, greetings, or casual chat. "
-                "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10}] "
+                "Record only what the user stated or confirmed — never a detail that "
+                "appears for the first time in JARVIS's own reply, which may be mistaken. "
+                "Return JSON array of objects: [{\"type\": \"fact|preference|project|person|decision\", \"content\": \"...\", \"importance\": 1-10, \"supersedes\": [ids]}] "
                 "Return [] if nothing worth remembering. Be very selective."
+                + known
             ),
             messages=[{"role": "user", "content": f"User: {user_text}\nJARVIS: {jarvis_response}"}],
         )
 
         text = response.content[0].text.strip()
+        # Strip a markdown fence before parsing. The old check was
+        # `startswith("[")`, so every reply the model chose to wrap in ```json
+        # was discarded without a word — and it wraps often. Extraction has
+        # been dropping results silently for as long as that check existed.
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
         # Parse JSON
         if text.startswith("["):
             items = json.loads(text)
             stored = []
             for item in items:
-                if isinstance(item, dict) and "content" in item:
-                    remember(
-                        content=item["content"],
-                        mem_type=item.get("type", "fact"),
-                        source=user_text[:50],
-                        importance=item.get("importance", 5),
-                    )
-                    stored.append(item["content"])
+                if not isinstance(item, dict):
+                    continue
+                # Only ever retire something we put in front of the model. A
+                # hallucinated id must not be able to delete an unrelated memory
+                # it never saw.
+                raw = item.get("supersedes") or []
+                supersedes = [i for i in raw if isinstance(i, int) and i in offered]
+                if len(supersedes) != len(raw):
+                    log.warning(f"Ignored out-of-scope supersedes: {raw}")
+
+                if not item.get("content"):
+                    # A retraction: something on file is wrong and there is
+                    # nothing to put in its place. Without this, a stale memory
+                    # can only be corrected by a turn that also happens to
+                    # produce a new fact — so a wrong one outlives every
+                    # correction the user has already made.
+                    for old_id in supersedes:
+                        forget(old_id)
+                    continue
+
+                remember(
+                    content=item["content"],
+                    mem_type=item.get("type", "fact"),
+                    source=user_text[:50],
+                    importance=item.get("importance", 5),
+                    supersedes=supersedes,
+                )
+                stored.append(item["content"])
             return stored
     except Exception as e:
         log.debug(f"Memory extraction failed: {e}")

@@ -17,6 +17,7 @@ __pycache__/
 *.db
 data/*.jsonl
 data/active_session.json
+data/phrases-*.json
 data/.jarvis_output.txt
 
 # Certificates
@@ -39,3 +40,4 @@ desktop-overlay/node_modules/
 context/
 *.db-shm
 *.db-wal
+data/*.bak-*
