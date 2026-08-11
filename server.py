@@ -2015,13 +2015,33 @@ async def handle_browse(text: str, target: str) -> str:
 async def handle_research(text: str, target: str, client: anthropic.AsyncAnthropic) -> str:
     """Deep research with Opus — write results to HTML, open in browser."""
     try:
-        research_response = await client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2000,
+        research_response = await client.beta.messages.create(
+            model="claude-opus-5",
+            # Thinking is on by default on Opus 5 and shares this budget with the
+            # answer, so a limit sized for prose alone truncates the report.
+            max_tokens=16000,
+            # Opus 5's safety classifiers can decline a request outright. Letting
+            # the API re-run it elsewhere turns a dead end into an answer, and
+            # "default" routes by refusal category rather than pinning a model
+            # that will eventually be retired.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
             system=f"You are JARVIS, researching a topic for {USER_NAME}. Be thorough, organized, and cite sources where possible.",
             messages=[{"role": "user", "content": f"Research this thoroughly:\n\n{target}"}],
         )
-        research_text = research_response.content[0].text
+
+        if research_response.stop_reason == "refusal":
+            log.warning(f"Research declined for: {target[:80]}")
+            return phrase("research.declined")
+
+        # Take the text blocks rather than content[0]: with thinking on, the
+        # first block is the reasoning, which carries no .text at all.
+        research_text = "\n".join(
+            b.text for b in research_response.content if b.type == "text"
+        ).strip()
+        if not research_text:
+            log.warning("Research returned no text content")
+            return phrase("research.empty")
 
         import html as _html
         html_content = f"""<!DOCTYPE html>

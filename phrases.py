@@ -62,6 +62,8 @@ CATALOGUE: dict[str, str] = {
     # Research
     "research.complete": "Research is complete, {honorific}. The report is open in your browser.",
     "research.timed_out": "Research timed out, {honorific}.",
+    "research.declined": "I'm not able to research that one, {honorific}.",
+    "research.empty": "That research came back empty, {honorific}.",
 
     # Lookups
     "lookup.slow": "That {kind} check is taking too long, {honorific}. The data may still be syncing.",
