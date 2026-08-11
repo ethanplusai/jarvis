@@ -31,6 +31,14 @@ interface PreferencesResponse {
   honorific: string;
   calendar_accounts: string;
   speech_lang: string;
+  tts_backend: string;
+  macos_voice: string;
+}
+
+interface VoicesResponse {
+  voices: { name: string; lang: string }[];
+  matching_language: number;
+  resolved: string | null;
 }
 
 /**
@@ -171,6 +179,24 @@ function buildPanelHTML(): string {
           </div>
 
           <div class="settings-field">
+            <label>Voice</label>
+            <select id="input-tts-backend">
+              <option value="auto">Auto — Fish Audio if configured, else macOS</option>
+              <option value="fish">Fish Audio (the JARVIS voice)</option>
+              <option value="macos">macOS (free, offline)</option>
+              <option value="none">Silent — captions only</option>
+            </select>
+          </div>
+
+          <div class="settings-field" id="field-macos-voice">
+            <label>macOS Voice</label>
+            <div class="settings-input-row">
+              <select id="input-macos-voice"></select>
+              <button class="settings-btn" id="btn-preview-voice">Preview</button>
+            </div>
+          </div>
+
+          <div class="settings-field">
             <label>Calendar Accounts</label>
             <textarea id="input-calendar-accounts" rows="2" placeholder="auto (or comma-separated emails)"></textarea>
           </div>
@@ -274,8 +300,44 @@ async function loadPreferences() {
     if (honEl) honEl.value = prefs.honorific || "sir";
     if (calEl) calEl.value = prefs.calendar_accounts || "auto";
     if (langEl) langEl.value = prefs.speech_lang || "en-US";
+
+    const backendEl = document.getElementById("input-tts-backend") as HTMLSelectElement;
+    if (backendEl) backendEl.value = prefs.tts_backend || "auto";
+    await loadVoices(prefs.macos_voice || "");
+    updateVoiceFieldVisibility();
   } catch (e) {
     console.error("[settings] failed to load preferences:", e);
+  }
+}
+
+/** Only offer the voice picker when a macOS voice could actually be used. */
+function updateVoiceFieldVisibility() {
+  const backend = (document.getElementById("input-tts-backend") as HTMLSelectElement)?.value;
+  const field = document.getElementById("field-macos-voice");
+  if (field) field.style.display = backend === "fish" || backend === "none" ? "none" : "";
+}
+
+async function loadVoices(selected: string) {
+  const voiceEl = document.getElementById("input-macos-voice") as HTMLSelectElement;
+  if (!voiceEl) return;
+  try {
+    const data = await apiGet<VoicesResponse>("/api/settings/voices");
+    // "Automatic" first, labelled with what that currently resolves to, so the
+    // default is not a mystery.
+    const auto = data.resolved ? `Automatic (${data.resolved})` : "Automatic";
+    voiceEl.innerHTML =
+      `<option value="">${auto}</option>` +
+      data.voices
+        .map((v, i) => {
+          // Voices for the current language are listed first; mark where the
+          // rest begin rather than silently mixing them together.
+          const divider = i === data.matching_language && i > 0 ? "— other languages — " : "";
+          return `<option value="${v.name}">${divider}${v.name} (${v.lang})</option>`;
+        })
+        .join("");
+    voiceEl.value = selected;
+  } catch (e) {
+    console.error("[settings] failed to load voices:", e);
   }
 }
 
@@ -336,9 +398,45 @@ function wireEvents() {
     const honorific = (document.getElementById("input-honorific") as HTMLInputElement).value;
     const calendar_accounts = (document.getElementById("input-calendar-accounts") as HTMLTextAreaElement).value.trim();
     const speech_lang = (document.getElementById("input-speech-lang") as HTMLSelectElement).value;
-    await apiPost("/api/settings/preferences", { user_name, honorific, calendar_accounts, speech_lang });
+    const tts_backend = (document.getElementById("input-tts-backend") as HTMLSelectElement).value;
+    const macos_voice = (document.getElementById("input-macos-voice") as HTMLSelectElement).value;
+    await apiPost("/api/settings/preferences", {
+      user_name, honorific, calendar_accounts, speech_lang, tts_backend, macos_voice,
+    });
     document.dispatchEvent(new CustomEvent(SPEECH_LANG_EVENT, { detail: speech_lang }));
     await loadStatus();
+  });
+
+  // Voice backend — show or hide the voice picker to match
+  document.getElementById("input-tts-backend")?.addEventListener("change", updateVoiceFieldVisibility);
+
+  // Audition a voice before committing to it
+  document.getElementById("btn-preview-voice")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const btn = e.currentTarget as HTMLButtonElement;
+    const voice = (document.getElementById("input-macos-voice") as HTMLSelectElement).value;
+    const original = btn.textContent;
+    btn.textContent = "...";
+    btn.disabled = true;
+    try {
+      const res = await apiGet<{ audio: string | null }>(
+        `/api/tts-test?voice=${encodeURIComponent(voice)}`
+      );
+      if (res.audio) {
+        const bytes = Uint8Array.from(atob(res.audio), (c) => c.charCodeAt(0));
+        const ctx = new AudioContext();
+        const buffer = await ctx.decodeAudioData(bytes.buffer);
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(ctx.destination);
+        src.start();
+      }
+    } catch (err) {
+      console.error("[settings] voice preview failed:", err);
+    } finally {
+      btn.textContent = original;
+      btn.disabled = false;
+    }
   });
 
   // Setup next button

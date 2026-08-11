@@ -50,6 +50,7 @@ from memory import (
     format_tasks_for_voice, extract_memories, get_important_memories,
 )
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
+from tts import list_voices, resolve_voice, speak as macos_speak
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 
@@ -1200,11 +1201,47 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (Fish Audio, or the macOS synthesiser)
 # ---------------------------------------------------------------------------
 
+_FISH_KEY_PLACEHOLDER = "your-fish-audio-api-key-here"
+
+
+def _fish_configured() -> bool:
+    """Whether Fish Audio has a real key.
+
+    The placeholder shipped in .env.example is a non-empty string, so a plain
+    truth test counts an untouched install as configured — which sent every
+    line to Fish for a 401 instead of falling back.
+    """
+    key = (FISH_API_KEY or "").strip()
+    return bool(key) and key != _FISH_KEY_PLACEHOLDER
+
+
+def _current_tts_backend() -> str:
+    """Which synthesiser to use: auto, fish, macos or none.
+
+    "auto" prefers Fish Audio when a key is configured and falls back to the
+    macOS voices otherwise — so a fresh install talks instead of sitting mute,
+    which is what an unconfigured JARVIS used to do.
+    """
+    choice = os.getenv("TTS_BACKEND", "auto").strip().lower() or "auto"
+    if choice != "auto":
+        return choice
+    return "fish" if _fish_configured() else "macos"
+
+
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
+    """Generate speech audio for a line of JARVIS dialogue."""
+    backend = _current_tts_backend()
+
+    if backend == "none":
+        return None
+
+    if backend == "macos":
+        voice = await resolve_voice(_current_speech_lang(), os.getenv("MACOS_VOICE", ""))
+        return await macos_speak(text, voice)
+
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
@@ -1540,9 +1577,17 @@ async def health():
 
 
 @app.get("/api/tts-test")
-async def tts_test():
-    """Generate a test audio clip for debugging."""
-    audio = await synthesize_speech("Testing audio, sir.")
+async def tts_test(voice: str = ""):
+    """Generate a test audio clip.
+
+    A voice can be named to audition it before saving, since picking one from
+    a list of seventy is otherwise guesswork.
+    """
+    line = f"{build_greeting(datetime.now().hour)} All systems are operational."
+    if voice:
+        audio = await macos_speak(line, voice)
+    else:
+        audio = await synthesize_speech(line)
     if audio:
         return {"audio": base64.b64encode(audio).decode()}
     return {"audio": None, "error": "TTS failed"}
@@ -2587,10 +2632,12 @@ class PreferencesUpdate(BaseModel):
     honorific: str = "sir"
     calendar_accounts: str = "auto"
     speech_lang: str = DEFAULT_SPEECH_LANG
+    tts_backend: str = "auto"
+    macos_voice: str = ""
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "SPEECH_LANG"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "SPEECH_LANG", "TTS_BACKEND", "MACOS_VOICE"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2657,11 +2704,30 @@ async def api_settings_status():
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
             "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
+            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != _FISH_KEY_PLACEHOLDER),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
         },
     }
+
+@app.get("/api/settings/voices")
+async def api_settings_voices():
+    """Installed macOS voices, so the panel can offer real choices.
+
+    Voices for the configured language come first — that is what the user is
+    almost certainly picking from — with the rest kept for anyone who wants a
+    voice from another language.
+    """
+    voices = await list_voices()
+    lang = _current_speech_lang().split("-")[0].lower()
+    preferred = [v for v in voices if v["lang"].lower().startswith(lang)]
+    others = [v for v in voices if not v["lang"].lower().startswith(lang)]
+    return {
+        "voices": preferred + others,
+        "matching_language": len(preferred),
+        "resolved": await resolve_voice(_current_speech_lang(), os.getenv("MACOS_VOICE", "")),
+    }
+
 
 @app.get("/api/settings/preferences")
 async def api_get_preferences():
@@ -2671,6 +2737,8 @@ async def api_get_preferences():
         "honorific": env_dict.get("HONORIFIC", "sir"),
         "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
         "speech_lang": env_dict.get("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG,
+        "tts_backend": env_dict.get("TTS_BACKEND", "auto") or "auto",
+        "macos_voice": env_dict.get("MACOS_VOICE", ""),
     }
 
 @app.post("/api/settings/preferences")
@@ -2679,6 +2747,8 @@ async def api_save_preferences(body: PreferencesUpdate):
     _write_env_key("HONORIFIC", body.honorific)
     _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
     _write_env_key("SPEECH_LANG", body.speech_lang or DEFAULT_SPEECH_LANG)
+    _write_env_key("TTS_BACKEND", body.tts_backend or "auto")
+    _write_env_key("MACOS_VOICE", body.macos_voice)
     return {"success": True}
 
 # ---------------------------------------------------------------------------
