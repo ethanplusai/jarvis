@@ -10,6 +10,8 @@ No send, delete, move, or modify functions exist by design.
 
 import asyncio
 import logging
+
+from phrases import phrase
 from datetime import datetime
 
 log = logging.getLogger("jarvis.mail")
@@ -348,7 +350,7 @@ def format_unread_summary(unread: dict) -> str:
     """Format unread counts for voice."""
     total = unread["total"]
     if total == 0:
-        return "Inbox is clear, sir. No unread messages."
+        return phrase("mail.clear")
 
     parts = []
     for acct, count in unread["accounts"].items():
@@ -356,9 +358,9 @@ def format_unread_summary(unread: dict) -> str:
             parts.append(f"{count} in {acct}")
 
     if len(parts) == 1:
-        return f"You have {total} unread {'message' if total == 1 else 'messages'} — {parts[0]}."
+        return phrase("mail.one_account", total=total, detail=parts[0])
     elif parts:
-        return f"You have {total} unread messages: {', '.join(parts)}."
+        return phrase("mail.many_accounts", total=total, detail=", ".join(parts))
     else:
         return f"You have {total} unread {'message' if total == 1 else 'messages'}."
 

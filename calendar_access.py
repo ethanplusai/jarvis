@@ -7,6 +7,8 @@ filter dates in Python. Results cached and refreshed in background.
 
 import asyncio
 import logging
+
+from phrases import phrase
 import os
 import time as _time
 from datetime import datetime, timedelta
@@ -245,14 +247,14 @@ def format_events_for_context(events: list[dict]) -> str:
 def format_schedule_summary(events: list[dict]) -> str:
     """Format a brief voice-friendly summary of the schedule."""
     if not events:
-        return "Your schedule is clear today, sir."
+        return phrase("calendar.clear")
 
     count = len(events)
     if count == 1:
         evt = events[0]
         if evt.get("all_day"):
-            return f"You have one all-day event: {evt['title']}."
-        return f"You have one event: {evt['title']} at {evt['start']}."
+            return phrase("calendar.one_all_day", title=evt["title"])
+        return phrase("calendar.one_event", title=evt["title"], time=evt["start"])
 
     summaries = []
     for evt in events[:5]:
