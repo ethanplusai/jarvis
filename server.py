@@ -50,6 +50,8 @@ from memory import (
     format_tasks_for_voice, extract_memories, get_important_memories,
 )
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
+from phrases import phrase, ensure_language
+from tts import list_voices, resolve_voice, speak as macos_speak
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 
@@ -65,6 +67,68 @@ FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
 USER_NAME = os.getenv("USER_NAME", "sir")
+# BCP-47 tag the browser's speech recognition listens in, and the language
+# JARVIS is told to reply in. Read per-request rather than cached, so changing
+# it in the settings panel takes effect without a restart.
+DEFAULT_SPEECH_LANG = "en-US"
+# Offered in the settings panel, mapped to the name used to tell JARVIS which
+# language to answer in.
+SPEECH_LANGUAGES = {
+    "en-US": "English",
+    "en-GB": "English",
+    "it-IT": "Italian",
+    "es-ES": "Spanish",
+    "fr-FR": "French",
+    "de-DE": "German",
+    "pt-BR": "Portuguese",
+    "nl-NL": "Dutch",
+    "ja-JP": "Japanese",
+    "zh-CN": "Chinese",
+}
+
+
+def _current_speech_lang() -> str:
+    """The configured speech language, read live so the panel needs no restart."""
+    return os.getenv("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG
+
+
+async def _refresh_phrases() -> None:
+    """Make the fixed phrases match the configured language."""
+    lang = _current_speech_lang()
+    name = SPEECH_LANGUAGES.get(lang, lang)
+    try:
+        await ensure_language(lang, name, anthropic_client)
+    except Exception as e:
+        log.warning(f"Could not prepare phrases for {lang}: {e}")
+
+
+def _current_honorific() -> str:
+    """How the user has asked to be addressed. Read live, like the language."""
+    return os.getenv("HONORIFIC", "sir").strip() or "sir"
+
+
+# Spoken at the top of a session, so it is the one line a user hears every
+# single time. Left in English it announced the wrong language before JARVIS
+# had said anything else.
+GREETINGS = {
+    "en": ("Good morning", "Good afternoon", "Good evening"),
+    "it": ("Buongiorno", "Buon pomeriggio", "Buonasera"),
+    "es": ("Buenos días", "Buenas tardes", "Buenas noches"),
+    "fr": ("Bonjour", "Bon après-midi", "Bonsoir"),
+    "de": ("Guten Morgen", "Guten Tag", "Guten Abend"),
+    "pt": ("Bom dia", "Boa tarde", "Boa noite"),
+    "nl": ("Goedemorgen", "Goedemiddag", "Goedenavond"),
+    "ja": ("おはようございます", "こんにちは", "こんばんは"),
+    "zh": ("早上好", "下午好", "晚上好"),
+}
+
+
+def build_greeting(hour: int) -> str:
+    """The time-of-day greeting, in the configured language."""
+    slot = 0 if hour < 12 else (1 if hour < 17 else 2)
+    lang = _current_speech_lang().split("-")[0].lower()
+    words = GREETINGS.get(lang, GREETINGS["en"])
+    return f"{words[slot]}, {_current_honorific()}."
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -75,7 +139,7 @@ You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_nam
 
 VOICE & PERSONALITY:
 - British butler elegance with understated dry wit
-- Address {user_name} as "sir" naturally — not every sentence, but regularly
+- Address {user_name} as "{honorific}" naturally — not every sentence, but regularly. Use that word exactly as written, in every language: it is how he has asked to be addressed, not a word to translate or inflect. The examples below happen to say "sir"; say "{honorific}" instead.
 - Never say "How can I help you?" or "Is there anything else?" — just act
 - Deliver bad news calmly, like reporting weather: "We have a slight problem, sir."
 - Your humor is observational, never jokes: state facts and let implications land
@@ -696,6 +760,18 @@ STT_CORRECTIONS = {
     r"\bquad\b": "Claude",
     r"\btravis\b": "JARVIS",
     r"\bjarves\b": "JARVIS",
+    # Non-English recognisers hear an English name badly. These are the exact
+    # forms observed in the logs, not guesses: an Italian session produced
+    # "arbiss", "e gli arbis" and "hey Yaris" while the user was plainly
+    # saying JARVIS. Matched as whole words so ordinary vocabulary is safe.
+    r"\bgli arbis\b": "JARVIS",
+    r"\barbiss?\b": "JARVIS",
+    r"\bgiarvis\b": "JARVIS",
+    r"\bjarvi\b": "JARVIS",
+    # "yaris" is a Toyota, and a common one — correcting it outright would
+    # rewrite "la mia auto Yaris". Only fix it where the sentence is plainly
+    # addressing someone.
+    r"\b(hey|hi|ehi|ciao|ok|senti)\s+yaris\b": r"\1 JARVIS",
 }
 
 
@@ -898,13 +974,17 @@ async def _execute_research(target: str, ws=None):
         # Notify via voice if WebSocket still connected
         if ws:
             try:
-                notify_text = f"Research is complete, sir. Report is open in your browser."
+                notify_text = phrase("research.complete")
                 audio = await synthesize_speech(notify_text)
+                await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": notify_text})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {notify_text}")
+                else:
+                    # No voice available — the reply still has to reach the client,
+                    # which shows it on screen.
+                    await ws.send_json({"type": "text", "text": notify_text})
+                await ws.send_json({"type": "status", "state": "idle"})
+                log.info(f"JARVIS: {notify_text}")
             except Exception:
                 pass  # WebSocket might be gone
 
@@ -914,7 +994,9 @@ async def _execute_research(target: str, ws=None):
             try:
                 audio = await synthesize_speech("Research timed out, sir. It was taking too long.")
                 if audio:
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": "Research timed out, sir."})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": phrase("research.timed_out")})
+                else:
+                    await ws.send_json({"type": "text", "text": phrase("research.timed_out")})
             except Exception:
                 pass
     except Exception as e:
@@ -980,12 +1062,15 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
             dispatch_id = dispatch_registry.register(project_name, project_dir or "", prompt)
 
         if not project_dir:
-            msg = f"Couldn't find the {project_name} project directory, sir."
+            msg = phrase("build.no_directory", project=project_name)
             audio = await synthesize_speech(msg)
-            if audio and ws:
+            if ws:
                 try:
                     await ws.send_json({"type": "status", "state": "speaking"})
-                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                    else:
+                        await ws.send_json({"type": "text", "text": msg})
                 except Exception:
                     pass
             return
@@ -1021,7 +1106,7 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
 
         if not full_response or full_response.startswith("Hit a problem") or full_response.startswith("That's taking"):
             dispatch_registry.update_status(dispatch_id, "failed" if full_response else "timeout", response=full_response or "")
-            msg = f"Sir, I ran into an issue with {project_name}. {full_response[:150] if full_response else 'No response received.'}"
+            msg = phrase("build.issue", project=project_name, detail=full_response[:150] if full_response else "No response received.")
         else:
             # Summarize via Haiku — don't read word for word
             if anthropic_client:
@@ -1043,9 +1128,9 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
                     )
                     msg = summary.content[0].text
                 except Exception:
-                    msg = f"Sir, {project_name} finished. Here's the gist: {full_response[:200]}"
+                    msg = phrase("build.finished", project=project_name, summary=full_response[:200])
             else:
-                msg = f"Sir, {project_name} is done. {full_response[:200]}"
+                msg = phrase("build.done", project=project_name, summary=full_response[:200])
 
         # Speak the result — skip if user has spoken recently to avoid audio collision
         log.info(f"Dispatch summary for {project_name}: {msg[:100]}")
@@ -1076,11 +1161,14 @@ async def _execute_prompt_project(project_name: str, prompt: str, work_session: 
     except Exception as e:
         log.error(f"Prompt project failed: {e}", exc_info=True)
         try:
-            msg = f"Had trouble connecting to {project_name}, sir."
+            msg = phrase("build.connect_trouble", project=project_name)
             audio = await synthesize_speech(msg)
-            if audio and ws:
+            if ws:
                 await ws.send_json({"type": "status", "state": "speaking"})
-                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                if audio:
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                else:
+                    await ws.send_json({"type": "text", "text": msg})
         except Exception:
             pass
 
@@ -1102,15 +1190,17 @@ async def self_work_and_notify(session: WorkSession, prompt: str, ws):
                 )
                 msg = summary.content[0].text
             except Exception:
-                msg = "Work is complete, sir."
+                msg = phrase("build.work_complete")
 
             try:
                 audio = await synthesize_speech(msg)
+                await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "status", "state": "speaking"})
                     await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
-                    await ws.send_json({"type": "status", "state": "idle"})
-                    log.info(f"JARVIS: {msg}")
+                else:
+                    await ws.send_json({"type": "text", "text": msg})
+                await ws.send_json({"type": "status", "state": "idle"})
+                log.info(f"JARVIS: {msg}")
             except Exception:
                 pass
     except Exception as e:
@@ -1122,11 +1212,47 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (Fish Audio, or the macOS synthesiser)
 # ---------------------------------------------------------------------------
 
+_FISH_KEY_PLACEHOLDER = "your-fish-audio-api-key-here"
+
+
+def _fish_configured() -> bool:
+    """Whether Fish Audio has a real key.
+
+    The placeholder shipped in .env.example is a non-empty string, so a plain
+    truth test counts an untouched install as configured — which sent every
+    line to Fish for a 401 instead of falling back.
+    """
+    key = (FISH_API_KEY or "").strip()
+    return bool(key) and key != _FISH_KEY_PLACEHOLDER
+
+
+def _current_tts_backend() -> str:
+    """Which synthesiser to use: auto, fish, macos or none.
+
+    "auto" prefers Fish Audio when a key is configured and falls back to the
+    macOS voices otherwise — so a fresh install talks instead of sitting mute,
+    which is what an unconfigured JARVIS used to do.
+    """
+    choice = os.getenv("TTS_BACKEND", "auto").strip().lower() or "auto"
+    if choice != "auto":
+        return choice
+    return "fish" if _fish_configured() else "macos"
+
+
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
+    """Generate speech audio for a line of JARVIS dialogue."""
+    backend = _current_tts_backend()
+
+    if backend == "none":
+        return None
+
+    if backend == "macos":
+        voice = await resolve_voice(_current_speech_lang(), os.getenv("MACOS_VOICE", ""))
+        return await macos_speak(text, voice)
+
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
@@ -1195,8 +1321,27 @@ async def generate_response(
         dispatch_context=dispatch_registry.format_for_prompt(),
         known_projects=format_projects_for_prompt(projects),
         user_name=USER_NAME,
+        honorific=_current_honorific(),
         project_dir=PROJECT_DIR,
     )
+    # The prompt above is written in English and would answer an Italian
+    # question in English, which makes the speech-language setting only half
+    # work. Kept to a bare language directive on purpose: wording that also
+    # discussed action selection measurably weakened the language adherence it
+    # was appended to enforce. Action routing is less reliable outside English
+    # regardless — see the non-English caveat in the README.
+    speech_lang = _current_speech_lang()
+    if not speech_lang.startswith("en"):
+        language = SPEECH_LANGUAGES.get(speech_lang, speech_lang)
+        honorific = _current_honorific()
+        system += (
+            f"\n\nLANGUAGE: The user speaks {language}. Write every spoken reply in {language}, "
+            f"keeping the same dry, economical butler voice. One exception: address him as "
+            f'"{honorific}" — that exact word, letter for letter. It is his chosen form of '
+            f"address, not vocabulary to translate into {language} or to inflect for gender. "
+            f'Writing anything other than "{honorific}" is an error.'
+        )
+
     if lookup_status:
         system += f"\n\nACTIVE LOOKUPS:\n{lookup_status}\nIf asked about progress, report this status."
 
@@ -1415,6 +1560,12 @@ async def lifespan(application: FastAPI):
         anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     else:
         log.warning("ANTHROPIC_API_KEY not set — LLM features disabled")
+
+    # Warm the fixed phrases for the configured language. Backgrounded: a
+    # translation costs one Haiku call on a cold cache, and JARVIS should not
+    # wait on it to start answering — until it lands, the English originals
+    # are used, which is what happened before this existed anyway.
+    asyncio.create_task(_refresh_phrases())
     cached_projects = []
 
     # Start context refresh in a separate thread (never touches event loop)
@@ -1443,9 +1594,17 @@ async def health():
 
 
 @app.get("/api/tts-test")
-async def tts_test():
-    """Generate a test audio clip for debugging."""
-    audio = await synthesize_speech("Testing audio, sir.")
+async def tts_test(voice: str = ""):
+    """Generate a test audio clip.
+
+    A voice can be named to audition it before saving, since picking one from
+    a list of seventy is otherwise guesswork.
+    """
+    line = f"{build_greeting(datetime.now().hour)} All systems are operational."
+    if voice:
+        audio = await macos_speak(line, voice)
+    else:
+        audio = await synthesize_speech(line)
     if audio:
         return {"audio": base64.b64encode(audio).decode()}
     return {"audio": None, "error": "TTS failed"}
@@ -1698,7 +1857,7 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
             try:
                 await ws.send_json({"type": "status", "state": "speaking"})
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": result_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": result_text})
                 else:
                     await ws.send_json({"type": "text", "text": result_text})
                 await ws.send_json({"type": "status", "state": "idle"})
@@ -1714,11 +1873,13 @@ async def _lookup_and_report(lookup_type: str, lookup_fn, ws, history: list[dict
     except asyncio.TimeoutError:
         _active_lookups[lookup_id]["status"] = "timeout"
         try:
-            fallback = f"That {lookup_type} check is taking too long, sir. The data may still be syncing."
+            fallback = phrase("lookup.slow", kind=lookup_type)
             audio = await synthesize_speech(fallback)
             await ws.send_json({"type": "status", "state": "speaking"})
             if audio:
-                await ws.send_json({"type": "audio", "data": audio, "text": fallback})
+                await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
+            else:
+                await ws.send_json({"type": "text", "text": fallback})
             await ws.send_json({"type": "status", "state": "idle"})
         except Exception:
             pass
@@ -1977,13 +2138,7 @@ async def voice_handler(ws: WebSocket):
     try:
         # ── Greeting — always start in conversation mode ──
         now = datetime.now()
-        hour = now.hour
-        if hour < 12:
-            greeting = "Good morning, sir."
-        elif hour < 17:
-            greeting = "Good afternoon, sir."
-        else:
-            greeting = "Good evening, sir."
+        greeting = build_greeting(now.hour)
 
         global _last_greeting_time
         should_greet = (time.time() - _last_greeting_time) > 60
@@ -1994,13 +2149,15 @@ async def voice_handler(ws: WebSocket):
             async def _send_greeting():
                 try:
                     audio_bytes = await synthesize_speech(greeting)
+                    await ws.send_json({"type": "status", "state": "speaking"})
                     if audio_bytes:
                         encoded = base64.b64encode(audio_bytes).decode()
-                        await ws.send_json({"type": "status", "state": "speaking"})
                         await ws.send_json({"type": "audio", "data": encoded, "text": greeting})
-                        history.append({"role": "assistant", "content": greeting})
-                        log.info(f"JARVIS: {greeting}")
-                        await ws.send_json({"type": "status", "state": "idle"})
+                    else:
+                        await ws.send_json({"type": "text", "text": greeting})
+                    history.append({"role": "assistant", "content": greeting})
+                    log.info(f"JARVIS: {greeting}")
+                    await ws.send_json({"type": "status", "state": "idle"})
                 except Exception as e:
                     log.warning(f"Greeting failed: {e}")
 
@@ -2022,12 +2179,12 @@ async def voice_handler(ws: WebSocket):
             if msg.get("type") == "fix_self":
                 jarvis_dir = str(Path(__file__).parent)
                 await work_session.start(jarvis_dir)
-                response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
+                response_text = phrase("mode.work_self")
                 tts = strip_markdown_for_tts(response_text)
                 await ws.send_json({"type": "status", "state": "speaking"})
                 audio = await synthesize_speech(tts)
                 if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": response_text})
                 else:
                     await ws.send_json({"type": "text", "text": response_text})
                 continue
@@ -2086,7 +2243,7 @@ async def voice_handler(ws: WebSocket):
                         did = dispatch_registry.register(name, path, prompt[:200])
                         asyncio.create_task(_execute_prompt_project(name, prompt, work_session, ws, dispatch_id=did, history=history, voice_state=voice_state))
                         planner.reset()
-                        response_text = "Building it now, sir."
+                        response_text = phrase("ack.building")
                     elif planner.active_plan and planner.active_plan.confirmed is False and planner.active_plan.current_question_index >= len(planner.active_plan.pending_questions):
                         # Confirmation phase
                         result = await planner.handle_confirmation(user_text)
@@ -2099,10 +2256,10 @@ async def voice_handler(ws: WebSocket):
                             did = dispatch_registry.register(name, path, prompt[:200])
                             asyncio.create_task(_execute_prompt_project(name, prompt, work_session, ws, dispatch_id=did, history=history, voice_state=voice_state))
                             planner.reset()
-                            response_text = "On it, sir."
+                            response_text = phrase("ack.on_it")
                         elif result["cancelled"]:
                             planner.reset()
-                            response_text = "Cancelled, sir."
+                            response_text = phrase("ack.cancelled")
                         else:
                             response_text = result.get("modification_question", "How shall I adjust the plan, sir?")
                     else:
@@ -2115,9 +2272,9 @@ async def voice_handler(ws: WebSocket):
                 elif any(w in t_lower for w in ["quit work mode", "exit work mode", "go back to chat", "regular mode", "stop working"]):
                     if work_session.active:
                         await work_session.stop()
-                        response_text = "Back to conversation mode, sir."
+                        response_text = phrase("mode.back_to_chat")
                     else:
-                        response_text = "Already in conversation mode, sir."
+                        response_text = phrase("mode.already_chat")
 
                 # ── WORK MODE: speech → claude -p → Haiku summary → JARVIS voice ──
                 elif work_session.active:
@@ -2192,37 +2349,37 @@ async def voice_handler(ws: WebSocket):
                         elif action["action"] == "show_recent":
                             response_text = await handle_show_recent()
                         elif action["action"] == "describe_screen":
-                            response_text = "Taking a look now, sir."
+                            response_text = phrase("ack.taking_look")
                             asyncio.create_task(_lookup_and_report("screen", _do_screen_lookup, ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_calendar":
-                            response_text = "Checking your calendar now, sir."
+                            response_text = phrase("ack.checking_calendar")
                             asyncio.create_task(_lookup_and_report("calendar", _do_calendar_lookup, ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_mail":
-                            response_text = "Checking your inbox now, sir."
+                            response_text = phrase("ack.checking_mail")
                             asyncio.create_task(_lookup_and_report("mail", _do_mail_lookup, ws, history=history, voice_state=voice_state))
                         elif action["action"] == "check_dispatch":
                             recent = dispatch_registry.get_most_recent()
                             if not recent:
-                                response_text = "No recent builds on record, sir."
+                                response_text = phrase("build.none_recent")
                             else:
                                 name = recent["project_name"]
                                 status = recent["status"]
                                 if status == "building" or status == "pending":
                                     elapsed = int(time.time() - recent["updated_at"])
-                                    response_text = f"Still working on {name}, sir. Been at it for {elapsed} seconds."
+                                    response_text = phrase("build.still_working", project=name, seconds=elapsed)
                                 elif status == "completed":
                                     response_text = recent.get("summary") or f"{name} is complete, sir."
                                 elif status in ("failed", "timeout"):
-                                    response_text = f"{name} ran into problems, sir."
+                                    response_text = phrase("build.problems", project=name)
                                 else:
-                                    response_text = f"{name} is {status}, sir."
+                                    response_text = phrase("build.status", project=name, status=status)
                         elif action["action"] == "check_tasks":
                             tasks = get_open_tasks()
                             response_text = format_tasks_for_voice(tasks)
                         elif action["action"] == "check_usage":
                             response_text = get_usage_summary()
                         else:
-                            response_text = "Understood, sir."
+                            response_text = phrase("ack.understood")
                     else:
                         if not anthropic_client:
                             response_text = "API key not configured."
@@ -2244,13 +2401,13 @@ async def voice_handler(ws: WebSocket):
                                     action_type = embedded_action["action"]
                                     if action_type == "prompt_project":
                                         proj = embedded_action["target"].split("|||")[0].strip()
-                                        response_text = f"Connecting to {proj} now, sir."
+                                        response_text = phrase("ack.connecting", project=proj)
                                     elif action_type == "build":
-                                        response_text = "On it, sir."
+                                        response_text = phrase("ack.on_it")
                                     elif action_type == "research":
-                                        response_text = "Looking into that now, sir."
+                                        response_text = phrase("ack.looking_into")
                                     else:
-                                        response_text = "Right away, sir."
+                                        response_text = phrase("ack.generic")
 
                                 if embedded_action["action"] == "build":
                                     # Build in background — JARVIS stays conversational
@@ -2354,14 +2511,17 @@ async def voice_handler(ws: WebSocket):
                                     async def _read_and_report(search_term, _ws):
                                         note = await read_note(search_term)
                                         if note:
-                                            msg = f"Sir, your note '{note['title']}' says: {note['body'][:200]}"
+                                            msg = phrase("note.says", title=note["title"], body=note["body"][:200])
                                         else:
-                                            msg = f"Couldn't find a note matching '{search_term}', sir."
+                                            msg = phrase("note.not_found", query=search_term)
                                         audio = await synthesize_speech(strip_markdown_for_tts(msg))
-                                        if audio and _ws:
+                                        if _ws:
                                             try:
                                                 await _ws.send_json({"type": "status", "state": "speaking"})
-                                                await _ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                                                if audio:
+                                                    await _ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                                                else:
+                                                    await _ws.send_json({"type": "text", "text": msg})
                                             except Exception:
                                                 pass
                                     asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
@@ -2411,7 +2571,7 @@ async def voice_handler(ws: WebSocket):
             except Exception as e:
                 log.error(f"Error: {e}", exc_info=True)
                 try:
-                    fallback = "Something went wrong, sir."
+                    fallback = phrase("error.generic")
                     audio = await synthesize_speech(fallback)
                     if audio:
                         await ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": fallback})
@@ -2488,10 +2648,13 @@ class PreferencesUpdate(BaseModel):
     user_name: str = ""
     honorific: str = "sir"
     calendar_accounts: str = "auto"
+    speech_lang: str = DEFAULT_SPEECH_LANG
+    tts_backend: str = "auto"
+    macos_voice: str = ""
 
 @app.post("/api/settings/keys")
 async def api_settings_keys(body: KeyUpdate):
-    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS"}
+    allowed = {"ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC", "CALENDAR_ACCOUNTS", "SPEECH_LANG", "TTS_BACKEND", "MACOS_VOICE"}
     if body.key_name not in allowed:
         return JSONResponse({"success": False, "error": "Invalid key name"}, status_code=400)
     _write_env_key(body.key_name, body.key_value)
@@ -2558,11 +2721,30 @@ async def api_settings_status():
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
             "anthropic": bool(env_dict.get("ANTHROPIC_API_KEY", "").strip() and env_dict.get("ANTHROPIC_API_KEY", "") != "your-anthropic-api-key-here"),
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
+            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != _FISH_KEY_PLACEHOLDER),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
         },
     }
+
+@app.get("/api/settings/voices")
+async def api_settings_voices():
+    """Installed macOS voices, so the panel can offer real choices.
+
+    Voices for the configured language come first — that is what the user is
+    almost certainly picking from — with the rest kept for anyone who wants a
+    voice from another language.
+    """
+    voices = await list_voices()
+    lang = _current_speech_lang().split("-")[0].lower()
+    preferred = [v for v in voices if v["lang"].lower().startswith(lang)]
+    others = [v for v in voices if not v["lang"].lower().startswith(lang)]
+    return {
+        "voices": preferred + others,
+        "matching_language": len(preferred),
+        "resolved": await resolve_voice(_current_speech_lang(), os.getenv("MACOS_VOICE", "")),
+    }
+
 
 @app.get("/api/settings/preferences")
 async def api_get_preferences():
@@ -2571,6 +2753,9 @@ async def api_get_preferences():
         "user_name": env_dict.get("USER_NAME", ""),
         "honorific": env_dict.get("HONORIFIC", "sir"),
         "calendar_accounts": env_dict.get("CALENDAR_ACCOUNTS", "auto"),
+        "speech_lang": env_dict.get("SPEECH_LANG", DEFAULT_SPEECH_LANG) or DEFAULT_SPEECH_LANG,
+        "tts_backend": env_dict.get("TTS_BACKEND", "auto") or "auto",
+        "macos_voice": env_dict.get("MACOS_VOICE", ""),
     }
 
 @app.post("/api/settings/preferences")
@@ -2578,6 +2763,11 @@ async def api_save_preferences(body: PreferencesUpdate):
     _write_env_key("USER_NAME", body.user_name)
     _write_env_key("HONORIFIC", body.honorific)
     _write_env_key("CALENDAR_ACCOUNTS", body.calendar_accounts)
+    _write_env_key("SPEECH_LANG", body.speech_lang or DEFAULT_SPEECH_LANG)
+    _write_env_key("TTS_BACKEND", body.tts_backend or "auto")
+    _write_env_key("MACOS_VOICE", body.macos_voice)
+    # A new language needs its own set of fixed phrases.
+    asyncio.create_task(_refresh_phrases())
     return {"success": True}
 
 # ---------------------------------------------------------------------------
