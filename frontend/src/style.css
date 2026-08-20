@@ -35,6 +35,27 @@ html, body {
   z-index: 10;
 }
 
+/* What JARVIS just said. Sits above the status line, and carries the
+   conversation on its own when TTS is unavailable. */
+#jarvis-caption {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 48px));
+  color: rgba(219, 238, 252, 0.92);
+  font-size: 17px;
+  line-height: 1.55;
+  font-weight: 300;
+  letter-spacing: 0.3px;
+  text-align: center;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.85);
+  transition: opacity 0.45s ease;
+  pointer-events: none;
+  z-index: 10;
+  opacity: 0;
+}
+
 #jarvis-label {
   position: fixed;
   bottom: 16px;
