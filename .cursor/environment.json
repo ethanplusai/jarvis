@@ -1,0 +1,21 @@
+{
+  "name": "JARVIS / Friday Voice Assistant",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "backend",
+      "command": "source .venv/bin/activate && python server.py --port 8340",
+      "description": "FastAPI + WebSocket voice server (HTTPS on port 8340, uses cert.pem/key.pem)."
+    },
+    {
+      "name": "frontend",
+      "command": "cd frontend && npm run dev -- --host",
+      "description": "Vite dev server for the Three.js orb UI on port 5173; proxies /api and /ws to the backend."
+    }
+  ],
+  "ports": [
+    { "name": "frontend", "port": 5173 },
+    { "name": "backend", "port": 8340 }
+  ]
+}
