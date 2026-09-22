@@ -441,6 +441,12 @@ def _check_screen_recording_sync() -> Check:
 
 def _check_fish_api_key_sync() -> Check:
     """FISH_API_KEY must be set or JARVIS has no voice."""
+    if os.environ.get("ELEVENLABS_API_KEY"):
+        if os.environ.get("ELEVENLABS_VOICE_ID"):
+            return Check(name="fish_api_key", status=STATUS_OK, message="ElevenLabs is the voice.")
+        return Check(name="fish_api_key", status=STATUS_FAIL,
+                     message="ELEVENLABS_API_KEY is set but ELEVENLABS_VOICE_ID is not.",
+                     remedy="Set ELEVENLABS_VOICE_ID in .env to the voice's ID from ElevenLabs.")
     if os.environ.get("FISH_API_KEY"):
         return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
     return Check(

@@ -4,8 +4,8 @@
    The single place the look is defined. Everything downstream (primitives,
    views) refers to these names and never to a raw hue, size or duration.
 
-   Palette is lifted from the orb (frontend/src/orb.ts): a #05070c ground with
-   #4ca8e8 particles and white-hot highlights, so the dashboard reads as the
+   Palette is lifted from the orb (frontend/src/orb.ts): a #0c0505 ground with
+   #e83c3c particles and white-hot highlights, so the dashboard reads as the
    same machine as JARVIS's face.
 
    TONES
@@ -18,45 +18,45 @@
 
 :root {
   /* -- Ground & surfaces ------------------------------------------------- */
-  --ground:          #05070c;
-  --ground-lift:     #070b12;
-  --surface:         rgba(76, 168, 232, 0.035);
-  --surface-raised:  rgba(76, 168, 232, 0.065);
+  --ground:          #0c0505;
+  --ground-lift:     #120707;
+  --surface:         rgba(232, 60, 60, 0.035);
+  --surface-raised:  rgba(232, 60, 60, 0.065);
   --surface-sunk:    rgba(0, 0, 0, 0.35);
-  --scrim:           rgba(4, 6, 11, 0.93);
+  --scrim:           rgba(11, 4, 6, 0.93);
   /* The backdrop behind a sheet. Deliberately thinner than --scrim: what is
      under it is a live monitor, and dimming it to unreadable would defeat
      the reason the sheet does not cover the list in the first place. */
-  --scrim-soft:      rgba(4, 6, 11, 0.62);
+  --scrim-soft:      rgba(11, 4, 6, 0.62);
 
   /* -- Edges ------------------------------------------------------------- */
-  --edge:            rgba(124, 196, 255, 0.13);
-  --edge-strong:     rgba(124, 196, 255, 0.30);
-  --edge-hot:        rgba(124, 196, 255, 0.55);
+  --edge:            rgba(255, 120, 110, 0.13);
+  --edge-strong:     rgba(255, 120, 110, 0.30);
+  --edge-hot:        rgba(255, 120, 110, 0.55);
   --stroke:          1px;
 
   /* -- Signal hues. Reach for these only to define a tone. --------------- */
-  --accent:          #4ca8e8;
-  --accent-bright:   #9bd8ff;
+  --accent:          #e83c3c;
+  --accent-bright:   #ffa89c;
   --signal-ok:       #3ee0a6;
   --signal-warn:     #ffb648;
   --signal-bad:      #ff5a6e;
   --signal-idle:     #7f8fa6;
 
   /* -- Text -------------------------------------------------------------- */
-  --text:            #dbe8f5;
-  --text-dim:        rgba(219, 232, 245, 0.55);
-  --text-faint:      rgba(219, 232, 245, 0.30);
+  --text:            #f5e1de;
+  --text-dim:        rgba(245, 222, 220, 0.55);
+  --text-faint:      rgba(245, 222, 220, 0.30);
 
   /* -- Default tone. Overridden by the tone-* classes below. ------------- */
   --tone:            var(--accent);
-  --tone-soft:       rgba(76, 168, 232, 0.14);
+  --tone-soft:       rgba(232, 60, 60, 0.14);
 
   /* -- Glow. Restrained on purpose: a hologram is thin light, not neon. -- */
   --glow-sm:         0 0 6px -1px var(--tone);
   --glow-md:         0 0 14px -2px var(--tone);
   --glow-panel:      inset 0 0 40px -28px var(--accent-bright);
-  --glow-text:       0 0 12px rgba(155, 216, 255, 0.35);
+  --glow-text:       0 0 12px rgba(255, 150, 140, 0.35);
 
   /* -- Type -------------------------------------------------------------- */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -112,12 +112,12 @@
 /* -- Tone classes ------------------------------------------------------------
    Apply to any primitive to recolour its state-carrying parts. `--tone-soft`
    is the same hue at fill strength (backgrounds, tracks, wash).             */
-.tone-accent { --tone: var(--accent);      --tone-soft: rgba(76, 168, 232, 0.14); }
+.tone-accent { --tone: var(--accent);      --tone-soft: rgba(232, 60, 60, 0.14); }
 .tone-ok     { --tone: var(--signal-ok);   --tone-soft: rgba(62, 224, 166, 0.13); }
 .tone-warn   { --tone: var(--signal-warn); --tone-soft: rgba(255, 182, 72, 0.13); }
 .tone-bad    { --tone: var(--signal-bad);  --tone-soft: rgba(255, 90, 110, 0.13); }
 .tone-idle   { --tone: var(--signal-idle); --tone-soft: rgba(127, 143, 166, 0.12); }
-.tone-dim    { --tone: var(--text-faint);  --tone-soft: rgba(219, 232, 245, 0.07); }
+.tone-dim    { --tone: var(--text-faint);  --tone-soft: rgba(245, 222, 220, 0.07); }
 
 /* -- Reduced motion ----------------------------------------------------------
    Nothing in this UI depends on movement to be understood: every animated

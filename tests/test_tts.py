@@ -60,3 +60,33 @@ async def test_empty_text_or_missing_key_short_circuits():
         assert await tts.synthesize_chunk("   ", api_key="k", voice_id="v", client=c) is None
         assert await tts.synthesize_chunk("hi", api_key="", voice_id="v", client=c) is None
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_sends_voice_model_and_key_and_returns_the_mp3():
+    import tts
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["key"] = request.headers.get("xi-api-key")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, content=b"ID3mp3")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        r = await tts.synthesize_elevenlabs("Good evening.", api_key="k", voice_id="VOICE",
+                                            model_id="eleven_v3", client=client)
+    assert r is not None and r.audio == b"ID3mp3"
+    assert "/v1/text-to-speech/VOICE" in seen["url"]
+    assert seen["key"] == "k"
+    assert seen["body"] == {"text": "Good evening.", "model_id": "eleven_v3"}
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_error_is_none_not_an_exception():
+    import tts
+    transport = httpx.MockTransport(lambda req: httpx.Response(401, json={"detail": "bad key"}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        r = await tts.synthesize_elevenlabs("Hello.", api_key="bad", voice_id="V",
+                                            model_id="eleven_v3", client=client)
+    assert r is None

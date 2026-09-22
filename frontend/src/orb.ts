@@ -28,7 +28,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setClearColor(0x050508, 1);
+  renderer.setClearColor(0x080505, 1);
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 1000);
@@ -53,7 +53,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
 
   const mat = new THREE.PointsMaterial({
-    color: 0x4ca8e8, size: 0.4, transparent: true, opacity: 0.6,
+    color: 0xe83c3c, size: 0.4, transparent: true, opacity: 0.6,
     sizeAttenuation: true, blending: THREE.AdditiveBlending, depthWrite: false,
   });
 
@@ -68,7 +68,7 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   lineGeo.setDrawRange(0, 0);
 
   const lineMat = new THREE.LineBasicMaterial({
-    color: 0x4ca8e8, transparent: true, opacity: 0.0,
+    color: 0xe83c3c, transparent: true, opacity: 0.0,
     blending: THREE.AdditiveBlending, depthWrite: false,
   });
 
@@ -313,10 +313,10 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
     mat.opacity = currentBright + bass * 0.08;
     mat.size = currentSize + bass * 0.05;
 
-    if (state === "thinking") { mat.color.lerp(new THREE.Color(0x6ec4ff), 0.015); lineMat.color.lerp(new THREE.Color(0x6ec4ff), 0.015); }
-    else if (state === "speaking") { mat.color.lerp(new THREE.Color(0x5ab8f0), 0.015); lineMat.color.lerp(new THREE.Color(0x5ab8f0), 0.015); }
-    else if (state === "compacting") { mat.color.lerp(new THREE.Color(0x3a5f8a), 0.03); lineMat.color.lerp(new THREE.Color(0x3a5f8a), 0.03); }   // desaturated, cooler
-    else { mat.color.lerp(new THREE.Color(0x4ca8e8), 0.015); lineMat.color.lerp(new THREE.Color(0x4ca8e8), 0.015); }
+    if (state === "thinking") { mat.color.lerp(new THREE.Color(0xff5a4e), 0.015); lineMat.color.lerp(new THREE.Color(0xff5a4e), 0.015); }
+    else if (state === "speaking") { mat.color.lerp(new THREE.Color(0xf04a44), 0.015); lineMat.color.lerp(new THREE.Color(0xf04a44), 0.015); }
+    else if (state === "compacting") { mat.color.lerp(new THREE.Color(0x8a3a3a), 0.03); lineMat.color.lerp(new THREE.Color(0x8a3a3a), 0.03); }   // desaturated, cooler
+    else { mat.color.lerp(new THREE.Color(0xe83c3c), 0.015); lineMat.color.lerp(new THREE.Color(0xe83c3c), 0.015); }
 
     camera.position.x = Math.sin(t * 0.02) * 5;
     camera.position.y = Math.cos(t * 0.03) * 3;
