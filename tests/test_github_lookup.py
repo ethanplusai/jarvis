@@ -107,6 +107,9 @@ def gh(monkeypatch):
 
     fake = _Gh()
     monkeypatch.setattr(gh_lookup, "_run_gh", fake.run)
+    # Pretend gh is installed: _run_gh is faked, and on a machine without the gh CLI the
+    # real gh_path() returns None and look_up() bails out before reaching the fake.
+    monkeypatch.setattr(gh_lookup, "gh_path", lambda: "/usr/local/bin/gh")
     # The login is looked up once and cached; never let a test hit the real one.
     fake.when(lambda a: a[:2] == ["api", "user"], out="tonystark\n")
     return gh_lookup, fake
