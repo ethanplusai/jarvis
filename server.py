@@ -98,6 +98,10 @@ log = logging.getLogger("jarvis")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+# ElevenLabs takes over the voice whenever its key is set.
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_v3")
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -461,7 +465,11 @@ _last_greeting_time: float = 0
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
+    """Generate speech audio from text — ElevenLabs when configured, else Fish Audio."""
+    if ELEVENLABS_API_KEY:
+        r = await tts.synthesize_elevenlabs(text, api_key=ELEVENLABS_API_KEY, voice_id=ELEVENLABS_VOICE_ID,
+                                            model_id=ELEVENLABS_MODEL_ID)
+        return r.audio if r else None
     if not FISH_API_KEY:
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
@@ -611,7 +619,11 @@ async def _voice_emit(msg: dict) -> None:
 
 
 async def _synth_for_speech(text: str) -> Optional[bytes]:
-    r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
+    if ELEVENLABS_API_KEY:
+        r = await tts.synthesize_elevenlabs(text, api_key=ELEVENLABS_API_KEY, voice_id=ELEVENLABS_VOICE_ID,
+                                            model_id=ELEVENLABS_MODEL_ID, client=_tts_client)
+    else:
+        r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
     if r is None:
         return None
     _session_tokens["tts_calls"] += 1
@@ -6879,7 +6891,8 @@ async def api_settings_status():
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
+            # Any working voice counts: ElevenLabs replaces Fish Audio when set.
+            "fish_audio": bool(env_dict.get("ELEVENLABS_API_KEY", "").strip()) or bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
         },

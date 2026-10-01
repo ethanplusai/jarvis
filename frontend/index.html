@@ -6,7 +6,7 @@
     <title>JARVIS</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
-  <body>
+  <body class="asleep">
     <canvas id="orb-canvas"></canvas>
 
     <!-- Minimal controls — top right -->
@@ -35,6 +35,8 @@
     <div id="status-text"></div>
     <div id="jarvis-label">JARVIS</div>
     <div id="error-text"></div>
+    <div id="sleep-hint"></div>
+    <input id="type-box" type="text" autocomplete="off" placeholder="Type or dictate to JARVIS, then Enter" />
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

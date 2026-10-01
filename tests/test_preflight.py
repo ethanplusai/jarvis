@@ -391,9 +391,25 @@ def test_fish_api_key_present(monkeypatch):
 
 def test_fish_api_key_absent(monkeypatch):
     monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     check = preflight._check_fish_api_key_sync()
     assert check.status == STATUS_FAIL
     assert check.remedy
+
+
+def test_elevenlabs_key_with_voice_is_ok(monkeypatch):
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk_test")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "VOICE")
+    assert preflight._check_fish_api_key_sync().status == STATUS_OK
+
+
+def test_elevenlabs_key_without_voice_id_fails_loudly(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk_test")
+    monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
+    check = preflight._check_fish_api_key_sync()
+    assert check.status == STATUS_FAIL
+    assert "ELEVENLABS_VOICE_ID" in check.remedy
 
 
 # --- leftover ANTHROPIC_* ------------------------------------------------------

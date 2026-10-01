@@ -9,6 +9,7 @@ import { createOrb, type OrbState } from "./orb";
 import { createVoiceInput, createAudioPlayer, createMicMonitor } from "./voice";
 import { createSocket } from "./ws";
 import { openSettings, checkFirstTimeSetup } from "./settings";
+import { matchWake, wakePhrase } from "./wake";
 import "./style.css";
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,29 @@ import "./style.css";
 type State = "idle" | "listening" | "thinking" | "speaking" | "compacting";
 let currentState: State = "idle";
 let isMuted = false;
+
+// Asleep until the wake phrase is heard: nothing shown, nothing spoken.
+const WAKE_PHRASE = wakePhrase();
+let awake = false;
+
+function wake() {
+  if (awake) return;
+  awake = true;
+  document.body.classList.remove("asleep");
+  document.body.classList.add("awake");
+}
+
+/** Every transcript, spoken or typed, goes through here. */
+function handleUserText(text: string) {
+  if (awake) {
+    socket.send({ type: "transcript", text, isFinal: true });
+    return;
+  }
+  const { woke, remainder } = matchWake(text, WAKE_PHRASE);
+  if (!woke) return;
+  wake();
+  socket.send({ type: "transcript", text: remainder || "Hello JARVIS", isFinal: true });
+}
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -81,11 +105,11 @@ const voiceInput = createVoiceInput(
   (text: string) => {
     // The server decides whether this is echo, a barge-in, or a new turn.
     micMonitor.sawSpeech();
-    socket.send({ type: "transcript", text, isFinal: true });
+    handleUserText(text);
   },
   (text: string) => {
     micMonitor.sawSpeech();
-    socket.send({ type: "interim", text });
+    if (awake) socket.send({ type: "interim", text });
   },
   (msg: string) => {
     showError(msg);
@@ -170,7 +194,11 @@ socket.onMessage((msg) => {
     muteMicDuringSpeech = Boolean(msg.muteMicDuringSpeech);
   } else if (type === "audio") {
     const data = msg.data as string;
-    if (data) {
+    if (data && !awake) {
+      // Asleep: stay silent, but ack the chunk so the server is not left
+      // waiting on a playback that will never happen.
+      socket.send({ type: "played", utt: Number(msg.utt), idx: Number(msg.idx) });
+    } else if (data) {
       if (currentState !== "speaking") transition("speaking");
       audioPlayer.enqueue(data, Number(msg.utt), Number(msg.idx));
     }
@@ -200,9 +228,23 @@ socket.onMessage((msg) => {
   }
 });
 
+// ── typed input ──────────────────────────────────────────────────────────
+// For dictation tools (Wispr Flow) that type rather than speak into the page.
+const typeBox = document.getElementById("type-box") as HTMLInputElement | null;
+typeBox?.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  const text = typeBox.value.trim();
+  typeBox.value = "";
+  if (text) handleUserText(text);
+});
+
 // ---------------------------------------------------------------------------
 // Kick off
 // ---------------------------------------------------------------------------
+
+const sleepHint = document.getElementById("sleep-hint");
+if (sleepHint) sleepHint.textContent = `say "${WAKE_PHRASE}"`;
 
 // Start listening after a brief delay for the orb to render
 setTimeout(() => {
