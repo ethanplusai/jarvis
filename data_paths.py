@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -386,6 +387,9 @@ def ensure_tool_token() -> str:
             os.close(fd)
         return token
 
+    if sys.platform == "win32":
+        return _adopt_tool_token_windows(path, token)
+
     fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
@@ -399,6 +403,28 @@ def ensure_tool_token() -> str:
             return existing
         # An empty file: ours to fill, and only ours — the fd is already
         # proven to be a regular file we own.
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, token.encode("utf-8"))
+        return token
+    finally:
+        os.close(fd)
+
+
+def _adopt_tool_token_windows(path: Path, token: str) -> str:
+    """Windows has no O_NOFOLLOW, getuid or POSIX modes, so the fd-based
+    checks above cannot run. Refuse links and non-regular files via lstat;
+    access control is left to the user profile's ACLs, which already keep
+    the data directory private to this account."""
+    import stat as _stat
+    info = os.lstat(path)
+    if _stat.S_ISLNK(info.st_mode) or not _stat.S_ISREG(info.st_mode):
+        raise OSError(f"{path} is not a regular file")
+    fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        existing = os.read(fd, 4096).decode("utf-8", "ignore").strip()
+        if existing:
+            return existing
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
         os.write(fd, token.encode("utf-8"))

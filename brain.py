@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -742,7 +741,7 @@ class Brain:
 
     def command(self) -> list[str]:
         c = self.config
-        cmd = shlex.split(self._claude) + [
+        cmd = claude_env.split_command(self._claude) + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages",
             "--model", c.model, "--effort", c.effort, "--name", "jarvis",
