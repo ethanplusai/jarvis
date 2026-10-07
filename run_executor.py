@@ -15,7 +15,6 @@ import asyncio
 import logging
 import math
 import os
-import shlex
 import shutil
 import time
 from typing import Callable
@@ -441,7 +440,7 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        base = claude_env.split_command(self._claude_path)
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:
