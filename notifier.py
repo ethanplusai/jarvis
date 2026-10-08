@@ -19,15 +19,23 @@ osascript hands to the script as plain data -- never parsed as AppleScript
 source. There is no escaping step to get wrong because there is nothing to
 escape: a value containing `" & do shell script "..." & "` is just a
 string with those characters in it.
+
+Windows keeps the same rule with different parts: a fixed PowerShell script
+(passed base64-encoded, so not even the command line is parsed from it), the
+untrusted text in environment variables, and the script putting each one
+into the toast as an XML *text node* — data, never markup or code.
 """
 
 import asyncio
+import base64
 import logging
 import os
 import shutil
 import sys
 
 log = logging.getLogger("jarvis.notifier")
+
+_WINDOWS = sys.platform == "win32"
 
 # A notification is a glance, not an essay -- keep it short. These bound
 # what we pass to Notification Center regardless of how long the source
@@ -55,24 +63,23 @@ end run
 """
 
 
-# Windows: the same rule, kept the same way. The script is fixed; the three
-# strings reach it as environment variables, and it XML-escapes them itself
-# before they go anywhere near the toast template. The AppUserModelID is
-# PowerShell's own, which every Windows 10/11 install has registered, so the
-# toast needs no installer or shortcut.
-_WINDOWS_TOAST_SCRIPT = r"""
-$ErrorActionPreference = 'Stop'
+# PowerShell's own registered AppUserModelID: a toast needs one, and this
+# one exists on every Windows 10/11 machine without installing anything.
+_WINDOWS_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+# Fixed script, no untrusted text ever enters this string. The three values
+# arrive in JARVIS_NOTIFY_* environment variables (see module docstring).
+_WINDOWS_SCRIPT = """$ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
-$e = { param($v) [Security.SecurityElement]::Escape($v) }
-$lines = "<text>$(& $e $env:JARVIS_NOTIFY_TITLE)</text>"
-if ($env:JARVIS_NOTIFY_SUBTITLE) { $lines += "<text>$(& $e $env:JARVIS_NOTIFY_SUBTITLE)</text>" }
-$lines += "<text>$(& $e $env:JARVIS_NOTIFY_MESSAGE)</text>"
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml("<toast><visual><binding template='ToastGeneric'>$lines</binding></visual></toast>")
-$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show(
-    [Windows.UI.Notifications.ToastNotification]::new($xml))
+$kind = [Windows.UI.Notifications.ToastTemplateType]::ToastText04
+$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($kind)
+$lines = $xml.GetElementsByTagName('text')
+$values = @($env:JARVIS_NOTIFY_TITLE, $env:JARVIS_NOTIFY_SUBTITLE, $env:JARVIS_NOTIFY_MESSAGE)
+for ($i = 0; $i -lt 3; $i++) {
+    $lines.Item($i).AppendChild($xml.CreateTextNode([string]$values[$i])) > $null
+}
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:JARVIS_NOTIFY_APP).Show($toast)
 """
 
 
@@ -86,12 +93,13 @@ def _truncate(text: str, limit: int) -> str:
 def available() -> bool:
     """Whether posting a notification is plausible right now.
 
-    Cheap and side-effect free: macOS platform + `osascript` on PATH. This
+    Cheap and side-effect free: macOS platform + `osascript` on PATH, or
+    Windows + `powershell.exe` on PATH. This
     is a precondition check, not a delivery guarantee -- Notification
     Center settings, Focus/Do Not Disturb, or per-app permissions can still
     silently drop the notification even when this returns True.
     """
-    if sys.platform == "win32":
+    if _WINDOWS:
         return shutil.which("powershell") is not None
     return sys.platform == "darwin" and shutil.which("osascript") is not None
 
@@ -115,39 +123,42 @@ async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
         safe_message = _truncate(str(message or ""), _MESSAGE_MAX)
         safe_subtitle = _truncate(str(subtitle or ""), _SUBTITLE_MAX)
 
-        if sys.platform == "win32":
+        if _WINDOWS:
+            tool = "powershell"
             argv = ["powershell", "-NoProfile", "-NonInteractive",
-                    "-ExecutionPolicy", "Bypass",
-                    "-Command", _WINDOWS_TOAST_SCRIPT]
+                    "-EncodedCommand",
+                    base64.b64encode(_WINDOWS_SCRIPT.encode("utf-16-le")).decode()]
             env = {**os.environ,
                    "JARVIS_NOTIFY_TITLE": safe_title,
+                   "JARVIS_NOTIFY_SUBTITLE": safe_subtitle,
                    "JARVIS_NOTIFY_MESSAGE": safe_message,
-                   "JARVIS_NOTIFY_SUBTITLE": safe_subtitle}
-            script_in = None
+                   "JARVIS_NOTIFY_APP": _WINDOWS_APP_ID}
+            script = b""
         else:
+            tool = "osascript"
             argv = ["osascript", "-", safe_title, safe_message, safe_subtitle]
             env = None
-            script_in = _NOTIFY_SCRIPT.encode("utf-8")
+            script = _NOTIFY_SCRIPT.encode("utf-8")
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
-                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         except OSError as e:
-            log.warning(f"notifier: failed to spawn {argv[0]}: {e}")
+            log.warning(f"notifier: failed to spawn {tool}: {e}")
             return False
 
         try:
             _, stderr = await asyncio.wait_for(
-                proc.communicate(script_in),
+                proc.communicate(script),
                 timeout=_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            log.warning("notifier: osascript timed out, killing it")
+            log.warning(f"notifier: {tool} timed out, killing it")
             try:
                 proc.kill()
                 await proc.communicate()
@@ -157,7 +168,7 @@ async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
 
         if proc.returncode != 0:
             log.warning(
-                f"notifier: osascript exited {proc.returncode}: "
+                f"notifier: {tool} exited {proc.returncode}: "
                 f"{stderr.decode(errors='replace').strip()}"
             )
             return False

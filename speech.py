@@ -899,12 +899,10 @@ class SpeechScheduler:
             return
         chunk.audio = audio
         chunk.ready = True
-        if audio is None:
-            self._tts_failures += 1
-            if self._tts_failures == 3:
-                chunk.notice = True              # the send loop warns right after this chunk
-        else:
-            self._tts_failures = 0
+        # Consecutive failures are counted by the send loop, in chunk order:
+        # syntheses finish in whatever order the TTS answers, and counted here
+        # a later success landing before an earlier failure reset the count,
+        # so three failures in a row never added up to the notice.
         self._kick()
 
     def _user_silent(self, now: float) -> bool:
@@ -1156,10 +1154,13 @@ class SpeechScheduler:
                     self._kick_later(chunk.earliest_ack - now)
                 if not await self._send({"type": "text", "text": chunk.text}, u):
                     return False
-                if chunk.notice:
+                self._tts_failures += 1
+                if self._tts_failures == 3:      # the third in a row: warn after it
+                    chunk.notice = True
                     await self._send({"type": "text", "text": "My voice is failing, sir."}, u)
                 progressed = True
                 continue
+            self._tts_failures = 0
             await self._set_speaking(True)
             async with self._emit_lock:
                 if u.cancelled:                 # a barge-in landed while we waited

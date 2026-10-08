@@ -77,3 +77,34 @@ def split_command(command: str) -> list[str]:
         return shlex.split(command)
     return [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
             for part in shlex.split(command, posix=False)]
+
+
+def _kill_descendants(proc) -> None:
+    """Windows: kill everything `proc` started. TerminateProcess ends the one
+    process it is given, so claude.exe's tool shells and MCP servers would
+    outlive it, still holding the project directory. POSIX needs none of
+    this: the children are reaped through their own pipes closing."""
+    if sys.platform != "win32":
+        return
+    try:
+        import psutil
+        children = psutil.Process(proc.pid).children(recursive=True)
+    except Exception:
+        return
+    for child in children:
+        try:
+            child.kill()
+        except Exception:
+            pass
+
+
+def terminate(proc) -> None:
+    """Ask a Claude Code child to stop: SIGTERM, or on Windows its whole tree."""
+    _kill_descendants(proc)
+    proc.terminate()
+
+
+def kill(proc) -> None:
+    """Stop a Claude Code child now: SIGKILL, or on Windows its whole tree."""
+    _kill_descendants(proc)
+    proc.kill()

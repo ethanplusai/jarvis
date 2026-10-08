@@ -84,10 +84,22 @@ def applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
 
 
+async def open_terminal_at(path: str, command: str = "") -> dict:
+    """A terminal in `path`, optionally running `command` there.
+
+    The directory travels separately from the command so that each platform
+    can hand it over without a shell parsing it: quoted into a `cd` for
+    Terminal.app, as the working directory of a new console on Windows."""
+    if sys.platform == "win32":
+        return _open_console_windows(path, command)
+    script = f"cd {shlex.quote(path)}"
+    if command:
+        script += f" && {command}"
+    return await open_terminal(script)
+
+
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
-    if sys.platform == "win32":
-        return _open_console_windows(command)
     if command:
         escaped = applescript_escape(command)
         script = (
@@ -280,45 +292,17 @@ async def open_in_editor(path: str) -> dict:
 
 # --- Windows ---------------------------------------------------------------
 #
-# The callers build the same string for every platform: `cd <shlex-quoted
-# path>`, optionally followed by ` && <command>` (a command `builds.
-# command_problem` has already cleared of shell metacharacters). POSIX quoting
-# means nothing to cmd.exe, so on Windows that string is taken apart again and
-# the directory is handed to the new console as its working directory —
-# never re-quoted into a command line.
+# The directory becomes the new console's working directory, never part of a
+# command line, so no path is ever quoted for cmd.exe. The command itself has
+# been through `builds.command_problem`, which permits no shell metacharacter.
 
-def _split_cd_command(command: str) -> tuple[str | None, str]:
-    """(directory, rest) from `cd <quoted> [&& rest]`; (None, command) for
-    anything else."""
-    if not command.startswith("cd "):
-        return None, command
-    lexer = shlex.shlex(command[3:], posix=True)
-    lexer.whitespace_split = True
-    try:
-        directory = lexer.get_token()
-    except ValueError:
-        return None, command
-    rest = command[3:][lexer.instream.tell():].strip()
-    if rest.startswith("&&"):
-        rest = rest[2:].strip()
-    elif rest:
-        return None, command
-    return directory, rest
-
-
-def _open_console_windows(command: str) -> dict:
-    directory, rest = _split_cd_command(command)
-    if command and directory is None:
-        # Not the shape any caller builds, so nothing was vetted for cmd.exe.
-        log.error(f"open_terminal refused an unexpected command: {command!r}")
-        return {"success": False,
-                "confirmation": "I had trouble opening a terminal, sir."}
-    if directory is not None and not os.path.isdir(directory):
+def _open_console_windows(path: str, command: str = "") -> dict:
+    if not os.path.isdir(path):
         return {"success": False,
                 "confirmation": "That folder isn't there any more, sir."}
-    argv = ["cmd.exe", "/k", rest] if rest else ["cmd.exe"]
+    argv = ["cmd.exe", "/k", command] if command else ["cmd.exe"]
     try:
-        subprocess.Popen(argv, cwd=directory,
+        subprocess.Popen(argv, cwd=path,
                          creationflags=subprocess.CREATE_NEW_CONSOLE,
                          close_fds=True)
     except OSError as e:

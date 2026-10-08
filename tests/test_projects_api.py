@@ -8,6 +8,8 @@ project's own known directories before handing it to `actions`.
 """
 
 import importlib
+import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,7 +50,7 @@ def _session(session_id, project, cwd, state=sw.IDLE):
 class _Actions:
     def __init__(self, success=True):
         self.editor: list[str] = []
-        self.terminal: list[str] = []
+        self.terminal: list[tuple[str, str]] = []   # (directory, command)
         self.browser: list[str] = []
         self.success = success
 
@@ -57,8 +59,8 @@ class _Actions:
         return {"success": self.success, "editor": "VS Code",
                 "confirmation": "Opened, sir."}
 
-    async def open_terminal(self, command=""):
-        self.terminal.append(command)
+    async def open_terminal_at(self, path, command=""):
+        self.terminal.append((path, command))
         return {"success": self.success, "confirmation": "Terminal's open, sir."}
 
     async def open_browser(self, url, browser="chrome"):
@@ -204,19 +206,22 @@ def test_open_in_terminal_calls_actions(wired, monkeypatch):
         r = c.post("/api/projects/open",
                    json={"name": "chitauri", "path": "/p/chitauri", "target": "terminal"})
     assert r.status_code == 200
-    assert fake.terminal == ["cd /p/chitauri"]
+    assert fake.terminal == [("/p/chitauri", "")]
 
 
 def test_open_in_browser_calls_actions_with_a_file_uri(wired, monkeypatch):
     server, _store = wired
     fake = _Actions()
+    # `/p/chitauri` on macOS; `C:\p\chitauri` on Windows, where a path with
+    # no drive is not absolute and has no file URI.
+    where = os.path.abspath("/p/chitauri")
     with TestClient(server.app, headers=BROWSER) as c:
         monkeypatch.setattr(server, "actions", fake)
-        server.session_watcher = _Watcher([_session("s1", "chitauri", "/p/chitauri")])
+        server.session_watcher = _Watcher([_session("s1", "chitauri", where)])
         r = c.post("/api/projects/open",
-                   json={"name": "chitauri", "path": "/p/chitauri", "target": "browser"})
+                   json={"name": "chitauri", "path": where, "target": "browser"})
     assert r.status_code == 200
-    assert fake.browser == ["file:///p/chitauri"]
+    assert fake.browser == [Path(where).as_uri()]
 
 
 def test_open_reports_actions_failure(wired, monkeypatch):

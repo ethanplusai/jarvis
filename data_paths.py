@@ -133,7 +133,11 @@ KNOWN_CONNECTIONS_HASHES = frozenset({
 
 
 def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    # CRLF folded to LF first: Windows git (core.autocrlf) checks the shipped
+    # templates out with CRLF, and a template must still be recognised as the
+    # one it is. .gitattributes prevents that for new clones; this covers the
+    # clones that already exist, and a template the user saved with CRLF.
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _recorded_seed_hash(seed: Path) -> Optional[str]:

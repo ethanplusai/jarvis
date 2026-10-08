@@ -12,6 +12,8 @@ that does not stub both, it is wrong however green it runs.
 import asyncio
 import time
 
+import sys
+
 import pytest
 
 import dialog
@@ -328,6 +330,9 @@ def wired(monkeypatch, tmp_path):
         raise AssertionError("no test may run osascript")
     monkeypatch.setattr(dialog, "_osascript", never)
     monkeypatch.setattr(dialog, "_terminal_is_running", lambda: False)
+    # These tests drive the macOS flow with the keypress itself faked, so
+    # they hold on any platform. The Windows refusal has its own test below.
+    monkeypatch.setattr(server_module, "_keypress_supported", lambda: True)
     return server_module
 
 
@@ -728,6 +733,31 @@ def test_the_staged_dialogs_are_drained_after_the_turn(wired):
     assert "_staged_dialogs" in src
 
 
+@pytest.mark.asyncio
+async def test_on_windows_it_is_neither_offered_nor_pressed(wired, monkeypatch):
+    """No tab can be found by tty there, and a key sent to whatever window
+    has focus could answer the wrong prompt. Refused, naming the session."""
+    import brain
+    import jarvis_mcp
+    server = wired
+    monkeypatch.setattr(server, "_keypress_supported", lambda: False)
+    monkeypatch.setattr(server, "speech", FakeSpeech())
+    monkeypatch.setattr(server, "brain_instance", FakeBrain())
+    monkeypatch.setattr(server, "_resolve_or_explain", lambda n: (_state(), None, None))
+    monkeypatch.setattr(dialog, "answer", lambda *a: pytest.fail("pressed a key"))
+
+    result = await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
+
+    assert "Windows" in result and "hammer" in result
+    assert server._staged_dialogs == []
+    rows = server.run_store.list_steers(limit=5)
+    assert rows and rows[0]["outcome"] == "dialog:unsupported_platform"
+    if sys.platform == "win32":
+        assert "answer_dialog" not in {
+            t["name"] for t in jarvis_mcp.offered_tool_specs()}
+        assert "mcp__jarvis__answer_dialog" not in brain.granted_tools([])
+
+
 # --- neither `ps` nor `pgrep` may run ON the event loop --------------------
 #
 # `tty_for_pid` uses a blocking `subprocess.run(["ps", …], timeout=5.0)` and
@@ -737,6 +767,11 @@ def test_the_staged_dialogs_are_drained_after_the_turn(wired):
 #
 # These measure the only thing that matters — whether the loop keeps turning
 # while the lookup is in flight.
+
+
+# A frozen loop gets ~0 turns in 0.4s. A free one gets a turn per sleep —
+# 5ms on macOS, but a whole 15.6ms clock tick on Windows (about 25 turns).
+_UNFROZEN_TICKS = 10 if sys.platform == "win32" else 30
 
 
 class _Ticker:
@@ -771,7 +806,7 @@ async def test_a_slow_ps_does_not_freeze_the_loop(monkeypatch):
     monkeypatch.setattr(dialog, "tty_for_pid", slow)
     async with _Ticker() as ticker:
         assert await dialog.answer(4242, "return") == dialog.NO_TTY
-    assert ticker.ticks > 30, (
+    assert ticker.ticks > _UNFROZEN_TICKS, (
         f"the loop only got {ticker.ticks} turns while `ps` ran — the voice "
         "path shares this thread")
 
@@ -787,7 +822,7 @@ async def test_a_slow_pgrep_does_not_freeze_the_loop(monkeypatch):
     monkeypatch.setattr(dialog, "_terminal_is_running", slow)
     async with _Ticker() as ticker:
         assert await dialog.answer(4242, "return") == dialog.NOT_FOUND
-    assert ticker.ticks > 30, (
+    assert ticker.ticks > _UNFROZEN_TICKS, (
         f"the loop only got {ticker.ticks} turns while `pgrep` ran")
 
 

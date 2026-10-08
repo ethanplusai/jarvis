@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import STANDIN_PYTHON
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stream_success.jsonl"
@@ -27,7 +29,7 @@ def _fake_claude(tmp_path: Path, fixture: Path, exit_code: int = 0,
         f"sys.exit({exit_code})\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> str:
@@ -45,7 +47,7 @@ def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> 
         f"sys.exit({exit_code})\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 @pytest.fixture
@@ -238,7 +240,7 @@ def _script(tmp_path: Path, name: str, body: str) -> str:
     script = tmp_path / name
     script.write_text("#!/usr/bin/env python3\nimport sys, time\n" + body)
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 def _slow_claude(tmp_path: Path, name: str = "slow_claude.py",
@@ -489,7 +491,7 @@ async def test_timeout_keeps_the_collected_stderr(env, tmp_path):
         "sys.stderr.flush()\n"
         "time.sleep(30)\n"
     )
-    ex = mod.RunExecutor(store, claude_path=f"{sys.executable} {script}",
+    ex = mod.RunExecutor(store, claude_path=f"{STANDIN_PYTHON} {script}",
                          grace_sec=1.0)
     run_id = await ex.spawn("hang", "proj", str(tmp), "api", timeout_sec=1)
     run = await ex.wait_for(run_id, timeout=20)
@@ -964,10 +966,6 @@ def _alive(pid: int) -> bool:
     return session_watch.pid_alive(pid)
 
 
-@pytest.mark.xfail(sys.platform == "win32", strict=False, reason=(
-    "os.close(1) in a Windows child does not deliver EOF to the proactor "
-    "pipe, so this exact shape cannot be produced; the silence watchdog "
-    "still kills it (test_*stops_talking*[close_fd] passes)"))
 @pytest.mark.asyncio
 async def test_child_that_closes_stdout_and_hangs_reaches_terminal(env, tmp_path):
     """EOF on stdout must not mean an unbounded wait. The driver gets a grace
@@ -983,10 +981,6 @@ async def test_child_that_closes_stdout_and_hangs_reaches_terminal(env, tmp_path
     assert not _alive(pid), "the hung child was left running"
 
 
-@pytest.mark.xfail(sys.platform == "win32", strict=False, reason=(
-    "os.close(1) in a Windows child does not deliver EOF to the proactor "
-    "pipe, so this exact shape cannot be produced; the silence watchdog "
-    "still kills it (test_*stops_talking*[close_fd] passes)"))
 @pytest.mark.asyncio
 async def test_post_eof_hang_does_not_leak_the_concurrency_permit(env, tmp_path):
     """One hung child must not permanently shrink capacity."""

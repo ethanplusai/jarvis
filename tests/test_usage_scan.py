@@ -389,7 +389,7 @@ def test_a_replaced_file_at_the_same_path_and_size_is_read_from_the_start(tmp_pa
 
     body = p.read_text().replace('"output_tokens": 111', '"output_tokens": 222')
     p.unlink()
-    p.write_text(body)
+    p.write_text(body, newline="")   # byte-for-byte: no CRLF on Windows
     assert len(body) == p.stat().st_size
 
     assert one(us.report(roots=[a], now=NOW, cache=cache), "s1").tokens.output == 222

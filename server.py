@@ -17,12 +17,24 @@ import os
 import difflib
 import re
 import secrets
-import shlex
 import sys
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+# Windows reads text files in the ANSI code page unless Python is in UTF-8
+# mode, and a memory note, transcript or spec holding anything outside it is
+# then misread or fails to read at all. `python server.py` re-runs itself in
+# UTF-8 mode before anything else is imported; any other way of starting the
+# server is caught by preflight's `utf8_mode` check instead.
+if __name__ == "__main__" and sys.platform == "win32" and not sys.flags.utf8_mode:
+    import subprocess as _subprocess
+    try:
+        _code = _subprocess.call([sys.executable, "-X", "utf8", *sys.argv])
+    except KeyboardInterrupt:
+        _code = 130
+    sys.exit(_code)
 
 # The ONE definition of what a line of `.env` is. Both readers use it (this
 # boot loader and `_read_env`), and so does `_env_value_problem`, which is
@@ -226,11 +238,11 @@ SCAN_BUDGET_SECONDS = float(os.getenv("JARVIS_SCAN_BUDGET", "20"))
 SCAN_CACHE_SECONDS = float(os.getenv("JARVIS_SCAN_CACHE", "300"))
 
 # Roots are overridable so a user whose Desktop is slow, huge or cloud-backed
-# has somewhere to point this. Colon-separated, like PATH.
+# has somewhere to point this. Separated like PATH (`:`, or `;` on Windows).
 def _scan_roots() -> list[Path]:
     override = os.getenv("JARVIS_PROJECT_ROOTS", "").strip()
     if override:
-        return [Path(r).expanduser() for r in override.split(":") if r.strip()]
+        return [Path(r).expanduser() for r in override.split(os.pathsep) if r.strip()]
     return [DESKTOP_PATH, project_maker.projects_root()]
 
 
@@ -3528,12 +3540,11 @@ async def _perform_command(item: _StagedCommand) -> None:
             await speech.say("Cancelled, sir.", Priority.NORMAL)
             return
 
-        # `cd` into the project first: a start command means nothing in the
-        # wrong directory, and the path is quoted while the command itself has
-        # already been through `builds.command_problem`, which permits no
-        # shell metacharacter at all.
-        result = await actions.open_terminal(
-            f"cd {shlex.quote(item.path)} && {item.command}")
+        # In the project directory: a start command means nothing in the wrong
+        # one. The path travels separately (see actions.open_terminal_at) and
+        # the command has already been through `builds.command_problem`, which
+        # permits no shell metacharacter at all.
+        result = await actions.open_terminal_at(item.path, item.command)
         if result.get("success"):
             record("ran")
             await speech.say(
@@ -3695,6 +3706,14 @@ async def _tty_for_session_or_explain(session):
     return pid, tty, None
 
 
+def _keypress_supported() -> bool:
+    """Whether `answer_dialog` can work on this machine. It finds the
+    Terminal.app tab that owns a session's tty over AppleScript; Windows
+    Terminal offers nothing to find a tab by, and a key sent to whichever
+    window has focus could answer the wrong prompt."""
+    return sys.platform != "win32"
+
+
 async def tool_answer_dialog(args: dict) -> str:
     """Validate the user's decision to press a key, and STAGE it.
 
@@ -3719,6 +3738,16 @@ async def tool_answer_dialog(args: dict) -> str:
         run_store.record_steer("", name, "", raw_key,
                                f"dialog:{reason or 'unresolved'}")
         return problem
+
+    if not _keypress_supported():
+        # Refused before anything is staged: see `_keypress_supported`. The
+        # brain is not offered this tool on Windows at all; this is the wall
+        # for a caller that reaches the endpoint anyway.
+        run_store.record_steer(session.session_id, session.voice_name,
+                               session.project, raw_key,
+                               "dialog:unsupported_platform")
+        return (f"On Windows I can't press keys in another terminal, sir — "
+                f"{_said_name(session)} needs you to answer it there yourself.")
 
     key = dialog.normalize_key(raw_key)
     if key is None:
@@ -4864,7 +4893,7 @@ async def tool_open_in_terminal(args: dict) -> str:
     name, path, problem = _resolve_project_or_explain(reference)
     if problem:
         return problem
-    result = await actions.open_terminal(f"cd {shlex.quote(path)}")
+    result = await actions.open_terminal_at(path)
     if not result.get("success"):
         return result.get("confirmation") or "Terminal wouldn't open, sir."
     return f"Terminal's open in {name}, sir."
@@ -6545,7 +6574,7 @@ async def api_project_open(body: ProjectOpenRequest):
     if body.target == "editor":
         result = await actions.open_in_editor(body.path)
     elif body.target == "terminal":
-        result = await actions.open_terminal(f"cd {shlex.quote(body.path)}")
+        result = await actions.open_terminal_at(body.path)
     elif body.target == "browser":
         result = await actions.open_browser(Path(body.path).as_uri())
     else:

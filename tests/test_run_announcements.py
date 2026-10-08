@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import STANDIN_PYTHON
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stream_success.jsonl"
@@ -297,7 +299,7 @@ def _fake_claude(tmp_path: Path) -> str:
         "sys.exit(0)\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 @pytest.fixture

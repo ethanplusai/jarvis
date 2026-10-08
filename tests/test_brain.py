@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import STANDIN_PYTHON
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_brain.py"
@@ -30,14 +32,15 @@ def _carried(prompt: str) -> str:
 def _config(tmp_path, **kw):
     import brain
     return brain.BrainConfig(home=tmp_path / "jarvis",
-                             claude_path=f"{sys.executable} {FAKE}",
+                             claude_path=f"{STANDIN_PYTHON} {FAKE}",
                              turn_timeout=kw.pop("turn_timeout", 5.0),
                              warmup_timeout=kw.pop("warmup_timeout", 10.0),
                              **kw)
 
 
-def test_command_has_exact_flags(tmp_path):
+def test_command_has_exact_flags(tmp_path, monkeypatch):
     import brain
+    monkeypatch.setattr(brain, "_WINDOWS", False)   # the macOS flag, pinned
     b = brain.Brain(_config(tmp_path, model="opus"))
     cmd = b.command()
     joined = " ".join(cmd)

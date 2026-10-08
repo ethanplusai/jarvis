@@ -698,6 +698,21 @@ TOOL_SPECS = [
     },
 ]
 
+# Pressing a key in another session's terminal is macOS-only: it finds the
+# Terminal.app tab that owns the session's tty over AppleScript, and Windows
+# Terminal offers nothing to find a tab by. Not offered at all there, so the
+# brain never promises it (brain.granted_tools leaves it out as well, and
+# server.tool_answer_dialog refuses it). TOOL_SPECS stays the whole set: it
+# is what every handler is checked against.
+UNAVAILABLE_ON_WINDOWS = {"answer_dialog"}
+
+
+def offered_tool_specs() -> list[dict]:
+    """The tools this machine can actually perform."""
+    if sys.platform == "win32":
+        return [t for t in TOOL_SPECS if t["name"] not in UNAVAILABLE_ON_WINDOWS]
+    return TOOL_SPECS
+
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -839,7 +854,8 @@ def handle(msg: dict) -> dict | None:
     elif method == "ping":
         reply = {"jsonrpc": "2.0", "id": rid, "result": {}}
     elif method == "tools/list":
-        reply = {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOL_SPECS}}
+        reply = {"jsonrpc": "2.0", "id": rid,
+                 "result": {"tools": offered_tool_specs()}}
     elif method == "tools/call":
         params = msg.get("params") or {}
         name = params.get("name", "")
