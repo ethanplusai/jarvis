@@ -15,7 +15,7 @@ import asyncio
 import logging
 import math
 import os
-import shlex
+import sys
 import shutil
 import time
 from typing import Callable
@@ -189,6 +189,21 @@ def _resolve_idle(explicit: float | None) -> float:
     return _resolve_bound(explicit, "JARVIS_RUN_IDLE_SEC",
                           _IDLE_OUTPUT_SEC, "a silent run")
 
+
+
+def _kill_children(pid) -> None:
+    """Kill every descendant of `pid` (Windows: there are no process groups
+    to signal). Never raises — the caller terminates `pid` itself next."""
+    try:
+        import psutil
+        children = psutil.Process(int(pid)).children(recursive=True)
+    except Exception:
+        return
+    for child in children:
+        try:
+            child.kill()
+        except Exception:
+            pass
 
 class _IdleTimeout(Exception):
     """The child held stdout open and said nothing for too long.
@@ -401,6 +416,10 @@ class RunExecutor:
         """
         if proc.returncode is not None:
             return
+        if sys.platform == "win32":
+            # TerminateProcess ends claude.exe alone; its tool shells and MCP
+            # servers would outlive it, still holding the project directory.
+            _kill_children(getattr(proc, "pid", None))
         try:
             proc.terminate()
         except (ProcessLookupError, OSError):
@@ -441,7 +460,7 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        base = claude_env.split_command(self._claude_path)
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:

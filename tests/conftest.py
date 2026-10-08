@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 import pytest
 import pytest_asyncio
@@ -115,3 +116,26 @@ async def _no_run_left_mid_flight():
         task.cancel()
     if pending:
         await asyncio.wait(pending, timeout=5)
+
+
+# Two things a test can ask of the filesystem that Windows will not do, and
+# that are skips rather than failures there:
+#   * a symlink, which needs Developer Mode or an elevated shell (1314); and
+#   * a filename holding a newline, quote or other character NTFS forbids —
+#     the "hostile filename" attacks, which cannot exist on that filesystem.
+# Narrow on purpose: any other OSError still fails the test.
+_NTFS_FORBIDDEN = set(chr(10) + chr(13) + '"<>|*?')
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_pyfunc_call(pyfuncitem):
+    try:
+        return (yield)
+    except OSError as e:
+        if sys.platform == "win32":
+            if getattr(e, "winerror", None) == 1314:
+                pytest.skip("creating a symlink needs Developer Mode on Windows")
+            names = f"{e.filename or ''}{e.filename2 or ''}"
+            if e.errno == 22 and _NTFS_FORBIDDEN & set(names):
+                pytest.skip("filename characters NTFS cannot store")
+        raise

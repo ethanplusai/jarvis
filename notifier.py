@@ -23,6 +23,7 @@ string with those characters in it.
 
 import asyncio
 import logging
+import os
 import shutil
 import sys
 
@@ -54,6 +55,27 @@ end run
 """
 
 
+# Windows: the same rule, kept the same way. The script is fixed; the three
+# strings reach it as environment variables, and it XML-escapes them itself
+# before they go anywhere near the toast template. The AppUserModelID is
+# PowerShell's own, which every Windows 10/11 install has registered, so the
+# toast needs no installer or shortcut.
+_WINDOWS_TOAST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$e = { param($v) [Security.SecurityElement]::Escape($v) }
+$lines = "<text>$(& $e $env:JARVIS_NOTIFY_TITLE)</text>"
+if ($env:JARVIS_NOTIFY_SUBTITLE) { $lines += "<text>$(& $e $env:JARVIS_NOTIFY_SUBTITLE)</text>" }
+$lines += "<text>$(& $e $env:JARVIS_NOTIFY_MESSAGE)</text>"
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml("<toast><visual><binding template='ToastGeneric'>$lines</binding></visual></toast>")
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show(
+    [Windows.UI.Notifications.ToastNotification]::new($xml))
+"""
+
+
 def _truncate(text: str, limit: int) -> str:
     """Bound text length for a glanceable notification, marking any cut."""
     if len(text) <= limit:
@@ -69,6 +91,8 @@ def available() -> bool:
     Center settings, Focus/Do Not Disturb, or per-app permissions can still
     silently drop the notification even when this returns True.
     """
+    if sys.platform == "win32":
+        return shutil.which("powershell") is not None
     return sys.platform == "darwin" and shutil.which("osascript") is not None
 
 
@@ -91,20 +115,35 @@ async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
         safe_message = _truncate(str(message or ""), _MESSAGE_MAX)
         safe_subtitle = _truncate(str(subtitle or ""), _SUBTITLE_MAX)
 
+        if sys.platform == "win32":
+            argv = ["powershell", "-NoProfile", "-NonInteractive",
+                    "-ExecutionPolicy", "Bypass",
+                    "-Command", _WINDOWS_TOAST_SCRIPT]
+            env = {**os.environ,
+                   "JARVIS_NOTIFY_TITLE": safe_title,
+                   "JARVIS_NOTIFY_MESSAGE": safe_message,
+                   "JARVIS_NOTIFY_SUBTITLE": safe_subtitle}
+            script_in = None
+        else:
+            argv = ["osascript", "-", safe_title, safe_message, safe_subtitle]
+            env = None
+            script_in = _NOTIFY_SCRIPT.encode("utf-8")
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "osascript", "-", safe_title, safe_message, safe_subtitle,
+                *argv,
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError as e:
-            log.warning(f"notifier: failed to spawn osascript: {e}")
+            log.warning(f"notifier: failed to spawn {argv[0]}: {e}")
             return False
 
         try:
             _, stderr = await asyncio.wait_for(
-                proc.communicate(_NOTIFY_SCRIPT.encode("utf-8")),
+                proc.communicate(script_in),
                 timeout=_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:

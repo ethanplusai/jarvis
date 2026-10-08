@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 import shutil
 from dataclasses import dataclass
 
@@ -360,6 +361,12 @@ async def answer(pid: int, key: str) -> str:
         # get wrong.
         log.warning(f"refusing a key outside the vocabulary: {key!r}")
         return BAD_KEY
+    if sys.platform == "win32":
+        # Windows Terminal has no scripting interface that can address one
+        # tab by the process it hosts, and pressing a key in whatever window
+        # has focus is exactly the guess this module exists to never make.
+        # Not found: the user is told it needs their own hand.
+        return NOT_FOUND
     try:
         tty = await tty_for_pid_async(pid)
         if tty is None:

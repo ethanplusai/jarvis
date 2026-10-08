@@ -21,6 +21,8 @@ updated is the one nobody notices.
 from __future__ import annotations
 
 import os
+import shlex
+import sys
 
 # Every ANTHROPIC_* variable, not just the key: the base URL and the model
 # override redirect a child just as effectively as credentials do.
@@ -56,3 +58,22 @@ def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return {k: v for k, v in source.items()
             if not k.startswith(SCRUBBED_ENV_PREFIXES)
             and k not in SCRUBBED_ENV_KEYS}
+
+
+def split_command(command: str) -> list[str]:
+    """Turn the configured `claude` command into argv.
+
+    It is usually a bare path, but tests and power users pass a prefix such as
+    `python fake_brain.py`. POSIX shlex treats a backslash as an escape, which
+    turns a Windows path such as `C:/Users/me/claude.exe` written with
+    backslashes into `C:Usersmeclaude.exe`, so on
+    Windows the command is split the cmd.exe way and its quotes stripped. A
+    command that names an existing file is never split, so a path with spaces
+    survives on either platform.
+    """
+    if os.path.isfile(command):
+        return [command]
+    if sys.platform != "win32":
+        return shlex.split(command)
+    return [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
+            for part in shlex.split(command, posix=False)]

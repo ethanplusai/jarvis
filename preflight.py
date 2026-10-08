@@ -356,6 +356,9 @@ async def _check_accessibility(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     macOS version, this comes back as a WARN (unrecognised error) rather
     than mis-reporting OK, so it fails safe.
     """
+    if sys.platform == "win32":
+        return Check(name="accessibility", status=STATUS_OK,
+                     message="Not needed on Windows (answer_dialog is macOS-only).")
     if sys.platform != "darwin" or not shutil.which("osascript"):
         return Check(
             name="accessibility",
@@ -411,6 +414,9 @@ def _check_screen_recording_sync() -> Check:
     one) and NEVER captures anything to find out -- a screenshot the user did
     not ask for, at every boot, is precisely what this capability must not do.
     """
+    if sys.platform == "win32":
+        return Check(name="screen_recording", status=STATUS_OK,
+                     message="Not needed on Windows (screen sight is macOS-only).")
     try:
         granted = screen.screen_recording_granted()
     except Exception as e:  # the module must never take startup down

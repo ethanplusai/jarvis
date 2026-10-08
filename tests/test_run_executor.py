@@ -355,8 +355,7 @@ async def test_store_failure_still_reaches_terminal_state(env):
 
     # ...and no child left behind.
     assert ex._procs == {}
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not _alive(pid)
 
 
 # -- IMPORTANT 4: stderr must be drained concurrently ----------------------
@@ -960,13 +959,15 @@ async def _await_pid(store, run_id: str, timeout: float = 10.0) -> int:
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+    # session_watch.pid_alive: os.kill(pid, 0) is Ctrl+C on Windows.
+    import session_watch
+    return session_watch.pid_alive(pid)
 
 
+@pytest.mark.xfail(sys.platform == "win32", strict=False, reason=(
+    "os.close(1) in a Windows child does not deliver EOF to the proactor "
+    "pipe, so this exact shape cannot be produced; the silence watchdog "
+    "still kills it (test_*stops_talking*[close_fd] passes)"))
 @pytest.mark.asyncio
 async def test_child_that_closes_stdout_and_hangs_reaches_terminal(env, tmp_path):
     """EOF on stdout must not mean an unbounded wait. The driver gets a grace
@@ -982,6 +983,10 @@ async def test_child_that_closes_stdout_and_hangs_reaches_terminal(env, tmp_path
     assert not _alive(pid), "the hung child was left running"
 
 
+@pytest.mark.xfail(sys.platform == "win32", strict=False, reason=(
+    "os.close(1) in a Windows child does not deliver EOF to the proactor "
+    "pipe, so this exact shape cannot be produced; the silence watchdog "
+    "still kills it (test_*stops_talking*[close_fd] passes)"))
 @pytest.mark.asyncio
 async def test_post_eof_hang_does_not_leak_the_concurrency_permit(env, tmp_path):
     """One hung child must not permanently shrink capacity."""
@@ -1493,6 +1498,11 @@ def _write_lines(tmp_path: Path, name: str, lines: list[str]) -> Path:
     return path
 
 
+# Windows has no SIGSTOP to suspend a process with.
+_SIGSTOP = pytest.param("sigstop", marks=pytest.mark.skipif(
+    sys.platform == "win32", reason="no SIGSTOP on Windows"))
+
+
 def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
     """A stand-in `claude` that emits one line and then stops, `how` ways."""
     bodies = {
@@ -1512,7 +1522,7 @@ def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
                    "sys.stdout.flush()\n" % str(FIXTURE) + bodies[how])
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
         env, how):
@@ -1531,7 +1541,7 @@ async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
     assert not _alive(pid), f"the {how} child was left running"
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_no_way_of_going_quiet_leaks_the_concurrency_permit(env, how):
     store, mod, tmp = env

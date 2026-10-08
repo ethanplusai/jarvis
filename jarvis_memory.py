@@ -13,7 +13,7 @@ keeping a stale line.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import data_paths
@@ -335,6 +335,23 @@ def read_project_note(project: str) -> str | None:
 
 
 _JOURNAL_STAMP_FMT = "%Y-%m-%d-%H%M%S-%f"   # fixed-width: lexicographic == chronological
+
+# The last moment a journal was stamped with. Windows' clock under Python 3.12
+# advances in ~15ms ticks, so two entries written back to back read the SAME
+# microsecond, and the tie is then broken by the reason in the filename —
+# "rotation" before "shutdown" — rather than by which was written last.
+_last_journal_moment: datetime | None = None
+
+
+def _journal_moment() -> datetime:
+    """`datetime.now()`, but strictly later than any earlier journal stamp
+    from this process."""
+    global _last_journal_moment
+    now = datetime.now()
+    if _last_journal_moment is not None and now <= _last_journal_moment:
+        now = _last_journal_moment + timedelta(microseconds=1)
+    _last_journal_moment = now
+    return now
 _JOURNAL_NAME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{6}-\d{6})-(.+)\.md")
 
 # Reasons that mark an entry as a PLACEHOLDER: a tombstone proving a
@@ -385,7 +402,7 @@ def write_journal(text: str, reason: str = "shutdown",
     data_paths.ensure_memory_layout()
     reason = one_line(reason) or "shutdown"
     untrusted_source = one_line(untrusted_source) or None
-    stamp = datetime.now().strftime(_JOURNAL_STAMP_FMT)
+    stamp = _journal_moment().strftime(_JOURNAL_STAMP_FMT)
     path = data_paths.journal_dir() / f"{stamp}-{slugify(reason)}.md"
     n = 2
     while path.exists():

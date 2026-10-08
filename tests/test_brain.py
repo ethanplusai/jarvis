@@ -405,11 +405,9 @@ async def test_launch_prompt_names_the_generation_being_started(tmp_path, monkey
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+    # session_watch.pid_alive: os.kill(pid, 0) is Ctrl+C on Windows.
+    import session_watch
+    return session_watch.pid_alive(pid)
 
 
 @pytest.mark.asyncio
