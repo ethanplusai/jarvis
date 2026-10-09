@@ -452,9 +452,18 @@ def _check_screen_recording_sync() -> Check:
 
 
 def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
+    """FISH_API_KEY must be set or JARVIS has no voice -- except on Windows,
+    where the system voice stands in (a warning: it works, but not as him)."""
+    key = os.environ.get("FISH_API_KEY", "").strip()
+    if key and key != "your-fish-audio-api-key-here":
         return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+    if sys.platform == "win32" and os.environ.get("JARVIS_WINDOWS_TTS", "true").lower() not in ("0", "false", "no"):
+        return Check(
+            name="fish_api_key",
+            status=STATUS_WARN,
+            message="FISH_API_KEY is not set; speaking with the Windows system voice.",
+            remedy="For the JARVIS voice, get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
+        )
     return Check(
         name="fish_api_key",
         status=STATUS_FAIL,

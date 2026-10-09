@@ -191,8 +191,25 @@ def mp3_seconds(data: Optional[bytes]) -> float:
     return 0.0
 
 
+def wav_seconds(data: Optional[bytes]) -> float:
+    """How long this RIFF/WAVE audio plays (the Windows fallback voice), from
+    its fmt chunk's byte rate and its data chunk's size. 0.0 for anything
+    that is not one."""
+    if not data or len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return 0.0
+    i, byte_rate = 12, 0
+    while i + 8 <= len(data):
+        cid, size = data[i:i + 4], int.from_bytes(data[i + 4:i + 8], "little")
+        if cid == b"fmt " and size >= 12 and i + 20 <= len(data):
+            byte_rate = int.from_bytes(data[i + 16:i + 20], "little")
+        elif cid == b"data":
+            return min(size, len(data) - i - 8) / byte_rate if byte_rate else 0.0
+        i += 8 + size + (size & 1)
+    return 0.0
+
+
 def ack_floor_seconds(audio: Optional[bytes]) -> float:
-    return min(mp3_seconds(audio) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
+    return min((mp3_seconds(audio) or wav_seconds(audio)) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
 
 # A one- or two-word utterance whose every token JARVIS just said is only an
 # echo if it arrived while that speech was still coming out of the speaker.

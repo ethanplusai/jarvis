@@ -110,6 +110,9 @@ log = logging.getLogger("jarvis")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+# No Fish key on Windows: speak with the system's own SAPI voice rather than
+# not at all. JARVIS_WINDOWS_TTS=false turns the fallback off (text only).
+WINDOWS_TTS_FALLBACK = os.getenv("JARVIS_WINDOWS_TTS", "true").lower() not in ("0", "false", "no")
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -472,9 +475,21 @@ _last_greeting_time: float = 0
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
+def voice_backend() -> str:
+    """"fish", "windows", or "" when JARVIS has no voice at all."""
+    if tts.fish_key_usable(FISH_API_KEY):
+        return "fish"
+    if WINDOWS_TTS_FALLBACK and tts.windows_speech_available():
+        return "windows"
+    return ""
+
+
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
+    """Generate speech audio from text using Fish Audio TTS, or the Windows fallback."""
+    backend = voice_backend()
+    if backend == "windows":
+        return await _synth_windows(text)
+    if backend != "fish":
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
 
@@ -516,6 +531,7 @@ speech: Optional[SpeechScheduler] = None
 session_watcher: "session_watch.SessionWatcher | None" = None
 session_clients: set = set()
 _tts_client: Optional[httpx.AsyncClient] = None
+_windows_speech: Optional[tts.WindowsSpeech] = None
 _brain_notice_at = {"restarting": 0.0}
 _bg_tasks: set[asyncio.Task] = set()
 _CONTENT_FRAMES = ("audio", "text")
@@ -622,7 +638,20 @@ async def _voice_emit(msg: dict) -> None:
         raise NoVoiceClient("no voice client connected")
 
 
+async def _synth_windows(text: str) -> Optional[bytes]:
+    global _windows_speech
+    if _windows_speech is None:
+        _windows_speech = tts.WindowsSpeech()
+    r = await _windows_speech.synthesize(text)
+    if r is None:
+        return None
+    log.debug(f"tts (windows): {len(text)} chars, total {r.total_sec:.2f}s")
+    return r.audio
+
+
 async def _synth_for_speech(text: str) -> Optional[bytes]:
+    if voice_backend() == "windows":
+        return await _synth_windows(text)
     r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
     if r is None:
         return None
@@ -953,6 +982,9 @@ def _active_project_names() -> list[str]:
 async def start_brain_and_speech() -> None:
     global brain_instance, speech, _tts_client
     _tts_client = httpx.AsyncClient(timeout=15.0)
+    if voice_backend() == "windows":
+        log.info(f"no Fish Audio key: speaking with the Windows voice "
+                 f"({os.getenv('JARVIS_WINDOWS_VOICE', tts.WINDOWS_VOICE_DEFAULT)})")
     speech = SpeechScheduler(lambda t: _synth_for_speech(t), _voice_emit, prepare=strip_markdown_for_tts,
                              transport_ready=lambda: bool(voice_clients))
     await speech.start()
@@ -1153,7 +1185,7 @@ async def _maybe_rotate() -> None:
 async def stop_brain_and_speech() -> None:
     """Stop the brain first (no more turns), then the mouth, then the HTTP client.
     Each step is isolated so one failure cannot leak the others."""
-    global brain_instance, speech, _tts_client
+    global brain_instance, speech, _tts_client, _windows_speech
     # A generation must never vanish without a trace. The entry is written
     # whether or not the brain was in a state to write one itself, and the
     # whole step is wrapped: journalling must never prevent shutdown.
@@ -1177,7 +1209,8 @@ async def stop_brain_and_speech() -> None:
         log.warning(f"shutdown journal failed: {e}")
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
-                        ("tts client", _tts_client.aclose() if _tts_client else None)):
+                        ("tts client", _tts_client.aclose() if _tts_client else None),
+                        ("windows speech", _windows_speech.close() if _windows_speech else None)):
         if coro is None:
             continue
         try:
@@ -1185,6 +1218,7 @@ async def stop_brain_and_speech() -> None:
         except Exception as e:
             log.warning(f"shutdown: {label} did not stop cleanly: {e}")
     brain_instance, speech, _tts_client = None, None, None
+    _windows_speech = None
 
 
 # Completions are held and spoken together at the next pause: the user asked

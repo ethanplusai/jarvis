@@ -395,9 +395,32 @@ def test_fish_api_key_present(monkeypatch):
 
 def test_fish_api_key_absent(monkeypatch):
     monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     check = preflight._check_fish_api_key_sync()
     assert check.status == STATUS_FAIL
     assert check.remedy
+
+
+def test_fish_api_key_placeholder_counts_as_absent(monkeypatch):
+    monkeypatch.setenv("FISH_API_KEY", "your-fish-audio-api-key-here")
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    assert preflight._check_fish_api_key_sync().status == STATUS_FAIL
+
+
+def test_fish_api_key_absent_on_windows_warns_of_the_system_voice(monkeypatch):
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("JARVIS_WINDOWS_TTS", raising=False)
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    check = preflight._check_fish_api_key_sync()
+    assert check.status == STATUS_WARN
+    assert "Windows" in check.message and check.remedy
+
+
+def test_fish_api_key_absent_on_windows_with_the_fallback_off_fails(monkeypatch):
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.setenv("JARVIS_WINDOWS_TTS", "false")
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    assert preflight._check_fish_api_key_sync().status == STATUS_FAIL
 
 
 # --- leftover ANTHROPIC_* ------------------------------------------------------

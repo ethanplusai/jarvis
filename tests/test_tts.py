@@ -60,3 +60,47 @@ async def test_empty_text_or_missing_key_short_circuits():
         assert await tts.synthesize_chunk("   ", api_key="k", voice_id="v", client=c) is None
         assert await tts.synthesize_chunk("hi", api_key="", voice_id="v", client=c) is None
     assert calls == []
+
+
+def test_the_template_placeholder_is_not_a_usable_key():
+    import tts
+    assert tts.fish_key_usable("sk-real")
+    assert not tts.fish_key_usable("")
+    assert not tts.fish_key_usable(None)
+    assert not tts.fish_key_usable("  your-fish-audio-api-key-here ")
+
+
+def _wav(seconds: float, rate: int = 22050) -> bytes:
+    import io, wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * int(rate * seconds))
+    return buf.getvalue()
+
+
+def test_wav_length_is_read_from_its_header():
+    from speech import wav_seconds, ack_floor_seconds, ACK_FLOOR_FACTOR
+    assert abs(wav_seconds(_wav(2.0)) - 2.0) < 1e-6
+    assert abs(ack_floor_seconds(_wav(2.0)) - 2.0 * ACK_FLOOR_FACTOR) < 1e-6
+    assert wav_seconds(b"ID3" + b"\x00" * 100) == 0.0
+    assert wav_seconds(b"RIFF\x00\x00\x00\x00WAVE") == 0.0     # no chunks: no floor
+    assert wav_seconds(None) == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="System.Speech is Windows-only")
+async def test_windows_speech_returns_wav_and_survives_its_worker_dying():
+    import tts
+    from speech import wav_seconds
+    w = tts.WindowsSpeech()
+    try:
+        r = await w.synthesize("Good evening, sir. Café — 100%.")
+        assert r is not None and r.audio[:4] == b"RIFF" and wav_seconds(r.audio) > 0.5
+        assert await w.synthesize("   ") is None
+        w._proc.kill()
+        await w._proc.wait()
+        r = await w.synthesize("Back again.")
+        assert r is not None and r.audio[:4] == b"RIFF"
+    finally:
+        await w.close()
