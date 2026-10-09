@@ -289,6 +289,8 @@ def record_steer(session_id: str, voice_name: str, project: str,
 def list_steers(limit: int = 50) -> list[dict]:
     with closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT * FROM steers ORDER BY created_at DESC LIMIT ?", (limit,)
+            # id breaks ties: on Windows time.time() ticks coarsely enough
+            # that two steers recorded back to back share a created_at.
+            "SELECT * FROM steers ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
