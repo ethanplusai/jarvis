@@ -133,7 +133,11 @@ KNOWN_CONNECTIONS_HASHES = frozenset({
 
 
 def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    # CRLF folded to LF first: Windows git (core.autocrlf) checks the shipped
+    # templates out with CRLF, and a template must still be recognised as the
+    # one it is. .gitattributes prevents that for new clones; this covers the
+    # clones that already exist, and a template the user saved with CRLF.
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _recorded_seed_hash(seed: Path) -> Optional[str]:
@@ -376,7 +380,8 @@ def ensure_tool_token() -> str:
 
     token = secrets.token_urlsafe(32)
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                     | getattr(os, "O_BINARY", 0), 0o600)
     except FileExistsError:
         pass
     else:
@@ -386,14 +391,23 @@ def ensure_tool_token() -> str:
             os.close(fd)
         return token
 
-    fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+    # Windows has no O_NOFOLLOW, no uids and no fchmod. The token lives under
+    # the user's profile, whose ACL already keeps other accounts out, so what
+    # is left to refuse there is a link planted at the path — checked by name
+    # first, since the open below cannot refuse to follow one.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and (path.is_symlink()
+                         or getattr(path, "is_junction", lambda: False)()):
+        raise OSError(f"{path} is a link, not a regular file")
+    fd = os.open(str(path), os.O_RDWR | nofollow | getattr(os, "O_BINARY", 0))
     try:
         info = os.fstat(fd)
         if not _stat.S_ISREG(info.st_mode):
             raise OSError(f"{path} is not a regular file")
-        if info.st_uid != os.getuid():
-            raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "getuid"):
+            if info.st_uid != os.getuid():
+                raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
+            os.fchmod(fd, 0o600)
         existing = os.read(fd, 4096).decode("utf-8", "ignore").strip()
         if existing:
             return existing

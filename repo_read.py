@@ -741,7 +741,7 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
             hits.capped = True
             break
         if len(hits.lines) < SEARCH_MAX_HITS:
-            hits.lines.append(f"{relative}:{number}: {_clip(body)}")
+            hits.lines.append(f"{relative.as_posix()}:{number}: {_clip(body)}")
     return hits
 
 

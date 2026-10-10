@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -110,6 +112,7 @@ def test_a_non_dict_json_body_is_refused_cleanly(client):
     assert r.json()["ok"] is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes; Windows uses ACLs")
 def test_the_token_file_is_not_world_readable(client):
     c, server = client
     server.data_paths.ensure_tool_token()
@@ -117,6 +120,7 @@ def test_the_token_file_is_not_world_readable(client):
     assert mode == 0o600
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes; Windows uses ACLs")
 def test_ensure_tool_token_fixes_permissions_of_a_pre_existing_file(client):
     """A local process that pre-creates the token path with looser
     permissions must not get to keep read access to it."""

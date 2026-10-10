@@ -47,6 +47,8 @@ import asyncio
 import importlib
 from pathlib import Path
 
+import sys
+
 import pytest
 
 SERVER = Path(__file__).parent.parent / "server.py"
@@ -786,6 +788,7 @@ def test_every_echo_site_is_walled_when_driven(server, payload):
             f"{name} echoed its argument: {out!r}"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids \" < > and newlines in file names, so this name cannot exist there")
 def test_a_file_the_repository_named_is_not_spoken_raw(server, monkeypatch, tmp_path):
     """The ninth audit: a filename on APFS may hold anything but `/` and
     NUL, and `open_in_editor`'s FOUND branch said it raw — twenty lines

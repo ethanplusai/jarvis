@@ -191,8 +191,25 @@ def mp3_seconds(data: Optional[bytes]) -> float:
     return 0.0
 
 
+def wav_seconds(data: Optional[bytes]) -> float:
+    """How long this RIFF/WAVE audio plays (the Windows fallback voice), from
+    its fmt chunk's byte rate and its data chunk's size. 0.0 for anything
+    that is not one."""
+    if not data or len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return 0.0
+    i, byte_rate = 12, 0
+    while i + 8 <= len(data):
+        cid, size = data[i:i + 4], int.from_bytes(data[i + 4:i + 8], "little")
+        if cid == b"fmt " and size >= 12 and i + 20 <= len(data):
+            byte_rate = int.from_bytes(data[i + 16:i + 20], "little")
+        elif cid == b"data":
+            return min(size, len(data) - i - 8) / byte_rate if byte_rate else 0.0
+        i += 8 + size + (size & 1)
+    return 0.0
+
+
 def ack_floor_seconds(audio: Optional[bytes]) -> float:
-    return min(mp3_seconds(audio) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
+    return min((mp3_seconds(audio) or wav_seconds(audio)) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
 
 # A one- or two-word utterance whose every token JARVIS just said is only an
 # echo if it arrived while that speech was still coming out of the speaker.
@@ -899,12 +916,10 @@ class SpeechScheduler:
             return
         chunk.audio = audio
         chunk.ready = True
-        if audio is None:
-            self._tts_failures += 1
-            if self._tts_failures == 3:
-                chunk.notice = True              # the send loop warns right after this chunk
-        else:
-            self._tts_failures = 0
+        # Consecutive failures are counted by the send loop, in chunk order:
+        # syntheses finish in whatever order the TTS answers, and counted here
+        # a later success landing before an earlier failure reset the count,
+        # so three failures in a row never added up to the notice.
         self._kick()
 
     def _user_silent(self, now: float) -> bool:
@@ -1156,10 +1171,13 @@ class SpeechScheduler:
                     self._kick_later(chunk.earliest_ack - now)
                 if not await self._send({"type": "text", "text": chunk.text}, u):
                     return False
-                if chunk.notice:
+                self._tts_failures += 1
+                if self._tts_failures == 3:      # the third in a row: warn after it
+                    chunk.notice = True
                     await self._send({"type": "text", "text": "My voice is failing, sir."}, u)
                 progressed = True
                 continue
+            self._tts_failures = 0
             await self._set_speaking(True)
             async with self._emit_lock:
                 if u.cancelled:                 # a barge-in landed while we waited

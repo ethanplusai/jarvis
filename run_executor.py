@@ -15,7 +15,6 @@ import asyncio
 import logging
 import math
 import os
-import shlex
 import shutil
 import time
 from typing import Callable
@@ -402,7 +401,7 @@ class RunExecutor:
         if proc.returncode is not None:
             return
         try:
-            proc.terminate()
+            claude_env.terminate(proc)
         except (ProcessLookupError, OSError):
             pass
         try:
@@ -412,7 +411,7 @@ class RunExecutor:
         except asyncio.TimeoutError:
             pass
         try:
-            proc.kill()
+            claude_env.kill(proc)
         except (ProcessLookupError, OSError):
             pass
         try:
@@ -441,7 +440,7 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        base = claude_env.split_command(self._claude_path)
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:
@@ -739,7 +738,7 @@ class RunExecutor:
                 log.exception("run %s could not be marked terminal", run_id)
             if proc is not None and proc.returncode is None:
                 try:
-                    proc.kill()
+                    claude_env.kill(proc)
                 except (ProcessLookupError, OSError):
                     pass
                 try:

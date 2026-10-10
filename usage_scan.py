@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -158,8 +159,17 @@ def _tokens_from(usage) -> Tokens:
 # `fromisoformat` accepts that string happily, so catching only its ValueError
 # left the second call unguarded. Two years of slack at each end covers every
 # UTC offset without needing to know the local one.
-_DAY_MIN = datetime(2, 1, 1).timestamp()
-_DAY_MAX = datetime(9997, 1, 1).timestamp()
+#
+# Windows' localtime() is narrower still: it refuses anything before the
+# epoch or past the year 3000, and `.timestamp()` on a naive datetime raises
+# OSError for the bounds above before a single stamp is checked. A real
+# transcript stamp is always well inside 1970-3000, so clamp to that there.
+if sys.platform == "win32":
+    _DAY_MIN = 2 * 86400.0
+    _DAY_MAX = datetime(2999, 1, 1).timestamp()
+else:
+    _DAY_MIN = datetime(2, 1, 1).timestamp()
+    _DAY_MAX = datetime(9997, 1, 1).timestamp()
 
 
 def _epoch(stamp) -> float | None:

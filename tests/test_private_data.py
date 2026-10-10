@@ -29,6 +29,8 @@ import os
 import stat
 from pathlib import Path
 
+import sys
+
 import pytest
 
 SECRET = "sk-live-notion-token-do-not-read-me"
@@ -180,6 +182,7 @@ def test_a_symlink_into_the_brain_home_is_refused(wired, tmp_path):
 
 # --- the file the credentials are copied INTO ----------------------------
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes; Windows uses ACLs")
 def test_the_generated_mcp_config_is_not_world_readable(wired):
     """`_write_mcp_config` copies every `env` block out of the user's
     `connections.json` — their Notion token, their GitHub token — into
@@ -192,6 +195,7 @@ def test_the_generated_mcp_config_is_not_world_readable(wired):
     assert mode == 0o600, oct(mode)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes; Windows uses ACLs")
 def test_a_pre_existing_mcp_config_has_its_mode_forced_back(wired):
     """Adopting a file somebody else created with looser permissions would
     keep their read access — the same rule `ensure_tool_token` already

@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import notifier
 
 
+@pytest.fixture(autouse=True)
+def _macos_unless_a_test_says_otherwise(monkeypatch):
+    """The osascript path is under test here whatever the suite runs on; the
+    Windows path has its own tests at the bottom of this file."""
+    monkeypatch.setattr(notifier, "_WINDOWS", False)
+
+
 class _FakeProcess:
     """Stand-in for the object asyncio.create_subprocess_exec() returns."""
 
@@ -189,3 +196,28 @@ async def test_long_text_is_truncated():
     assert sent_message != long_message
     assert sent_title.endswith("…")
     assert sent_message.endswith("…")
+
+
+# --- Windows ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_windows_text_travels_as_environment_data_never_as_script(monkeypatch):
+    """The PowerShell script is fixed and base64-encoded; the untrusted text
+    is only ever in the environment, where nothing parses it."""
+    import base64
+    monkeypatch.setattr(notifier, "_WINDOWS", True)
+    payload = '"; Start-Process calc; "$(calc)<toast>'
+    capture = {}
+    fake_proc = _FakeProcess(returncode=0)
+    with patch("notifier.available", return_value=True):
+        with _patch_subprocess(fake_proc, capture):
+            assert await notifier.notify("T", payload, subtitle="S") is True
+    argv = capture["args"]
+    assert argv[0] == "powershell" and argv[-2] == "-EncodedCommand"
+    script = base64.b64decode(argv[-1]).decode("utf-16-le")
+    assert script == notifier._WINDOWS_SCRIPT
+    assert all(payload not in a for a in argv)
+    env = capture["kwargs"]["env"]
+    assert env["JARVIS_NOTIFY_MESSAGE"] == payload
+    assert (env["JARVIS_NOTIFY_TITLE"], env["JARVIS_NOTIFY_SUBTITLE"]) == ("T", "S")
+    assert "CreateTextNode" in script, "inserted as text, never as markup"

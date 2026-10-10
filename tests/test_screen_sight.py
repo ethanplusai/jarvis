@@ -117,6 +117,14 @@ def _bmp(pixels: bytes, bpp: int = 24) -> bytes:
     return bytes(header) + pixels
 
 
+@pytest.fixture(autouse=True)
+def _the_macos_half(monkeypatch):
+    """Everything in this file drives the macOS half through its `_run` seam.
+    On Windows `screen` hands both calls to `screen_windows` instead, which
+    test_screen_windows.py covers."""
+    monkeypatch.setattr(real_screen, "_WINDOWS", False)
+
+
 @pytest.fixture
 def runner(monkeypatch):
     fake = _Runner()
@@ -222,7 +230,8 @@ async def test_every_subprocess_is_time_boxed(runner):
 async def test_a_stalled_subprocess_is_killed_and_reported():
     """The real `_run`, against a real process that will not finish."""
     rc, _out, err = await asyncio.wait_for(
-        real_screen._run("/bin/sleep", "30", timeout=0.2), 5)
+        real_screen._run(sys.executable, "-c", "import time; time.sleep(30)",
+                         timeout=0.2), 5)
     assert rc == -1
     assert "timed out" in err
 

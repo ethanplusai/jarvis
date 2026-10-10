@@ -9,7 +9,11 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 log = logging.getLogger("jarvis.actions")
 
@@ -80,6 +84,20 @@ def applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
 
 
+async def open_terminal_at(path: str, command: str = "") -> dict:
+    """A terminal in `path`, optionally running `command` there.
+
+    The directory travels separately from the command so that each platform
+    can hand it over without a shell parsing it: quoted into a `cd` for
+    Terminal.app, as the working directory of a new console on Windows."""
+    if sys.platform == "win32":
+        return _open_console_windows(path, command)
+    script = f"cd {shlex.quote(path)}"
+    if command:
+        script += f" && {command}"
+    return await open_terminal(script)
+
+
 async def open_terminal(command: str = "") -> dict:
     """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
     if command:
@@ -125,6 +143,9 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
     README, so this is a straight line from attacker text to a shell.
     `tests/test_applescript_url_injection.py` runs the payload.
     """
+    if sys.platform == "win32":
+        return _open_browser_windows(url, browser)
+
     escaped_url = applescript_escape(url)
 
     if browser.lower() == "firefox":
@@ -166,6 +187,8 @@ async def open_chrome(url: str) -> dict:
 
 async def get_chrome_tab_info() -> dict:
     """Read the current Chrome tab's title and URL via AppleScript."""
+    if sys.platform == "win32":
+        return {}           # no scripting bridge into Chrome on Windows
     script = (
         'tell application "Google Chrome"\n'
         "    set tabTitle to title of active tab of front window\n"
@@ -209,6 +232,12 @@ VSCODE_APP = "/Applications/Visual Studio Code.app"
 def _vscode_command(path: str) -> list[str] | None:
     """The argv that opens `path` in VS Code, or None if it is not installed."""
     binary = shutil.which("code")
+    if binary and sys.platform == "win32":
+        # `code` on Windows is `bin\code.cmd`, a batch file, and cmd.exe
+        # re-parses its arguments: a legal filename like `a&calc.ts` would
+        # run `calc`. The executable it wraps takes a path as plain argv.
+        exe = Path(binary).resolve().parent.parent / "Code.exe"
+        return [str(exe), str(path)] if exe.is_file() else None
     if binary:
         return [binary, str(path)]
     if os.path.isdir(VSCODE_APP):
@@ -220,6 +249,20 @@ async def open_in_editor(path: str) -> dict:
     """Open a file or directory in VS Code, else in the system default."""
     argv = _vscode_command(path)
     editor = "VS Code"
+    if argv is None and sys.platform == "win32":
+        # Never os.startfile: on Windows "open with the default app" RUNS an
+        # .exe, .bat or .js. Notepad and Explorer only ever display.
+        argv = (["explorer.exe", str(path)] if os.path.isdir(path)
+                else ["notepad.exe", str(path)])
+        editor = "File Explorer" if os.path.isdir(path) else "Notepad"
+        try:
+            subprocess.Popen(argv, close_fds=True)
+        except OSError as e:
+            log.error(f"open_in_editor could not launch: {e}")
+            return {"success": False, "editor": editor,
+                    "confirmation": "I couldn't open an editor, sir."}
+        return {"success": True, "editor": editor,
+                "confirmation": f"Opened that in {editor}, sir."}
     if argv is None:
         argv = ["open", str(path)]
         editor = "your editor"
@@ -245,6 +288,74 @@ async def open_in_editor(path: str) -> dict:
         "confirmation": f"Opened that in {editor}, sir." if success
         else f"{editor} wouldn't open that, sir.",
     }
+
+
+# --- Windows ---------------------------------------------------------------
+#
+# The directory becomes the new console's working directory, never part of a
+# command line, so no path is ever quoted for cmd.exe. The command itself has
+# been through `builds.command_problem`, which permits no shell metacharacter.
+
+def _open_console_windows(path: str, command: str = "") -> dict:
+    if not os.path.isdir(path):
+        return {"success": False,
+                "confirmation": "That folder isn't there any more, sir."}
+    argv = ["cmd.exe", "/k", command] if command else ["cmd.exe"]
+    try:
+        subprocess.Popen(argv, cwd=path,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE,
+                         close_fds=True)
+    except OSError as e:
+        log.error(f"open_terminal failed: {e}")
+        return {"success": False,
+                "confirmation": "I had trouble opening a terminal, sir."}
+    return {"success": True, "confirmation": "Terminal is open, sir."}
+
+
+def _windows_browser(name: str) -> tuple[str, str] | None:
+    """(display name, exe) for the browser asked for, else Edge, else None."""
+    env = os.environ.get
+    roots = [env("ProgramFiles", ""), env("ProgramFiles(x86)", ""),
+             env("LOCALAPPDATA", "")]
+    known = {
+        "chrome": ("Chrome", r"Google\Chrome\Application\chrome.exe"),
+        "firefox": ("Firefox", os.path.join("Mozilla Firefox", "firefox.exe")),
+        "edge": ("Edge", r"Microsoft\Edge\Application\msedge.exe"),
+    }
+    for key in dict.fromkeys([name.lower(), "edge"]):
+        if key not in known:
+            continue
+        label, rel = known[key]
+        for root in roots:
+            exe = os.path.join(root, rel)
+            if root and os.path.isfile(exe):
+                return label, exe
+    return None
+
+
+_URL_SCHEMES = re.compile(r"(?i)(https?|file)://")
+
+
+def _open_browser_windows(url: str, browser: str) -> dict:
+    # The URL is a browser ARGUMENT: one that starts `--` is a browser flag,
+    # and one that is not a URL at all could be a program. Only a real
+    # http(s)/file URL is passed through.
+    if not _URL_SCHEMES.match(url or ""):
+        return {"success": False,
+                "confirmation": "That isn't an address I can open, sir."}
+    found = _windows_browser(browser)
+    if found is None:
+        return {"success": False,
+                "confirmation": "I can't find a browser to open that in, sir."}
+    app_name, exe = found
+    try:
+        subprocess.Popen([exe, url], close_fds=True)
+    except OSError as e:
+        log.error(f"open_browser ({app_name}) failed: {e}")
+        return {"success": False,
+                "confirmation": f"{app_name} ran into a problem, sir."}
+    return {"success": True,
+            "confirmation": f"Pulled that up in {app_name}, sir."}
 
 
 def _generate_project_name(prompt: str) -> str:

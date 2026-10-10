@@ -1316,7 +1316,7 @@ def test_open_in_terminal_never_speaks_a_hostile_directory_name(server, monkeypa
 
     async def _opened(*a, **k):
         return {"success": True}
-    monkeypatch.setattr(server.actions, "open_terminal", _opened)
+    monkeypatch.setattr(server.actions, "open_terminal_at", _opened)
     out = asyncio.run(server.tool_open_in_terminal({"project": "notes"}))
     assert_header_is_jarviss_own(out)
     assert MARKER not in out

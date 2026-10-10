@@ -25,7 +25,7 @@ class _Actions:
     def __init__(self, success=True):
         self.browser: list[str] = []
         self.browsers: list[str] = []       # which application each went to
-        self.terminal: list[str] = []
+        self.terminal: list[tuple[str, str]] = []   # (directory, command)
         self.success = success
 
     async def open_browser(self, url, browser="chrome"):
@@ -38,8 +38,8 @@ class _Actions:
                 "confirmation": f"Pulled that up in {app}, sir."
                 if self.success else f"{app} ran into a problem, sir."}
 
-    async def open_terminal(self, command=""):
-        self.terminal.append(command)
+    async def open_terminal_at(self, path, command=""):
+        self.terminal.append((path, command))
         return {"success": self.success,
                 "confirmation": "Terminal is open, sir."
                 if self.success else "I had trouble opening Terminal, sir."}
@@ -256,8 +256,7 @@ async def test_a_browser_that_will_not_start_is_reported(ready, monkeypatch):
 async def test_a_terminal_opens_in_the_project(ready):
     server, fake, project = ready
     out = await server.tool_open_in_terminal({"project": "tony-starks-website"})
-    import shlex
-    assert fake.terminal == [f"cd {shlex.quote(str(project))}"]
+    assert fake.terminal == [(str(project), "")]
     assert "tony-starks-website" in out
 
 

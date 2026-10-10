@@ -1,0 +1,8 @@
+# Byte-for-byte checkouts on every platform. data_paths.KNOWN_TEMPLATE_HASHES
+# hashes shipped templates by their bytes, and Windows git (core.autocrlf)
+# would otherwise rewrite them to CRLF and break the match.
+* text=auto eol=lf
+*.png binary
+*.gif binary
+*.webp binary
+*.jpg binary

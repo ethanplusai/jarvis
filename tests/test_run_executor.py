@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import STANDIN_PYTHON
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stream_success.jsonl"
@@ -27,7 +29,7 @@ def _fake_claude(tmp_path: Path, fixture: Path, exit_code: int = 0,
         f"sys.exit({exit_code})\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> str:
@@ -45,7 +47,7 @@ def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> 
         f"sys.exit({exit_code})\n"
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 @pytest.fixture
@@ -238,7 +240,7 @@ def _script(tmp_path: Path, name: str, body: str) -> str:
     script = tmp_path / name
     script.write_text("#!/usr/bin/env python3\nimport sys, time\n" + body)
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    return f"{STANDIN_PYTHON} {script}"
 
 
 def _slow_claude(tmp_path: Path, name: str = "slow_claude.py",
@@ -355,8 +357,7 @@ async def test_store_failure_still_reaches_terminal_state(env):
 
     # ...and no child left behind.
     assert ex._procs == {}
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not _alive(pid)
 
 
 # -- IMPORTANT 4: stderr must be drained concurrently ----------------------
@@ -490,7 +491,7 @@ async def test_timeout_keeps_the_collected_stderr(env, tmp_path):
         "sys.stderr.flush()\n"
         "time.sleep(30)\n"
     )
-    ex = mod.RunExecutor(store, claude_path=f"{sys.executable} {script}",
+    ex = mod.RunExecutor(store, claude_path=f"{STANDIN_PYTHON} {script}",
                          grace_sec=1.0)
     run_id = await ex.spawn("hang", "proj", str(tmp), "api", timeout_sec=1)
     run = await ex.wait_for(run_id, timeout=20)
@@ -960,11 +961,9 @@ async def _await_pid(store, run_id: str, timeout: float = 10.0) -> int:
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+    # session_watch.pid_alive: os.kill(pid, 0) is Ctrl+C on Windows.
+    import session_watch
+    return session_watch.pid_alive(pid)
 
 
 @pytest.mark.asyncio
@@ -1493,6 +1492,11 @@ def _write_lines(tmp_path: Path, name: str, lines: list[str]) -> Path:
     return path
 
 
+# Windows has no SIGSTOP to suspend a process with.
+_SIGSTOP = pytest.param("sigstop", marks=pytest.mark.skipif(
+    sys.platform == "win32", reason="no SIGSTOP on Windows"))
+
+
 def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
     """A stand-in `claude` that emits one line and then stops, `how` ways."""
     bodies = {
@@ -1512,7 +1516,7 @@ def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
                    "sys.stdout.flush()\n" % str(FIXTURE) + bodies[how])
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
         env, how):
@@ -1531,7 +1535,7 @@ async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
     assert not _alive(pid), f"the {how} child was left running"
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_no_way_of_going_quiet_leaks_the_concurrency_permit(env, how):
     store, mod, tmp = env

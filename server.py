@@ -17,12 +17,24 @@ import os
 import difflib
 import re
 import secrets
-import shlex
 import sys
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+# Windows reads text files in the ANSI code page unless Python is in UTF-8
+# mode, and a memory note, transcript or spec holding anything outside it is
+# then misread or fails to read at all. `python server.py` re-runs itself in
+# UTF-8 mode before anything else is imported; any other way of starting the
+# server is caught by preflight's `utf8_mode` check instead.
+if __name__ == "__main__" and sys.platform == "win32" and not sys.flags.utf8_mode:
+    import subprocess as _subprocess
+    try:
+        _code = _subprocess.call([sys.executable, "-X", "utf8", *sys.argv])
+    except KeyboardInterrupt:
+        _code = 130
+    sys.exit(_code)
 
 # The ONE definition of what a line of `.env` is. Both readers use it (this
 # boot loader and `_read_env`), and so does `_env_value_problem`, which is
@@ -98,6 +110,9 @@ log = logging.getLogger("jarvis")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+# No Fish key on Windows: speak with the system's own SAPI voice rather than
+# not at all. JARVIS_WINDOWS_TTS=false turns the fallback off (text only).
+WINDOWS_TTS_FALLBACK = os.getenv("JARVIS_WINDOWS_TTS", "true").lower() not in ("0", "false", "no")
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -226,11 +241,11 @@ SCAN_BUDGET_SECONDS = float(os.getenv("JARVIS_SCAN_BUDGET", "20"))
 SCAN_CACHE_SECONDS = float(os.getenv("JARVIS_SCAN_CACHE", "300"))
 
 # Roots are overridable so a user whose Desktop is slow, huge or cloud-backed
-# has somewhere to point this. Colon-separated, like PATH.
+# has somewhere to point this. Separated like PATH (`:`, or `;` on Windows).
 def _scan_roots() -> list[Path]:
     override = os.getenv("JARVIS_PROJECT_ROOTS", "").strip()
     if override:
-        return [Path(r).expanduser() for r in override.split(":") if r.strip()]
+        return [Path(r).expanduser() for r in override.split(os.pathsep) if r.strip()]
     return [DESKTOP_PATH, project_maker.projects_root()]
 
 
@@ -460,9 +475,21 @@ _last_greeting_time: float = 0
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
+def voice_backend() -> str:
+    """"fish", "windows", or "" when JARVIS has no voice at all."""
+    if tts.fish_key_usable(FISH_API_KEY):
+        return "fish"
+    if WINDOWS_TTS_FALLBACK and tts.windows_speech_available():
+        return "windows"
+    return ""
+
+
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
+    """Generate speech audio from text using Fish Audio TTS, or the Windows fallback."""
+    backend = voice_backend()
+    if backend == "windows":
+        return await _synth_windows(text)
+    if backend != "fish":
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
 
@@ -504,6 +531,7 @@ speech: Optional[SpeechScheduler] = None
 session_watcher: "session_watch.SessionWatcher | None" = None
 session_clients: set = set()
 _tts_client: Optional[httpx.AsyncClient] = None
+_windows_speech: Optional[tts.WindowsSpeech] = None
 _brain_notice_at = {"restarting": 0.0}
 _bg_tasks: set[asyncio.Task] = set()
 _CONTENT_FRAMES = ("audio", "text")
@@ -610,7 +638,20 @@ async def _voice_emit(msg: dict) -> None:
         raise NoVoiceClient("no voice client connected")
 
 
+async def _synth_windows(text: str) -> Optional[bytes]:
+    global _windows_speech
+    if _windows_speech is None:
+        _windows_speech = tts.WindowsSpeech()
+    r = await _windows_speech.synthesize(text)
+    if r is None:
+        return None
+    log.debug(f"tts (windows): {len(text)} chars, total {r.total_sec:.2f}s")
+    return r.audio
+
+
 async def _synth_for_speech(text: str) -> Optional[bytes]:
+    if voice_backend() == "windows":
+        return await _synth_windows(text)
     r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
     if r is None:
         return None
@@ -631,7 +672,7 @@ def _fmt_reset(ts) -> str:
         when = datetime.fromtimestamp(float(ts))
     except (TypeError, ValueError, OSError, OverflowError):
         return "later"
-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+    clock = f"{when.hour % 12 or 12}:{when:%M %p}".replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
     days = (when.date() - datetime.now().date()).days
     if days <= 0:
         return clock
@@ -639,7 +680,7 @@ def _fmt_reset(ts) -> str:
         return f"tomorrow at {clock}"
     if days < 7:
         return f"{when.strftime('%A')} at {clock}"
-    return f"{when.strftime('%A %-d %B')} at {clock}"
+    return f"{when:%A} {when.day} {when:%B} at {clock}"
 
 
 # True but useless: "down" names neither cause nor remedy. When the brain's
@@ -941,6 +982,9 @@ def _active_project_names() -> list[str]:
 async def start_brain_and_speech() -> None:
     global brain_instance, speech, _tts_client
     _tts_client = httpx.AsyncClient(timeout=15.0)
+    if voice_backend() == "windows":
+        log.info(f"no Fish Audio key: speaking with the Windows voice "
+                 f"({os.getenv('JARVIS_WINDOWS_VOICE', tts.WINDOWS_VOICE_DEFAULT)})")
     speech = SpeechScheduler(lambda t: _synth_for_speech(t), _voice_emit, prepare=strip_markdown_for_tts,
                              transport_ready=lambda: bool(voice_clients))
     await speech.start()
@@ -1141,7 +1185,7 @@ async def _maybe_rotate() -> None:
 async def stop_brain_and_speech() -> None:
     """Stop the brain first (no more turns), then the mouth, then the HTTP client.
     Each step is isolated so one failure cannot leak the others."""
-    global brain_instance, speech, _tts_client
+    global brain_instance, speech, _tts_client, _windows_speech
     # A generation must never vanish without a trace. The entry is written
     # whether or not the brain was in a state to write one itself, and the
     # whole step is wrapped: journalling must never prevent shutdown.
@@ -1165,7 +1209,8 @@ async def stop_brain_and_speech() -> None:
         log.warning(f"shutdown journal failed: {e}")
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
-                        ("tts client", _tts_client.aclose() if _tts_client else None)):
+                        ("tts client", _tts_client.aclose() if _tts_client else None),
+                        ("windows speech", _windows_speech.close() if _windows_speech else None)):
         if coro is None:
             continue
         try:
@@ -1173,6 +1218,7 @@ async def stop_brain_and_speech() -> None:
         except Exception as e:
             log.warning(f"shutdown: {label} did not stop cleanly: {e}")
     brain_instance, speech, _tts_client = None, None, None
+    _windows_speech = None
 
 
 # Completions are held and spoken together at the next pause: the user asked
@@ -2192,9 +2238,12 @@ def _specs_fingerprint() -> str:
     for project in _specs_projects():
         for doc in project["documents"]:
             progress = doc["progress"] or {}
+            # `sections` as well as the mtime: on Windows the file clock
+            # ticks every ~16 ms, so an edit that soon after the last write
+            # leaves `modified` unchanged.
             parts.append("|".join((
                 project["name"], project["path"], doc["path"],
-                f"{doc['modified']:.3f}",
+                f"{doc['modified']:.3f}", str(doc["sections"]),
                 doc["approval"]["state"],
                 f"{progress.get('done', '')}/{progress.get('total', '')}")))
     return "\n".join(parts)
@@ -3528,12 +3577,11 @@ async def _perform_command(item: _StagedCommand) -> None:
             await speech.say("Cancelled, sir.", Priority.NORMAL)
             return
 
-        # `cd` into the project first: a start command means nothing in the
-        # wrong directory, and the path is quoted while the command itself has
-        # already been through `builds.command_problem`, which permits no
-        # shell metacharacter at all.
-        result = await actions.open_terminal(
-            f"cd {shlex.quote(item.path)} && {item.command}")
+        # In the project directory: a start command means nothing in the wrong
+        # one. The path travels separately (see actions.open_terminal_at) and
+        # the command has already been through `builds.command_problem`, which
+        # permits no shell metacharacter at all.
+        result = await actions.open_terminal_at(item.path, item.command)
         if result.get("success"):
             record("ran")
             await speech.say(
@@ -3617,10 +3665,12 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             record("no_voice")             # the mouth went away between turns
             return
         # The read-back names the key AND warns about the focus theft, because
-        # the window coming forward is the part that interrupts the user.
+        # the window coming forward is the part that interrupts the user. On
+        # Windows the key goes into the console's input, not to its window,
+        # so nothing comes forward and there is nothing to warn about.
+        forward = "" if _KEYS_GO_TO_A_CONSOLE else " — this will bring that window forward"
         utt = await speech.say(
-            f"Pressing {said} on {_said_name(item)} — this will bring that "
-            f"window forward.", Priority.NORMAL)
+            f"Pressing {said} on {_said_name(item)}{forward}.", Priority.NORMAL)
         heard = await speech.wait_for(utt, timeout=READBACK_TIMEOUT)
         if utt.was_cancelled:
             if getattr(utt, "was_abandoned", False):
@@ -3643,8 +3693,9 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             await speech.say(f"Pressed {said} on {_said_name(item)}.",
                              Priority.NORMAL)
         elif outcome == dialog.NOT_FOUND:
+            where = "a console" if _KEYS_GO_TO_A_CONSOLE else "a Terminal window"
             await speech.say(
-                f"{_said_name(item)} isn't in a Terminal window I can reach, "
+                f"{_said_name(item)} isn't in {where} I can reach, "
                 f"sir — another application is hosting it, so that one needs "
                 f"your own hand.", Priority.NORMAL)
         elif outcome == dialog.NOT_PERMITTED:
@@ -3695,6 +3746,21 @@ async def _tty_for_session_or_explain(session):
     return pid, tty, None
 
 
+# On Windows a keypress goes into the session's console input (dialog_windows),
+# not to a Terminal.app window: nothing is brought forward, and what the
+# session must be in to be reached is "a console".
+_KEYS_GO_TO_A_CONSOLE = sys.platform == "win32"
+
+
+def _keypress_supported() -> bool:
+    """Whether `answer_dialog` can work on this machine. On macOS it finds
+    the Terminal.app tab that owns a session's tty over AppleScript; on
+    Windows it attaches to the console that owns the session's pid. Both are
+    found by identity, never by focus (see dialog.py). Kept as the one gate
+    for a platform where neither holds."""
+    return True
+
+
 async def tool_answer_dialog(args: dict) -> str:
     """Validate the user's decision to press a key, and STAGE it.
 
@@ -3719,6 +3785,16 @@ async def tool_answer_dialog(args: dict) -> str:
         run_store.record_steer("", name, "", raw_key,
                                f"dialog:{reason or 'unresolved'}")
         return problem
+
+    if not _keypress_supported():
+        # Refused before anything is staged: see `_keypress_supported`. The
+        # brain is not offered this tool on Windows at all; this is the wall
+        # for a caller that reaches the endpoint anyway.
+        run_store.record_steer(session.session_id, session.voice_name,
+                               session.project, raw_key,
+                               "dialog:unsupported_platform")
+        return (f"I can't press keys in another terminal on this machine, sir — "
+                f"{_said_name(session)} needs you to answer it there yourself.")
 
     key = dialog.normalize_key(raw_key)
     if key is None:
@@ -3862,7 +3938,10 @@ async def tool_steer_session(args: dict) -> str:
 # place" speaks it and a path legitimately holds almost any punctuation. The
 # residual is prose in a header line, for the price of two same-named
 # directories; it is accepted, and it is not parity with the name wall.
-_PLAIN_PATH_RE = _action_re.compile(r"/[^\x00-\x1f\x7f-\x9f<>\"=\u2028\u2029]{0,299}")
+# On Windows a path starts at a drive letter (`C:\Users\...`), not at `/`; the
+# forbidden class after it is the same either way.
+_PLAIN_PATH_RE = _action_re.compile(
+    r"(?:/|[A-Za-z]:[\\/])[^\x00-\x1f\x7f-\x9f<>\"=\u2028\u2029]{0,299}")
 
 
 def _project_name_speakable(name) -> bool:
@@ -4861,7 +4940,7 @@ async def tool_open_in_terminal(args: dict) -> str:
     name, path, problem = _resolve_project_or_explain(reference)
     if problem:
         return problem
-    result = await actions.open_terminal(f"cd {shlex.quote(path)}")
+    result = await actions.open_terminal_at(path)
     if not result.get("success"):
         return result.get("confirmation") or "Terminal wouldn't open, sir."
     return f"Terminal's open in {name}, sir."
@@ -5411,7 +5490,7 @@ def _repo_relative(root: Path, resolved: Path) -> str:
     A filename on APFS may hold anything but `/` and NUL, so this value is
     never put in a header line; `_said_path` is for that."""
     try:
-        return str(resolved.relative_to(Path(os.path.realpath(str(root)))))
+        return resolved.relative_to(Path(os.path.realpath(str(root)))).as_posix()
     except ValueError:                       # cannot happen after containment
         return resolved.name
 
@@ -6542,7 +6621,7 @@ async def api_project_open(body: ProjectOpenRequest):
     if body.target == "editor":
         result = await actions.open_in_editor(body.path)
     elif body.target == "terminal":
-        result = await actions.open_terminal(f"cd {shlex.quote(body.path)}")
+        result = await actions.open_terminal_at(body.path)
     elif body.target == "browser":
         result = await actions.open_browser(Path(body.path).as_uri())
     else:

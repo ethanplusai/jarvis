@@ -698,6 +698,40 @@ TOOL_SPECS = [
     },
 ]
 
+# Tools this machine cannot perform on Windows, left out of what the brain is
+# offered (brain.granted_tools must agree). Empty since answer_dialog was
+# ported: there it attaches to the session's own console (dialog_windows.py).
+# TOOL_SPECS stays the whole set: it is what every handler is checked against.
+UNAVAILABLE_ON_WINDOWS: set[str] = set()
+
+# answer_dialog's description, as true on Windows: the key goes into the
+# session's console rather than to Terminal.app, and no window comes forward.
+_ANSWER_DIALOG_WHERE_MAC = (
+    "Only works when that session is running in Terminal.app; sessions hosted "
+    "by another application cannot be reached and the user is told so. This "
+    "BRINGS THAT WINDOW TO THE FRONT, so only use it when the user has just "
+    "asked for it.")
+_ANSWER_DIALOG_WHERE_WINDOWS = (
+    "Only works when that session is running in a console window of its own; "
+    "sessions hosted by another application (the desktop app, an editor) "
+    "cannot be reached and the user is told so. Nothing comes to the front, "
+    "but only use it when the user has just asked for it.")
+
+
+def _for_windows(spec: dict) -> dict:
+    if spec["name"] != "answer_dialog":
+        return spec
+    return {**spec, "description": spec["description"].replace(
+        _ANSWER_DIALOG_WHERE_MAC, _ANSWER_DIALOG_WHERE_WINDOWS)}
+
+
+def offered_tool_specs() -> list[dict]:
+    """The tools this machine can actually perform, described as it does them."""
+    if sys.platform == "win32":
+        return [_for_windows(t) for t in TOOL_SPECS
+                if t["name"] not in UNAVAILABLE_ON_WINDOWS]
+    return TOOL_SPECS
+
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -839,7 +873,8 @@ def handle(msg: dict) -> dict | None:
     elif method == "ping":
         reply = {"jsonrpc": "2.0", "id": rid, "result": {}}
     elif method == "tools/list":
-        reply = {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOL_SPECS}}
+        reply = {"jsonrpc": "2.0", "id": rid,
+                 "result": {"tools": offered_tool_specs()}}
     elif method == "tools/call":
         params = msg.get("params") or {}
         name = params.get("name", "")
