@@ -329,17 +329,24 @@ def test_no_declared_servers_leaves_the_flag_byte_identical(tmp_path, monkeypatc
     assert cmd[cmd.index("--tools") + 1] == ",".join(brain.ALLOWED_TOOLS)
 
 
-def test_on_windows_the_flag_leaves_out_only_the_keypress(tmp_path, monkeypatch):
-    """answer_dialog cannot work on Windows (server._keypress_supported), so
-    it is not granted there; everything else is exactly the macOS flag."""
+def test_on_windows_the_flag_is_exactly_the_macos_flag(tmp_path, monkeypatch):
+    """Since answer_dialog was ported (a session's own console), nothing is
+    left out on Windows, and the brain is no longer told it cannot press."""
     from tests.test_brain import _config
     import brain
     monkeypatch.setattr(brain, "_WINDOWS", True)
     b = brain.Brain(_config(tmp_path, connections=["notion"]))
     granted = b.command()[b.command().index("--tools") + 1].split(",")
-    assert granted == [t for t in brain.ALLOWED_TOOLS
-                       if t != "mcp__jarvis__answer_dialog"] + ["mcp__notion"]
-    assert "cannot press a key" in b.launch_prompt()
+    assert granted == brain.ALLOWED_TOOLS + ["mcp__notion"]
+    assert "cannot press a key" not in b.launch_prompt()
+
+
+def test_a_tool_unavailable_on_windows_is_still_left_out_there(tmp_path, monkeypatch):
+    """The mechanism stays for the next tool that cannot be ported."""
+    import brain
+    monkeypatch.setattr(brain, "_WINDOWS", True)
+    monkeypatch.setattr(brain, "_UNAVAILABLE_ON_WINDOWS", {"answer_dialog"})
+    assert "mcp__jarvis__answer_dialog" not in brain.granted_tools([])
 
 
 def test_the_static_allowlist_still_names_only_jarvis_and_the_two_web_tools():

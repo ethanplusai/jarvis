@@ -3665,10 +3665,12 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             record("no_voice")             # the mouth went away between turns
             return
         # The read-back names the key AND warns about the focus theft, because
-        # the window coming forward is the part that interrupts the user.
+        # the window coming forward is the part that interrupts the user. On
+        # Windows the key goes into the console's input, not to its window,
+        # so nothing comes forward and there is nothing to warn about.
+        forward = "" if _KEYS_GO_TO_A_CONSOLE else " — this will bring that window forward"
         utt = await speech.say(
-            f"Pressing {said} on {_said_name(item)} — this will bring that "
-            f"window forward.", Priority.NORMAL)
+            f"Pressing {said} on {_said_name(item)}{forward}.", Priority.NORMAL)
         heard = await speech.wait_for(utt, timeout=READBACK_TIMEOUT)
         if utt.was_cancelled:
             if getattr(utt, "was_abandoned", False):
@@ -3691,8 +3693,9 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             await speech.say(f"Pressed {said} on {_said_name(item)}.",
                              Priority.NORMAL)
         elif outcome == dialog.NOT_FOUND:
+            where = "a console" if _KEYS_GO_TO_A_CONSOLE else "a Terminal window"
             await speech.say(
-                f"{_said_name(item)} isn't in a Terminal window I can reach, "
+                f"{_said_name(item)} isn't in {where} I can reach, "
                 f"sir — another application is hosting it, so that one needs "
                 f"your own hand.", Priority.NORMAL)
         elif outcome == dialog.NOT_PERMITTED:
@@ -3743,12 +3746,19 @@ async def _tty_for_session_or_explain(session):
     return pid, tty, None
 
 
+# On Windows a keypress goes into the session's console input (dialog_windows),
+# not to a Terminal.app window: nothing is brought forward, and what the
+# session must be in to be reached is "a console".
+_KEYS_GO_TO_A_CONSOLE = sys.platform == "win32"
+
+
 def _keypress_supported() -> bool:
-    """Whether `answer_dialog` can work on this machine. It finds the
-    Terminal.app tab that owns a session's tty over AppleScript; Windows
-    Terminal offers nothing to find a tab by, and a key sent to whichever
-    window has focus could answer the wrong prompt."""
-    return sys.platform != "win32"
+    """Whether `answer_dialog` can work on this machine. On macOS it finds
+    the Terminal.app tab that owns a session's tty over AppleScript; on
+    Windows it attaches to the console that owns the session's pid. Both are
+    found by identity, never by focus (see dialog.py). Kept as the one gate
+    for a platform where neither holds."""
+    return True
 
 
 async def tool_answer_dialog(args: dict) -> str:
@@ -3783,7 +3793,7 @@ async def tool_answer_dialog(args: dict) -> str:
         run_store.record_steer(session.session_id, session.voice_name,
                                session.project, raw_key,
                                "dialog:unsupported_platform")
-        return (f"On Windows I can't press keys in another terminal, sir — "
+        return (f"I can't press keys in another terminal on this machine, sir — "
                 f"{_said_name(session)} needs you to answer it there yourself.")
 
     key = dialog.normalize_key(raw_key)

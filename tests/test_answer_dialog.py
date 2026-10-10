@@ -7,6 +7,11 @@ frontmost. Every test therefore mocks `dialog._osascript` — the single process
 boundary — and `dialog._terminal_is_running`, so `osascript` is never spawned
 and Terminal.app is never even asked whether it exists. If you add a test here
 that does not stub both, it is wrong however green it runs.
+
+On Windows the boundary is `dialog._helper` (the console helper process).
+The autouse fixture below pins the macOS path for this file and makes that
+helper fail any test that reaches it; the Windows path is tested, with the
+helper stubbed, in test_dialog_windows.py.
 """
 
 import asyncio
@@ -17,6 +22,16 @@ import sys
 import pytest
 
 import dialog
+
+
+@pytest.fixture(autouse=True)
+def _the_macos_path_and_no_console_helper(monkeypatch):
+    monkeypatch.setattr(dialog, "_WINDOWS", False)
+
+    def _never(*args, **kwargs):
+        raise AssertionError(f"a test reached the real console helper: {args}")
+
+    monkeypatch.setattr(dialog, "_helper", _never)
 
 
 # --- the closed vocabulary --------------------------------------------------
@@ -435,8 +450,9 @@ async def test_nothing_is_pressed_before_the_readback_has_been_heard(tool):
 
 
 @pytest.mark.asyncio
-async def test_the_readback_names_the_key_and_warns_about_the_focus(tool):
+async def test_the_readback_names_the_key_and_warns_about_the_focus(tool, monkeypatch):
     server, speech, _, _ = tool
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", False)
 
     await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
     await server._perform_staged_dialogs()
@@ -444,6 +460,21 @@ async def test_the_readback_names_the_key_and_warns_about_the_focus(tool):
     assert "Return" in speech.said[0] and "hammer" in speech.said[0]
     assert "forward" in speech.said[0].lower(), \
         "the user must be warned that this steals focus"
+
+
+@pytest.mark.asyncio
+async def test_on_windows_the_readback_does_not_warn_of_a_window_coming_forward(
+        tool, monkeypatch):
+    """The key goes into the console's input there; no window moves, so
+    warning that one will would be false."""
+    server, speech, _, _ = tool
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", True)
+
+    await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
+    await server._perform_staged_dialogs()
+
+    assert "Return" in speech.said[0] and "hammer" in speech.said[0]
+    assert "forward" not in speech.said[0].lower()
 
 
 @pytest.mark.asyncio
@@ -679,10 +710,13 @@ async def test_a_raised_exception_still_leaves_an_audit_row(wired, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch):
-    """The Orcha.app case: no Terminal tab owns that tty. JARVIS says so
-    rather than claiming success or silently doing nothing."""
+@pytest.mark.parametrize("console, where", [(False, "terminal"), (True, "console")])
+async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch, console, where):
+    """The Orcha.app case: no Terminal tab owns that tty (on Windows: the
+    session has no console of its own). JARVIS says so rather than claiming
+    success or silently doing nothing."""
     server = wired
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", console)
     speech = FakeSpeech()
 
     async def fake_answer(pid, key):
@@ -698,7 +732,7 @@ async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch):
     await server._perform_staged_dialogs()
 
     last = speech.said[-1].lower()
-    assert "terminal" in last and "hammer" in last
+    assert where in last and "hammer" in last
     assert "pressed" not in last, "it must not claim a keystroke it did not send"
 
 
@@ -734,11 +768,9 @@ def test_the_staged_dialogs_are_drained_after_the_turn(wired):
 
 
 @pytest.mark.asyncio
-async def test_on_windows_it_is_neither_offered_nor_pressed(wired, monkeypatch):
-    """No tab can be found by tty there, and a key sent to whatever window
-    has focus could answer the wrong prompt. Refused, naming the session."""
-    import brain
-    import jarvis_mcp
+async def test_where_keypresses_are_unsupported_nothing_is_pressed(wired, monkeypatch):
+    """The gate for a platform where neither Terminal.app nor a console can
+    be found by identity. Refused, naming the session."""
     server = wired
     monkeypatch.setattr(server, "_keypress_supported", lambda: False)
     monkeypatch.setattr(server, "speech", FakeSpeech())
@@ -748,14 +780,28 @@ async def test_on_windows_it_is_neither_offered_nor_pressed(wired, monkeypatch):
 
     result = await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
 
-    assert "Windows" in result and "hammer" in result
+    assert "can't press keys" in result and "hammer" in result
     assert server._staged_dialogs == []
     rows = server.run_store.list_steers(limit=5)
     assert rows and rows[0]["outcome"] == "dialog:unsupported_platform"
-    if sys.platform == "win32":
-        assert "answer_dialog" not in {
-            t["name"] for t in jarvis_mcp.offered_tool_specs()}
-        assert "mcp__jarvis__answer_dialog" not in brain.granted_tools([])
+
+
+def test_on_windows_it_is_offered_and_described_as_windows_does_it(monkeypatch):
+    """Offered and granted on Windows since the console port, and the brain
+    is told the truth there: a console, not Terminal.app, and nothing comes
+    to the front."""
+    import brain
+    import jarvis_mcp
+    monkeypatch.setattr(jarvis_mcp.sys, "platform", "win32")
+    monkeypatch.setattr(brain, "_WINDOWS", True)
+    spec = next(t for t in jarvis_mcp.offered_tool_specs() if t["name"] == "answer_dialog")
+    assert "console window" in spec["description"]
+    assert "Terminal.app" not in spec["description"]
+    assert "TO THE FRONT" not in spec["description"]
+    assert "mcp__jarvis__answer_dialog" in brain.granted_tools([])
+    # TOOL_SPECS itself, the macOS wording, is untouched.
+    mac = next(t for t in jarvis_mcp.TOOL_SPECS if t["name"] == "answer_dialog")
+    assert "Terminal.app" in mac["description"]
 
 
 # --- neither `ps` nor `pgrep` may run ON the event loop --------------------

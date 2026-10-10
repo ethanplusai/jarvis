@@ -99,7 +99,7 @@ is a small, well-isolated file to replace — see *Make it yours* below.
 - **Watches every Claude Code session on the machine** — not just his own. Ask
   "which of my sessions are waiting on me?" and he checks live. He can post a
   message into one, and answer a permission prompt for one running in
-  Terminal.app by pressing a single key (macOS only).
+  Terminal.app (or, on Windows, in a console window) by pressing a single key.
 - **Interrupts you when it matters.** A session that needs a human gets said
   out loud immediately; a session that merely finished gets batched into one
   sentence at the next pause. If nobody has the browser tab open, it becomes a
@@ -140,8 +140,8 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
 
 - **macOS, or Windows 10/11.** On macOS, terminal control, window listing,
   screenshots and notifications all go through AppleScript. Windows runs
-  everything except keypresses into other terminals; see
-  [Windows](#windows). There is no Linux path today.
+  all of it through its own APIs; see [Windows](#windows). There is no
+  Linux path today.
 - **Google Chrome.** Not a preference — a constraint. The microphone uses the
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
@@ -228,10 +228,10 @@ that the port has not moved.
 
 ## Windows
 
-JARVIS runs on Windows 10 and 11. The brain, runs, the dashboard, session
-watching and steering, his voice, and his sight (the window list and
-screenshots) all work. The one thing that does not is pressing keys in
-another console.
+JARVIS runs on Windows 10 and 11, and everything he does on macOS he does
+here: the brain, runs, the dashboard, session watching and steering,
+answering a session's permission prompt, his voice, and his sight (the
+window list and screenshots).
 
 **Setup, in PowerShell.** The same steps as above, with three differences:
 
@@ -289,7 +289,7 @@ him, because his ears are the Chrome tab.
 | Watching sessions; posting a message into one | Works (steering is new, so please report problems) |
 | Opening a terminal, browser, or editor | Works: a new `cmd` console; the browser you name, else Edge; VS Code, else Notepad (File Explorer for a folder) |
 | Notifications when no tab is open | Works, as Windows toast notifications |
-| Answering a permission prompt by pressing a key | Not offered: there is no keypress bridge into another console |
+| Answering a permission prompt by pressing a key | Works for a session in a console window of its own: the key (Return, Escape or 1-9 only) goes into that session's console input, found by its pid, so no window comes forward and focus is never used. A session in the desktop app or an editor can't be reached, and he says so. Tested in the classic console; not yet inside Windows Terminal |
 | Listing windows ("what's on my screen") | Works: every visible window, front to back, with the front app marked. Chrome's window title is the open page's title |
 | Screenshots ("look at my screen") | Works: one display (primary first, then left to right), shrunk in memory, never written to disk. A locked desk or UAC prompt is refused as blank |
 
@@ -498,8 +498,8 @@ it and bend it to what you do. The seams are deliberately obvious:
 - **The orb** is `frontend/src/orb.ts`, self-contained Three.js.
 
 Contributions are welcome, and the most useful ones are the ones this cannot
-do yet: Linux, the Windows gaps listed under [Windows](#windows), alternative
-TTS engines, and a mobile client. Please open an issue before a large PR.
+do yet: Linux, Windows Terminal support for the keypress (see
+[Windows](#windows)), alternative TTS engines, and a mobile client. Please open an issue before a large PR.
 
 ## Development
 
