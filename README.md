@@ -140,8 +140,8 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
 
 - **macOS, or Windows 10/11.** On macOS, terminal control, window listing,
   screenshots and notifications all go through AppleScript. Windows runs
-  everything except reading the Chrome tab and keypresses into other
-  terminals; see [Windows](#windows). There is no Linux path today.
+  everything except keypresses into other terminals; see
+  [Windows](#windows). There is no Linux path today.
 - **Google Chrome.** Not a preference — a constraint. The microphone uses the
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
@@ -230,9 +230,8 @@ that the port has not moved.
 
 JARVIS runs on Windows 10 and 11. The brain, runs, the dashboard, session
 watching and steering, his voice, and his sight (the window list and
-screenshots) all work. What does not work yet is the two things that reach
-inside another app: reading Chrome's tab, and pressing keys in another
-console.
+screenshots) all work. The one thing that does not is pressing keys in
+another console.
 
 **Setup, in PowerShell.** The same steps as above, with three differences:
 
@@ -291,9 +290,8 @@ him, because his ears are the Chrome tab.
 | Opening a terminal, browser, or editor | Works: a new `cmd` console; the browser you name, else Edge; VS Code, else Notepad (File Explorer for a folder) |
 | Notifications when no tab is open | Works, as Windows toast notifications |
 | Answering a permission prompt by pressing a key | Not offered: there is no keypress bridge into another console |
-| Listing windows ("what's on my screen") | Works: every visible window, front to back, with the front app marked |
+| Listing windows ("what's on my screen") | Works: every visible window, front to back, with the front app marked. Chrome's window title is the open page's title |
 | Screenshots ("look at my screen") | Works: one display (primary first, then left to right), shrunk in memory, never written to disk. A locked desk or UAC prompt is refused as blank |
-| Reading the Chrome tab | Not yet: there is no scripting bridge into Chrome on Windows |
 
 ## Connections: bring your own
 
