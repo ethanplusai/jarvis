@@ -2238,9 +2238,12 @@ def _specs_fingerprint() -> str:
     for project in _specs_projects():
         for doc in project["documents"]:
             progress = doc["progress"] or {}
+            # `sections` as well as the mtime: on Windows the file clock
+            # ticks every ~16 ms, so an edit that soon after the last write
+            # leaves `modified` unchanged.
             parts.append("|".join((
                 project["name"], project["path"], doc["path"],
-                f"{doc['modified']:.3f}",
+                f"{doc['modified']:.3f}", str(doc["sections"]),
                 doc["approval"]["state"],
                 f"{progress.get('done', '')}/{progress.get('total', '')}")))
     return "\n".join(parts)

@@ -70,6 +70,25 @@ def _never_write_to_the_live_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data-dir"))
 
 
+@pytest.fixture(autouse=True)
+def _never_read_the_live_session_roster(monkeypatch, tmp_path):
+    """No test may see the developer's own Claude Code sessions.
+
+    The session watcher reads `~/.claude/sessions` and `~/.claude-orcha`,
+    and a server started under TestClient starts the watcher. That passed on
+    CI only because the runner has no live sessions; on a machine running
+    Claude Code (as this suite usually is) the real ones appeared in
+    "empty roster" assertions. The defaults are pointed at empty directories
+    of the same names in tmp_path; a test that wants a roster builds one there
+    or sets its own roots.
+    """
+    import session_watch
+    home = tmp_path / "home"
+    monkeypatch.setattr(session_watch, "DEFAULT_ROOTS",
+                        (str(home / ".claude"), str(home / ".claude-orcha")))
+    monkeypatch.delenv("JARVIS_CLAUDE_CONFIG_DIRS", raising=False)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _no_run_left_mid_flight():
     """No test may end with a run's driver still starting its child.
