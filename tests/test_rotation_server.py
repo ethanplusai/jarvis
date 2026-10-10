@@ -37,23 +37,36 @@ class _Brain:
         self.current_origin = None
         self.stopped = False
         self._rotates = rotates
+        self.generation = 1
 
-    async def turn(self, text, origin="user", on_delta=None, on_tool=None):
+    async def turn(self, text, origin="user", on_delta=None, on_tool=None,
+                   on_switch=None):
         self.asked.append((text, origin))
         import brain
         return brain.TurnResult(origin, "We fixed chitauri and Tony chose Postgres.",
                                 "result")
 
-    async def rotate(self, handover=None):
+    async def rotate(self, handover=None, *, fresh=False, **_):
         self.rotations += 1
         if not self._rotates:
             return False
         self.rotated_with = handover
         self.rotation_pending = False
+        self.generation += 1
         return True
 
     async def stop(self):
         self.stopped = True
+
+
+class _Clock:
+    """The server's rotation clock, driven by hand."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
 
 
 @pytest.mark.asyncio
@@ -267,13 +280,15 @@ async def test_a_failed_rotation_does_not_re_ask_at_every_pause(wired, monkeypat
     server = wired
     b = _Brain(rotates=False)
     monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
 
-    await server._maybe_rotate()
-    await server._maybe_rotate()
-    await server._maybe_rotate()
+    for _ in range(3):
+        await server._maybe_rotate()
+        clock.now += server.ROTATION_RETRY_MAX_SEC     # past any backoff
 
     assert len(b.asked) == 1, "the handover already paid for is reused"
-    assert b.rotations == 3, "but rotation is still retried at each pause"
+    assert b.rotations == 3, "but rotation is still retried once the backoff passes"
 
 
 @pytest.mark.asyncio
@@ -470,3 +485,285 @@ async def test_a_client_that_has_gone_away_cannot_stop_a_rotation(wired, monkeyp
     await server._maybe_rotate()
 
     assert b.rotations == 1, "the rotation must happen whether or not anyone is listening"
+
+
+# ---------------------------------------------------------------------------
+# The rotation loop of 2026-09-25/26 (see tests/test_rotation_loop.py for the
+# measurement half). Every user turn landed on a new brain, and the log said
+# "rotation did not happen" after each rotation that DID happen.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_rotation_that_happened_is_not_logged_as_one_that_did_not(
+        wired, monkeypatch, caplog):
+    """The `else:` that logs the failure sat under the `try` that clears the
+    banner, not under `if rotated:` — so it ran whenever clearing the banner
+    did not raise, which is always. Five real rotations were each reported
+    as a failure, which is what hid a loop that ran for five hours."""
+    import logging
+    server = wired
+    b = _Brain()
+    monkeypatch.setattr(server, "brain_instance", b)
+
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        await server._maybe_rotate()
+
+    assert b.rotations == 1 and b.rotation_pending is False
+    said = [r.getMessage() for r in caplog.records]
+    assert not any("did not happen" in m for m in said), said
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_that_failed_is_logged_and_retried_with_the_same_handover(
+        wired, monkeypatch, caplog):
+    """The other half, which must keep working: a replacement that will not
+    start leaves the old brain serving and the rotation pending, and the next
+    pause retries with the handover already paid for."""
+    import logging
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        await server._maybe_rotate()
+        clock.now += server.ROTATION_RETRY_MAX_SEC
+        await server._maybe_rotate()
+
+    assert b.rotations == 2, "a later pause retries"
+    assert len(b.asked) == 1, "the handover is asked for once, not at every pause"
+    failures = [r for r in caplog.records if "did not happen" in r.getMessage()]
+    assert len(failures) == 2 and all(r.levelname == "WARNING" for r in failures)
+
+
+@pytest.mark.asyncio
+async def test_tool_using_turns_do_not_rotate_the_real_brain_at_every_pause(
+        wired, monkeypatch, tmp_path):
+    """The loop end to end: the real Brain, the stand-in CLI speaking the
+    measured stream shape with the live ~99,000-token floor, and the
+    server's own pause. Four turns that each call three tools add ~40,000
+    tokens of a 120,000 budget. Before the fix, every one of those pauses
+    swapped the brain, and the user heard a JARVIS that had forgotten the
+    card it staged a minute earlier."""
+    import brain
+    from tests.test_brain import _config
+    server = wired
+    monkeypatch.setenv("FAKE_BRAIN_FLOOR", "90000")
+    frames = []
+
+    async def emit(msg):
+        frames.append(msg)
+
+    b = brain.Brain(_config(tmp_path, context_budget=120_000))
+    monkeypatch.setattr(server, "brain_instance", b)
+    monkeypatch.setattr(server, "_voice_emit", emit)
+    try:
+        await b.start()
+        for i in range(4):
+            await b.turn(f"CALLS:4 turn {i}")
+            await server._maybe_rotate()
+            assert b.generation == 1, (
+                f"turn {i} rotated the brain: conversation={b.conversation_tokens} "
+                f"floor={b.baseline_tokens}")
+        assert not [f for f in frames if f.get("state") == "compacting"], (
+            "the orb must not show a rotation that never needed to happen")
+    finally:
+        await b.stop()
+
+
+def test_the_handover_request_asks_for_the_note_and_no_tool(wired):
+    """Every live handover turn reached for `write_journal` first. The
+    request runs as origin="system", so the acting-tool gate refused it:
+    one wasted API call per rotation, and a refusal sitting in the very
+    context the note was being written from. The server writes the journal
+    itself; the request says so."""
+    request = wired.JOURNAL_REQUEST.lower()
+    assert "do not call any tool" in request
+    assert "reply with the note itself" in request
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_that_keeps_failing_is_retried_with_backoff(
+        wired, monkeypatch, caplog):
+    """Each attempt spawns a whole brain and waits up to its warm-up timeout
+    holding the turn lock, with the orb on "compacting". A `claude` that is
+    broken for good made every pause that: a turn, then dead air. The first
+    retry waits `ROTATION_RETRY_BASE_SEC`, each after that twice as long,
+    and a success starts the count again."""
+    import logging
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+    base = server.ROTATION_RETRY_BASE_SEC
+
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        await server._maybe_rotate()
+        assert b.rotations == 1
+        await server._maybe_rotate()                   # at once: backing off
+        clock.now += base - 1
+        await server._maybe_rotate()                   # still inside the first wait
+        assert b.rotations == 1
+        clock.now += 2
+        await server._maybe_rotate()                   # past it: the second attempt
+        assert b.rotations == 2
+        clock.now += base + 1                          # the second wait is 2 x base
+        await server._maybe_rotate()
+        assert b.rotations == 2
+        clock.now += base
+        await server._maybe_rotate()
+        assert b.rotations == 3
+
+    said = [r.getMessage() for r in caplog.records if "did not happen" in r.getMessage()]
+    assert len(said) == 3 and all("retrying" in m for m in said), said
+
+    b._rotates = True                                  # the CLI is fixed
+    clock.now += server.ROTATION_RETRY_MAX_SEC
+    await server._maybe_rotate()
+    assert b.rotation_pending is False and b.rotations == 4
+
+    # A success starts the count over: the next failure waits the FIRST
+    # interval again, not the fourth.
+    b._rotates = False
+    b.rotation_pending = True                          # a later, real rotation
+    await server._maybe_rotate()
+    assert b.rotations == 5
+    clock.now += base + 1
+    await server._maybe_rotate()
+    assert b.rotations == 6, "a success starts the backoff over"
+
+
+@pytest.mark.asyncio
+async def test_the_backoff_is_capped(wired, monkeypatch):
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+    for _ in range(12):
+        await server._maybe_rotate()
+        clock.now += server.ROTATION_RETRY_MAX_SEC + 1
+    assert b.rotations == 12, "no wait ever grows past the cap"
+
+
+@pytest.mark.asyncio
+async def test_a_handover_from_an_earlier_generation_is_not_reused(wired, monkeypatch):
+    """The handover paid for at a pending rotation belongs to the generation
+    that wrote it. If that process is replaced some other way first -- it
+    died, and was restarted -- a later rotation of its successor must ask the
+    successor, or everything said to it is lost."""
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+
+    await server._maybe_rotate()                  # generation 1 writes its note
+    assert len(b.asked) == 1
+
+    b.generation = 2                              # crashed and restarted
+    b._rotates = True
+    clock.now += server.ROTATION_RETRY_MAX_SEC
+    await server._maybe_rotate()
+
+    assert len(b.asked) == 2, "generation 2 is asked for its own handover"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_start_that_did_not_happen_is_not_announced(wired, monkeypatch, caplog):
+    """`rotate()` reports a replacement that would not start by RETURNING
+    False. The fresh start ignored it and told the user "Cleared" while the
+    generation he wanted gone -- the one whose memory writes are refused --
+    went on serving."""
+    import logging
+    server = wired
+    b = _Brain(rotates=False)
+    sp = _Speech()
+    monkeypatch.setattr(server, "brain_instance", b)
+    monkeypatch.setattr(server, "speech", sp)
+
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        await server._start_fresh()
+
+    spoken = [t for t, _p, _i in sp.said]
+    assert server.FRESH_START_LINE not in spoken
+    assert spoken and "couldn't clear" in spoken[0]
+    said = [r.getMessage() for r in caplog.records]
+    assert not any("generation discarded" in m for m in said), said
+    assert any("fresh start did not happen" in m for m in said), said
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_start_that_happened_is_announced(wired, monkeypatch):
+    server = wired
+    b = _Brain()
+    sp = _Speech()
+    monkeypatch.setattr(server, "brain_instance", b)
+    monkeypatch.setattr(server, "speech", sp)
+
+    await server._start_fresh()
+
+    assert [t for t, _p, _i in sp.said] == [server.FRESH_START_LINE]
+    assert b.rotated_with is None, "a fresh start carries no handover"
+
+
+def test_the_standing_instructions_do_not_contradict_the_handover_request(wired):
+    """JOURNAL_REQUEST says not to call a tool, but the persona and the
+    tool's own description both said `write_journal` is how to answer it —
+    and that call is refused in the system-origin turn that asks, every
+    time. The three must say the same thing."""
+    from pathlib import Path
+    import jarvis_mcp
+    persona = (Path(wired.__file__).parent / "jarvis_home" / "CLAUDE.md").read_text(
+        encoding="utf-8")
+    spec = next(t for t in jarvis_mcp.TOOL_SPECS if t["name"] == "write_journal")
+    for text in (persona, spec["description"]):
+        assert "before your context is rotated" not in text
+        assert "reply with the note" in text.lower(), text[:200]
+
+
+
+@pytest.mark.asyncio
+async def test_a_new_generation_from_elsewhere_is_not_held_by_an_old_backoff(
+        wired, monkeypatch):
+    """The backoff is about ONE replacement that would not start. When the
+    brain has become a new generation some other way — a crash restart, or
+    a fresh start — whatever failed is behind it, and its first due rotation
+    must not wait out the old generation's ten minutes."""
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+
+    for _ in range(4):                                  # the wait is now 4 x base
+        await server._maybe_rotate()
+        clock.now += server.ROTATION_RETRY_MAX_SEC
+    await server._maybe_rotate()
+    assert b.rotations == 5
+
+    b.generation = 7                                    # restarted since
+    b._rotates = True
+    await server._maybe_rotate()                        # at once
+    assert b.rotations == 6 and b.rotation_pending is False
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_start_that_worked_clears_the_backoff(wired, monkeypatch):
+    server = wired
+    b = _Brain(rotates=False)
+    monkeypatch.setattr(server, "brain_instance", b)
+    monkeypatch.setattr(server, "speech", _Speech())
+    clock = _Clock()
+    monkeypatch.setattr(server, "_rotation_clock", clock)
+
+    await server._maybe_rotate()                        # fails: backing off
+    b._rotates = True
+    await server._start_fresh()                         # the user's word works
+    assert server._rotation_failures == 0
+
+    b.rotation_pending = True
+    await server._maybe_rotate()
+    assert b.rotations == 3, "no leftover wait after a fresh start"

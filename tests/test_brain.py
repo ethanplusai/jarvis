@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import procs
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_brain.py"
@@ -51,6 +53,8 @@ def test_command_has_exact_flags(tmp_path):
     assert "--dangerously-skip-permissions" in cmd
     assert '"crossSessionInbound": "accept"' in cmd[cmd.index("--settings") + 1].replace('":"', '": "')
     assert cmd[cmd.index("--tools") + 1] == (                     # an allowlist, not a denylist
+        "mcp__jarvis__business_status,mcp__jarvis__business_action,mcp__jarvis__business_find,"
+        "mcp__jarvis__business_propose,mcp__jarvis__business_record,mcp__jarvis__business_report,"
         "mcp__jarvis__list_sessions,mcp__jarvis__session_detail,"
         "mcp__jarvis__steer_session,mcp__jarvis__answer_dialog,"
         "mcp__jarvis__spawn_run,"
@@ -69,7 +73,8 @@ def test_command_has_exact_flags(tmp_path):
         "mcp__jarvis__repo_overview,mcp__jarvis__search_repo,"
         "mcp__jarvis__read_file,mcp__jarvis__open_in_editor,"
         "mcp__jarvis__remember,mcp__jarvis__recall,"
-        "mcp__jarvis__project_note,mcp__jarvis__write_journal,"
+        "mcp__jarvis__project_note,mcp__jarvis__project_history,mcp__jarvis__write_journal,"
+        "mcp__jarvis__message_user,"
         # The CLI's own two, and the only built-ins here: without them JARVIS
         # can read a page he was given the address of and find nothing.
         "WebSearch,WebFetch")
@@ -99,6 +104,46 @@ def test_child_env_scrubs_claude_code_vars(monkeypatch):
     assert env["CLAUDE_CONFIG_DIR"] == "/keep/me"
 
 
+# Read off a live Claude Code session on 2026-09-26: what JARVIS's backend
+# carried when an agent started it, and passed to the brain's `claude -p`.
+LAUNCHING_SESSION = {
+    "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "the-agent's-session",
+    "CLAUDE_PID": "4242", "CLAUDE_EFFORT": "xhigh",
+    "AI_AGENT": "claude-code_2-1-280_agent", "CLAUDE_AGENT_SDK_VERSION": "0.3.280",
+    "CLAUDE_PREVIEW_CLASSIFIER_FLOOR": "1", "MCP_CONNECTION_NONBLOCKING": "true",
+    "MCP_SERVER_CONNECTION_BATCH_SIZE": "8", "API_TIMEOUT_MS": "900000",
+    "DISABLE_MICROCOMPACT": "1", "USE_STAGING_OAUTH": "",
+    "TRACEPARENT": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer collector-secret",
+}
+
+
+@pytest.mark.asyncio
+async def test_the_brain_process_never_inherits_the_session_that_started_jarvis(tmp_path, monkeypatch):
+    """Through the real spawn, not just the helper: the environment the
+    brain's process actually received. `--effort low` is the brain's; the
+    launching session's effort, MCP start-up tuning, API timeout, agent
+    identity and telemetry are not."""
+    import json
+    import brain
+    dump = tmp_path / "brain_env.json"
+    monkeypatch.setenv("FAKE_BRAIN_ENV_DUMP", str(dump))
+    for name, value in LAUNCHING_SESSION.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "login"))
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(tmp_path / "bash.exe"))
+    b = brain.Brain(_config(tmp_path))
+    try:
+        assert await b.start() is True
+    finally:
+        await b.stop()
+    child = json.loads(dump.read_text(encoding="utf-8"))
+    assert sorted(set(child) & set(LAUNCHING_SESSION)) == []
+    assert child["CLAUDE_CONFIG_DIR"] == str(tmp_path / "login")
+    assert child["CLAUDE_CODE_GIT_BASH_PATH"] == str(tmp_path / "bash.exe")
+    assert child["PATH"] == os.environ["PATH"]
+
+
 @pytest.mark.asyncio
 async def test_start_warms_up_and_becomes_ready(tmp_path):
     import brain
@@ -106,7 +151,7 @@ async def test_start_warms_up_and_becomes_ready(tmp_path):
     try:
         assert await b.start() is True
         assert b.ready and b.session_id == "fake-session-0001" and b.model_in_use == "claude-sonnet-5-fake"
-        assert b.context_tokens == 10 + 9000          # cache_creation is not the window; see test_turn_streams_deltas_and_accounts
+        assert b.context_tokens == 10 + 9000 + 1000   # all three columns; see test_turn_streams_deltas_and_accounts
     finally:
         await b.stop()
     assert not b.running
@@ -124,11 +169,12 @@ async def test_turn_streams_deltas_and_accounts(tmp_path):
         assert "".join(deltas) == "Echo: hello there" == r.text
         assert r.first_delta_sec is not None and r.first_delta_sec < 2
         # The fake reports input=10, cache_read=18000, cache_creation=1000 on
-        # this turn. The window is the prompt as sent -- input plus what was
-        # read from cache. The 1000 of cache CREATION is that same prompt
-        # being written into the cache, not more of it; counting it once
-        # made a cache miss look like the conversation doubling.
-        assert r.context_tokens == 10 + 18000 and b.context_tokens == r.context_tokens
+        # this turn's one call. The window is that call's whole prompt: the
+        # three columns are disjoint, and the 1000 written to the cache this
+        # turn is prompt the model read like any other. (Leaving it out is
+        # what measured a cold-cache floor as 2 tokens live; see
+        # tests/test_rotation_loop.py.)
+        assert r.context_tokens == 10 + 18000 + 1000 and b.context_tokens == r.context_tokens
         assert r.origin == "user"
     finally:
         # A failing assert above must still stop the brain: its child holds
@@ -147,6 +193,33 @@ async def test_current_origin_is_set_during_turn(tmp_path):
         r = await b.turn("SLOW:0.3 hi", origin="watcher", on_delta=lambda d: seen.append(b.current_origin))
         assert seen and set(seen) == {"watcher"}
         assert b.current_origin is None
+    finally:
+        await b.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_can_begin_holding_somebody_elses_words(tmp_path):
+    """A message the owner FORWARDED from his phone is somebody else's text
+    from its first token, so the turn is tainted before its first tool call
+    — not marked afterwards by a reading tool, which is too late for the
+    acting-tool gate that call has to pass. The generation keeps the mark,
+    as it does after any read; the next turn is the user's own again."""
+    import brain
+    b = brain.Brain(_config(tmp_path))
+    try:
+        await b.start()
+        at_tool, at_delta = [], []
+        r = await b.turn("TOOL please", untrusted="a message forwarded to you",
+                         on_tool=lambda: at_tool.append(b.turn_untrusted_source),
+                         on_delta=lambda d: at_delta.append(b.turn_untrusted_source))
+        assert r.stop_reason == "result"
+        assert at_tool == ["a message forwarded to you"], "tainted before the first tool"
+        assert set(at_delta) == {"a message forwarded to you"}
+        assert b.turn_untrusted_source is None, "nothing between turns"
+        assert b.generation_untrusted_source == "a message forwarded to you"
+        seen = []
+        await b.turn("hello again", on_delta=lambda d: seen.append(b.turn_untrusted_source))
+        assert seen and set(seen) == {None}
     finally:
         await b.stop()
 
@@ -293,7 +366,7 @@ async def test_restart_keeps_trying_when_the_replacement_dies_during_warmup(tmp_
         b.on_state(lambda s, info: states.append(s))
         await b.start()
         gen = b.generation
-        marker.write_text("x")                     # the NEXT spawn exits 1 at startup
+        marker.write_text("x", encoding="utf-8")                     # the NEXT spawn exits 1 at startup
         r = await b.turn("DIE")
         assert r.stop_reason == "died"
         assert await _wait_until(lambda: b.ready and b.generation == gen + 2)
@@ -405,11 +478,8 @@ async def test_launch_prompt_names_the_generation_being_started(tmp_path, monkey
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+    # Not `os.kill(pid, 0)`: on Windows that is a Ctrl+C, not a probe.
+    return procs.pid_alive(pid)
 
 
 @pytest.mark.asyncio
@@ -454,7 +524,7 @@ async def test_warmup_timeout_kills_the_hung_child(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_BRAIN_HANG_ONCE", str(marker))
     b = brain.Brain(_config(tmp_path, warmup_timeout=1.0, max_restarts=3))
     await b.start()
-    marker.write_text("x")                             # the replacement will hang in warm-up
+    marker.write_text("x", encoding="utf-8")                             # the replacement will hang in warm-up
     hung = []
     orig = b._kill
 
@@ -1010,3 +1080,18 @@ async def test_invalid_utf8_line_does_not_kill_the_reader(tmp_path, caplog):
         # this the child outlives the test, keeps pytest's captured stdout,
         # and the suite hangs instead of reporting the failure.
         await _bounded(b.stop(), 20, b, "brain.stop()")
+
+
+def test_a_turn_reports_how_much_of_its_context_was_served_from_cache():
+    """The latency line prints it beside the context size: a first delta of
+    four seconds on a window that was all cache reads is the model's time,
+    and one on a window that was all fresh input is a cache that is being
+    rebuilt every turn. The window counts all three columns; `cached` is
+    the part of it that was read."""
+    from brain import _Turn
+    t = _Turn("user", None)
+    t.usage = {"input_tokens": 120, "cache_read_input_tokens": 26000,
+               "cache_creation_input_tokens": 500, "output_tokens": 25}
+    r = t.result(None)
+    assert r.context_tokens == 26620
+    assert r.cached_tokens == 26000

@@ -46,7 +46,7 @@ def client(monkeypatch, tmp_path):
     # Redirect .env reads/writes to an isolated file so these tests never
     # touch the real project .env.
     env_file = tmp_path / ".env"
-    env_file.write_text("")
+    env_file.write_text("", encoding="utf-8")
     monkeypatch.setattr(server, "_env_file_path", lambda: env_file)
 
     with TestClient(server.app,
@@ -59,14 +59,14 @@ def client(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_requirements_does_not_install_the_anthropic_sdk():
-    text = (ROOT / "requirements.txt").read_text()
+    text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     for line in text.splitlines():
         name = line.split("#")[0].strip().split("=")[0].split(">")[0].split("[")[0]
         assert name.lower() != "anthropic", f"anthropic is back in requirements: {line!r}"
 
 
 def test_server_does_not_import_the_anthropic_sdk():
-    text = (ROOT / "server.py").read_text()
+    text = (ROOT / "server.py").read_text(encoding="utf-8")
     assert "import anthropic" not in text
 
 
@@ -74,7 +74,7 @@ def test_no_module_imports_the_anthropic_sdk():
     """Not just server.py -- nothing in the project may pull the SDK in."""
     offenders = []
     for path in sorted(ROOT.glob("*.py")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if "import anthropic" in text or "from anthropic" in text:
             offenders.append(path.name)
     assert offenders == []
@@ -114,7 +114,7 @@ def test_lifespan_no_longer_warns_about_a_missing_api_key():
     """The startup log told every user "ANTHROPIC_API_KEY not set -- LLM
     features disabled", which was both false and the opposite of the
     project's promise."""
-    text = (ROOT / "server.py").read_text()
+    text = (ROOT / "server.py").read_text(encoding="utf-8")
     assert "LLM features disabled" not in text
 
 
@@ -178,7 +178,7 @@ def test_preflight_still_warns_about_a_stray_anthropic_variable(monkeypatch):
     """The check is about the user's `.env`, not about the SDK -- it stays,
     and it must not need the package to do its job."""
     import preflight
-    text = (ROOT / "preflight.py").read_text()
+    text = (ROOT / "preflight.py").read_text(encoding="utf-8")
     assert "import anthropic" not in text and "from anthropic" not in text
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-abc123")

@@ -60,6 +60,10 @@ def env(monkeypatch, tmp_path):
     importlib.reload(session_watch)
     import usage_scan
     importlib.reload(usage_scan)
+    # The scan's cache and lock live in usage_api (the router carved out of
+    # server.py); reload it too, or every test shares the first one's scan.
+    import usage_api
+    importlib.reload(usage_api)
     import server
     importlib.reload(server)
     run_store.init_db()
@@ -148,8 +152,9 @@ def test_a_scan_that_blows_up_says_so_rather_than_serving_zeroes(client, monkeyp
     def boom(*a, **k):
         raise OSError("the disk went away")
 
-    monkeypatch.setattr(server.usage_scan, "snapshot", boom)
-    server._usage_scan_result = (0.0, {})
+    import usage_api
+    monkeypatch.setattr(usage_api.usage_scan, "snapshot", boom)
+    usage_api._usage_scan_result = (0.0, {})
 
     res = c.get("/api/usage/sessions")
 

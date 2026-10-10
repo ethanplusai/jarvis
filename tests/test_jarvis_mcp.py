@@ -62,6 +62,9 @@ class Server:
             self.p.wait(timeout=5)
         except Exception:
             self.p.kill()
+            self.p.wait(timeout=5)
+        self.p.stdout.close()
+        self.p.stderr.close()
 
 
 @pytest.fixture
@@ -93,13 +96,14 @@ def fake_endpoint(tmp_path):
     t.start()
     yield srv.server_address[1], calls, body_holder
     srv.shutdown()
+    srv.server_close()
 
 
 @pytest.fixture
 def env_for(tmp_path, fake_endpoint):
     port, calls, holder = fake_endpoint
     token = tmp_path / "tool-token"
-    token.write_text("s3cret")
+    token.write_text("s3cret", encoding="utf-8")
     env = dict(os.environ)
     env.update({"JARVIS_TOOL_URL": f"http://127.0.0.1:{port}/internal/tool",
                 "JARVIS_TOOL_TOKEN_FILE": str(token)})
@@ -156,7 +160,7 @@ def test_a_refused_tool_comes_back_as_an_error_result_not_a_crash(env_for):
 
 def test_an_unreachable_server_is_reported_not_raised(tmp_path):
     token = tmp_path / "t"
-    token.write_text("x")
+    token.write_text("x", encoding="utf-8")
     env = dict(os.environ)
     env.update({"JARVIS_TOOL_URL": "http://127.0.0.1:1/internal/tool",
                 "JARVIS_TOOL_TOKEN_FILE": str(token)})
@@ -350,3 +354,120 @@ def test_the_new_tools_are_advertised_with_tight_descriptions(env_for):
         assert "browser" in specs["open_in_browser"]["inputSchema"]["properties"]
     finally:
         s.close()
+
+
+# --- the call goes straight to JARVIS -------------------------------------
+#
+# `_forward` carries the loopback bearer token, and the TLS on it is not
+# verified (the certificate is JARVIS's own self-signed one). urllib's
+# default opener sent it through HTTP(S)_PROXY — which `claude_env.
+# child_env` passes through on purpose — because nothing names 127.0.0.1 in
+# NO_PROXY, and followed a 301/302/303 with the Authorization header still
+# on. The stand-ins are in tests/loopback_servers.py.
+
+from tests.loopback_servers import (  # noqa: E402,F401  (fixtures)
+    Listener, elsewhere, endpoint, proxied_env, proxy, server_tls, tls_endpoint,
+    unproxied_env)
+
+
+def _tool_env(tmp_path, url: str, base: dict) -> dict:
+    token = tmp_path / "tool-token"
+    token.write_text("s3cret", encoding="utf-8")
+    env = dict(base)
+    env.update({"JARVIS_TOOL_URL": url, "JARVIS_TOOL_TOKEN_FILE": str(token)})
+    return env
+
+
+def _one_tool_call(env: dict) -> dict:
+    s = Server(env)
+    try:
+        s.call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}})
+        return s.call("tools/call", {"name": "list_sessions", "arguments": {}},
+                      rid=11)["result"]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_proxy_in_the_environment_is_not_used(request, scheme, proxy, tmp_path):
+    """HTTP_PROXY / HTTPS_PROXY / ALL_PROXY set, NO_PROXY not: the call still
+    reaches the server, and the proxy is handed nothing — not the token in
+    the clear, not a CONNECT it could open with a certificate of its own."""
+    server = request.getfixturevalue("endpoint" if scheme == "http" else "tls_endpoint")
+    server.answer(200, {"ok": True, "text": "straight through"})
+    result = _one_tool_call(_tool_env(tmp_path, server.origin + "/internal/tool",
+                                      proxied_env(proxy.url)))
+    assert proxy.connections == [], f"the proxy was handed: {proxy.connections!r}"
+    assert result["content"][0]["text"] == "straight through"
+    assert result["isError"] is False
+    [call] = server.requests
+    assert call["headers"]["authorization"] == "Bearer s3cret"
+    assert call["headers"]["host"] == f"127.0.0.1:{server.port}"
+    assert json.loads(call["body"]) == {"tool": "list_sessions", "arguments": {}}
+
+
+def test_a_windows_system_proxy_is_not_used_either(endpoint, tmp_path, monkeypatch):
+    """With no proxy variable at all, urllib on Windows falls back to the
+    proxy set in Internet Options (`getproxies_registry`). Stood in for here
+    by the function urllib asks."""
+    import urllib.request
+    system_proxy = Listener()
+    try:
+        monkeypatch.setattr(urllib.request, "getproxies",
+                            lambda: {"http": system_proxy.url, "https": system_proxy.url})
+        for name, value in _tool_env(tmp_path, endpoint.origin + "/internal/tool",
+                                     {}).items():
+            monkeypatch.setenv(name, value)
+        endpoint.answer(200, {"ok": True, "text": "straight through"})
+        assert jarvis_mcp._forward("list_sessions", {}) == (True, "straight through", None)
+        assert system_proxy.connections == []
+    finally:
+        system_proxy.close()
+
+
+def test_the_self_signed_certificate_is_still_accepted_on_loopback(tls_endpoint, tmp_path):
+    """What makes the unverified context safe is that the hop never leaves
+    the machine; what makes it NECESSARY is that no CA signed JARVIS's
+    certificate. A transport that verified it would fail every call."""
+    tls_endpoint.answer(200, {"ok": True, "text": "fine"})
+    result = _one_tool_call(_tool_env(tmp_path, tls_endpoint.origin + "/internal/tool",
+                                      unproxied_env()))
+    assert result["content"][0]["text"] == "fine" and result["isError"] is False
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_a_redirect_is_refused_and_the_token_goes_nowhere_else(
+        endpoint, elsewhere, tmp_path, status):
+    endpoint.answer(status, {}, {"Location": elsewhere.origin + "/internal/tool"})
+    elsewhere.answer(200, {"ok": True, "text": "answered by somebody else"})
+    result = _one_tool_call(_tool_env(tmp_path, endpoint.origin + "/internal/tool",
+                                      unproxied_env()))
+    assert elsewhere.requests == [], "the redirect was followed, token and all"
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == f"JARVIS refused the call ({status})."
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_an_error_status_is_reported_with_its_code(endpoint, tmp_path, status):
+    endpoint.answer(status, {"ok": True, "text": "not this"})
+    result = _one_tool_call(_tool_env(tmp_path, endpoint.origin + "/internal/tool",
+                                      unproxied_env()))
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == f"JARVIS refused the call ({status})."
+
+
+@pytest.mark.parametrize("body", [b"not json", b""])
+def test_an_unreadable_answer_is_reported_as_such(endpoint, tmp_path, body):
+    endpoint.answer(200, body)
+    result = _one_tool_call(_tool_env(tmp_path, endpoint.origin + "/internal/tool",
+                                      unproxied_env()))
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == "The JARVIS server sent something unreadable."
+
+
+@pytest.mark.parametrize("url", ["ftp://127.0.0.1:21/internal/tool",
+                                 "file:///etc/passwd", "127.0.0.1:8340/internal/tool"])
+def test_a_tool_url_that_is_not_http_is_unreachable_not_a_crash(tmp_path, url):
+    result = _one_tool_call(_tool_env(tmp_path, url, unproxied_env()))
+    assert result["isError"] is True
+    assert result["content"][0]["text"] == "The JARVIS server is unreachable."

@@ -37,7 +37,7 @@ def test_mcp_config_url_matches_the_real_bind_params(
     home = tmp_path / "home"
     home.mkdir()
     path = server_module._write_mcp_config(home)
-    config = json.loads(path.read_text())
+    config = json.loads(path.read_text(encoding="utf-8"))
     url = config["mcpServers"]["jarvis"]["env"]["JARVIS_TOOL_URL"]
 
     assert url == f"{scheme}://{expected_host}:{port}/internal/tool"
@@ -51,7 +51,7 @@ def test_mcp_config_defaults_when_env_is_unset(server_module, monkeypatch, tmp_p
     home = tmp_path / "home"
     home.mkdir()
     path = server_module._write_mcp_config(home)
-    config = json.loads(path.read_text())
+    config = json.loads(path.read_text(encoding="utf-8"))
     url = config["mcpServers"]["jarvis"]["env"]["JARVIS_TOOL_URL"]
 
     assert url == "http://127.0.0.1:8340/internal/tool"

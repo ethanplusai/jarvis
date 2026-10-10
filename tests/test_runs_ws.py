@@ -59,7 +59,7 @@ def test_voice_ws_untouched_by_runs_ws(client):
     # /ws/runs must own its subscription and nothing else. The old
     # task_manager._websockets registry is gone, so the observable
     # shared state is the executor's subscriber list plus the route table.
-    routes_before = [r.path for r in server.app.routes]
+    routes_before = [getattr(r, "path", type(r).__name__) for r in server.app.routes]
     subs_before = len(server.run_executor_instance._subscribers)
 
     for _ in range(3):
@@ -69,5 +69,5 @@ def test_voice_ws_untouched_by_runs_ws(client):
             assert len(server.run_executor_instance._subscribers) == subs_before + 1
         assert len(server.run_executor_instance._subscribers) == subs_before
 
-    assert [r.path for r in server.app.routes] == routes_before
+    assert [getattr(r, "path", type(r).__name__) for r in server.app.routes] == routes_before
     assert "/ws/voice" in routes_before

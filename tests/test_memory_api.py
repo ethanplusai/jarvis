@@ -129,7 +129,7 @@ def test_latest_journal_slug_is_the_one_the_brain_will_carry(api):
 def test_a_hand_renamed_journal_file_does_not_break_the_listing(api):
     client, jm, data_paths, _rs = api
     jm.write_journal("a real entry", reason="shutdown")
-    (data_paths.journal_dir() / "renamed-by-hand.md").write_text("# mystery\n")
+    (data_paths.journal_dir() / "renamed-by-hand.md").write_text("# mystery\n", encoding="utf-8")
 
     r = client.get("/api/memory")
 
@@ -146,7 +146,7 @@ def test_a_memory_comes_back_as_raw_markdown(api):
     r = client.get("/api/memory/memory/a-fact")
 
     assert r.status_code == 200
-    assert r.json() == {"slug": "a-fact", "text": path.read_text()}
+    assert r.json() == {"slug": "a-fact", "text": path.read_text(encoding="utf-8")}
 
 
 def test_a_long_document_is_not_truncated(api):
@@ -233,7 +233,7 @@ def test_a_relative_slug_cannot_reach_a_real_markdown_file_outside(api):
     would happily serve."""
     client, jm, data_paths, _rs = api
     jm.write_memory("A fact", "body")
-    (data_paths.brain_home() / "escaped.md").write_text("the private one\n")
+    (data_paths.brain_home() / "escaped.md").write_text("the private one\n", encoding="utf-8")
 
     assert jm.doc_path("memory", "../escaped") is None
     assert jm.doc_path("memory", "..%2fescaped") is None
@@ -247,7 +247,7 @@ def test_a_symlink_out_of_the_folder_is_refused(api):
     client, jm, data_paths, _rs = api
     jm.write_memory("A fact", "body")
     outside = data_paths.data_dir() / "secret.md"
-    outside.write_text("root:x:0:0:\n")
+    outside.write_text("root:x:0:0:\n", encoding="utf-8")
     (data_paths.memory_dir() / "innocent.md").symlink_to(outside)
 
     assert jm.doc_path("memory", "innocent") is None
@@ -261,3 +261,45 @@ def test_a_real_file_is_still_served_after_all_that(api):
     client, jm, _dp, _rs = api
     jm.write_memory("A fact", "body")
     assert client.get("/api/memory/memory/a-fact").status_code == 200
+
+
+# --- the index and the folder can disagree, and the page must say so -------
+
+def test_the_snapshot_names_memories_the_index_does_not(api):
+    client, jm, _dp, _rs = api
+    jm.write_memory("StarNet station and how to work it", "Start with starnet_status.")
+    jm.write_memory("Tony prefers Postgres", "for chitauri")
+    jm.add_to_index("Tony prefers Postgres", "database preference")
+
+    body = client.get("/api/memory").json()
+
+    assert [u["slug"] for u in body["unindexed"]] == ["starnet-station-and-how-to-work-it"]
+    assert body["unindexed"][0]["title"] == "StarNet station and how to work it"
+
+
+def test_reindex_over_http_adds_the_missing_lines(api):
+    client, jm, data_paths, _rs = api
+    jm.write_memory("StarNet station and how to work it", "Start with starnet_status.")
+    token = data_paths.ensure_tool_token()
+
+    r = client.post("/api/memory/reindex",
+                    headers={"Authorization": f"Bearer {token}"})
+
+    assert r.status_code == 200
+    assert r.json() == {"indexed": ["starnet-station-and-how-to-work-it"],
+                        "left_out": [], "full": False}
+    after = client.get("/api/memory").json()
+    assert after["unindexed"] == []
+    assert [e["slug"] for e in after["index"]] == ["starnet-station-and-how-to-work-it"]
+
+
+def test_reindex_is_a_mutation_and_sits_behind_the_web_boundary(api):
+    """No Origin, no token: not a browser JARVIS serves and not his own
+    tool child, so it is refused like every other state change."""
+    client, jm, _dp, _rs = api
+    jm.write_memory("StarNet station", "body")
+
+    r = client.post("/api/memory/reindex")
+
+    assert r.status_code in (401, 403)
+    assert jm.unindexed_memories(), "a refused call must not have written"

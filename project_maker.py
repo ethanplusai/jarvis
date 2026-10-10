@@ -191,7 +191,8 @@ async def create(raw_name: str, description: str = "",
                 "path": str(target), "root": str(root_real),
                 "root_name": root_real.name}
 
-    (target / "README.md").write_text(_readme(name, description))
+    (target / "README.md").write_text(_readme(name, description),
+                                      encoding="utf-8")
     git_ok = await _git_init(target)
     log.info("created project %s at %s (git=%s)", name, target, git_ok)
     return {"created": True, "name": name, "path": str(target),

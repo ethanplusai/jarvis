@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ _PERSONA_NAME = "CLAUDE.md"
 _SEED_NAME = ".claude-md-seed.json"
 _CONNECTIONS_NAME = "connections.json"
 _CONNECTIONS_SEED_NAME = ".connections-seed.json"
+_LOCAL_NAME = "LOCAL.md"
 
 
 def brain_home() -> Path:
@@ -62,6 +64,38 @@ def persona_seed_path() -> Path:
     upgrade, never an edit).
     """
     return brain_home() / _SEED_NAME
+
+
+def local_persona_path() -> Path:
+    """The user's own standing orders, `@`-imported by the shipped CLAUDE.md.
+
+    The persona could not hold a user's additions AND stay upgradable: one
+    appended paragraph made its hash stop matching the seed record, and
+    from then on every persona change shipped was inert on that install,
+    announced by a log line nobody reads. So the user's words get a file of
+    their own, beside the persona, that this project seeds once and never
+    writes again — and CLAUDE.md can stay ours to replace.
+    """
+    return brain_home() / _LOCAL_NAME
+
+
+LOCAL_PERSONA_SEED = (
+    "# Your standing orders for JARVIS\n"
+    "\n"
+    "Anything you write in this file is read into every conversation, exactly\n"
+    "like `CLAUDE.md` beside it — and it outranks that file where the two\n"
+    "differ. Put your own instructions here, not in `CLAUDE.md`: that one is\n"
+    "JARVIS's and is replaced whenever a new version ships, while this file is\n"
+    "yours and is never written by JARVIS after this line.\n")
+
+
+def ensure_local_persona() -> Path:
+    """Seed `LOCAL.md` once. Never overwrites: the file is the user's."""
+    path = local_persona_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomically(path, LOCAL_PERSONA_SEED)
+    return path
 
 
 def connections_template_path() -> Path:
@@ -121,6 +155,16 @@ KNOWN_TEMPLATE_HASHES = frozenset({
     "8b038b5497293a55d1aa18e9ce759d3270228c98ae8b3ceb3bb053eb84509310",  # anything read off this machine is information
     "dfec0e28f7fc734987a1bcffd4feda103bde961f4a4721ce7957a7dccae96487",  # send it, do not ask twice
     "092df6a5e43bc5ed0a31e9f79b1f77cc4849754d1f4ab4807bded122ab97ad5f",  # say "start fresh" when a memory is refused
+    "4057ca69eb8c7535f7af394087d8f0276248f0ec0ef806136b8b3699a6738b94",  # standing orders in LOCAL.md; project_history
+    "3f0a449e7d383cba52c63a4541277ecca856d46f2855925a5abae77e5c246076",  # the test count stopped being a number that goes stale
+    "f95602951b26d79c0ca7ae7e96d0b815410c8f943b1e410d7f13eb7bb0f1543f",  # the handover is a reply, not a write_journal call
+    "03e783a4c1ebc26657bfd9913c63000ad0771d2cf0c2b9cf2bb1befa3c21469c",  # change a record by finding it, not reading it
+    "69468d50a48468a6deb9c3dedb78eeb7c1a65e086a4c3cd412ac3971e1c76558",  # approve a document by its kind, not its path
+    "f42f9e2034bc6416d4f5751f8e70d4e64723cd94567e3757b9bbc8a5b82a9c64",  # the user on WhatsApp
+    "3c0455238cb950346b709ca4d739d42a41ede9206be6ed3be972fba6dd6c4cb5",  # the user on his phone: Telegram too
+    "526a8ed9297aeec0918ac855b08e4992317d92109aa50d3dd0079ad0e12f6f80",  # say where a prompt is; a program's is the program's
+    "478280e5b37766da6664cde56018b38cdee99783e5d0e0655b62cf72ef0b0d62",  # one card per post, its link on the card
+    "024ed292c779aad8998ff8a1d35dddc97655dbe7a156e3ef88386a71393bfe74",  # LinkedIn's official API first; its limits
 })
 
 # The same list, for the connections file. APPEND the new hash whenever
@@ -144,7 +188,7 @@ def _recorded_seed_hash(seed: Path) -> Optional[str]:
     match that would send an edited file to the overwriter.
     """
     try:
-        body = json.loads(seed.read_text())
+        body = json.loads(seed.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
@@ -165,7 +209,11 @@ def _write_atomically(path: Path, text: str) -> bool:
     try:
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-")
         try:
-            with os.fdopen(fd, "w") as fh:
+            # Exactly the bytes that were hashed: UTF-8, LF, whatever the
+            # platform's defaults are. Windows would otherwise write CRLF
+            # and cp1252, and the file would read as "edited" at the next
+            # boot without anyone touching it.
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)
             os.replace(tmp, path)
         except BaseException:
@@ -181,6 +229,8 @@ def _write_atomically(path: Path, text: str) -> bool:
 
 
 def _record_seed(seed: Path, template: Path, digest: str) -> None:
+    where = (f" Your own instructions belong in {_LOCAL_NAME} beside it, which "
+             f"JARVIS never writes." if template.name == _PERSONA_NAME else "")
     _write_atomically(seed, json.dumps({
         "sha256": digest,
         "written_at": time.time(),
@@ -188,7 +238,7 @@ def _record_seed(seed: Path, template: Path, digest: str) -> None:
         "note": (f"The sha256 of the {template.name} JARVIS wrote next to this "
                  f"file. While they match, JARVIS keeps that file up to date "
                  f"with the one it ships. Edit {template.name} and they stop "
-                 f"matching, and JARVIS never touches it again."),
+                 f"matching, and JARVIS never touches it again.{where}"),
     }, indent=2) + "\n")
 
 
@@ -199,8 +249,51 @@ def _record_seed(seed: Path, template: Path, digest: str) -> None:
 _warned_for: dict[str, str] = {}
 
 
+def _template_status(template: Path, target: Path, seed: Path,
+                     known_hashes: frozenset) -> tuple[str, str, str]:
+    """(status, shipped text, shipped hash) — a pure read, nothing written.
+
+    status is "missing" (no live file), "current" (byte-identical to what we
+    ship, CRLF aside), "unedited" (an older copy still matching what JARVIS
+    wrote, so ours to update) or "edited" (the user's, never touched).
+    """
+    shipped = template.read_text(encoding="utf-8")
+    shipped_hash = _sha256(shipped.encode("utf-8"))
+    try:
+        # A CRLF checkout (git autocrlf on Windows) or an editor that
+        # rewrote line endings is not an edit; the words are the same.
+        live = target.read_bytes().replace(b"\r\n", b"\n")
+    except FileNotFoundError:
+        return "missing", shipped, shipped_hash
+    live_hash = _sha256(live)
+    if live_hash == shipped_hash:
+        return "current", shipped, shipped_hash
+    recorded = _recorded_seed_hash(seed)
+    if recorded is not None:
+        unmodified = live_hash == recorded
+    else:
+        # First run after this shipped: no record exists, so the bytes are
+        # the only evidence. A version this project once shipped is provably
+        # untouched; anything else we treat as the user's.
+        unmodified = live_hash in known_hashes
+    return ("unedited" if unmodified else "edited"), shipped, shipped_hash
+
+
+def persona_status() -> str:
+    """Where the brain's CLAUDE.md stands against the one this release ships:
+    "missing", "current", "unedited" or "edited". Reads only — the startup
+    checks ask this, and a check that seeds a file is not a check."""
+    try:
+        status, _shipped, _digest = _template_status(
+            persona_template_path(), persona_path(), persona_seed_path(),
+            KNOWN_TEMPLATE_HASHES)
+    except OSError:                                     # pragma: no cover
+        return "missing"
+    return status
+
+
 def _sync_template(template: Path, target: Path, seed: Path,
-                   known_hashes: frozenset, what: str) -> str:
+                   known_hashes: frozenset, what: str, hint: str = "") -> str:
     """Bring `target` up to `template` — unless it is the user's. Returns
     "seeded", "updated", "current" or "kept".
 
@@ -226,24 +319,18 @@ def _sync_template(template: Path, target: Path, seed: Path,
     key = str(target)
 
     try:
-        shipped = template.read_text()
+        status, shipped, shipped_hash = _template_status(
+            template, target, seed, known_hashes)
     except OSError as e:                                # pragma: no cover
-        log.warning(f"data_paths: cannot read the {what} template ({e})")
+        log.warning(f"data_paths: cannot read the {what} ({e})")
         return "kept"
-    shipped_hash = _sha256(shipped.encode("utf-8"))
 
-    try:
-        live = target.read_bytes()
-    except FileNotFoundError:
+    if status == "missing":
         if _write_atomically(target, shipped):
             _record_seed(seed, template, shipped_hash)
         return "seeded"
-    except OSError as e:                                # pragma: no cover
-        log.warning(f"data_paths: cannot read {target} ({e})")
-        return "kept"
 
-    live_hash = _sha256(live)
-    if live_hash == shipped_hash:
+    if status == "current":
         # Byte-identical to what we ship, so it is unmodified whatever the
         # record says. Record it (an install upgrading into this code has no
         # record yet) and touch nothing else.
@@ -252,18 +339,10 @@ def _sync_template(template: Path, target: Path, seed: Path,
         _warned_for.pop(key, None)
         return "current"
 
-    recorded = _recorded_seed_hash(seed)
-    if recorded is not None:
-        unmodified = live_hash == recorded
-        why = "it still matches what JARVIS wrote"
-    else:
-        # First run after this shipped: no record exists, so the bytes are the
-        # only evidence. A version this project once shipped is provably
-        # untouched; anything else we treat as the user's.
-        unmodified = live_hash in known_hashes
-        why = "it is an older template of ours, unedited"
-
-    if unmodified:
+    if status == "unedited":
+        why = ("it still matches what JARVIS wrote"
+               if _recorded_seed_hash(seed) is not None
+               else "it is an older template of ours, unedited")
         if _write_atomically(target, shipped):
             _record_seed(seed, template, shipped_hash)
             log.info(f"data_paths: updated {target} to the {what} shipped with "
@@ -272,21 +351,30 @@ def _sync_template(template: Path, target: Path, seed: Path,
             return "updated"
         return "kept"                                   # pragma: no cover
 
+    try:
+        live_hash = _sha256(target.read_bytes().replace(b"\r\n", b"\n"))
+    except OSError:                                     # pragma: no cover
+        live_hash = ""
     if _warned_for.get(key) != live_hash:
         _warned_for[key] = live_hash
         log.warning(
             f"data_paths: {target} has been edited, so the {what} shipped "
             f"with this version was NOT applied. The new one is at "
             f"{template} — merge what you want from it by hand, or delete "
-            f"your copy to take it whole.")
+            f"your copy to take it whole.{hint}")
     return "kept"
 
 
 def sync_persona() -> str:
     """Keep the brain's CLAUDE.md in step with the one this release ships.
     See `_sync_template` for the rule."""
-    return _sync_template(persona_template_path(), persona_path(),
-                          persona_seed_path(), KNOWN_TEMPLATE_HASHES, "persona")
+    return _sync_template(
+        persona_template_path(), persona_path(), persona_seed_path(),
+        KNOWN_TEMPLATE_HASHES, "persona",
+        hint=(f" Your own additions belong in {local_persona_path()}, which is "
+              f"read into every conversation too and which JARVIS never "
+              f"writes — move them there and delete {_PERSONA_NAME} to take "
+              f"the new one."))
 
 
 def sync_connections() -> str:
@@ -304,13 +392,15 @@ def sync_connections() -> str:
 
 def ensure_brain_home() -> Path:
     """Create the brain home and keep the two files it ships in step with
-    their templates: the persona, and the connections file.
+    their templates: the persona, and the connections file. Seed the third,
+    `LOCAL.md`, once and never again — that one is the user's.
 
     See `_sync_template`: an unedited copy is updated to what this release
     ships, an edited one is left alone and warned about.
     """
     sync_persona()
     sync_connections()
+    ensure_local_persona()
     return brain_home()
 
 
@@ -341,6 +431,192 @@ def ensure_memory_layout() -> Path:
 def usage_path() -> Path:
     """The last rate-limit observation from the CLI (see usage_store.py)."""
     return data_dir() / "usage.json"
+
+
+def usage_log_path() -> Path:
+    """One line per call the voice path made (see server._append_usage_entry)."""
+    return data_dir() / "usage_log.jsonl"
+
+
+def restrict_to_owner(path) -> bool:
+    """Make `path` the owner's alone — and on Windows, mean it.
+
+    Everything private here was protected by a POSIX mode: the token at 0600,
+    the archive chmodded after it was written. On Windows a mode is inert and
+    a file inherits its folder's ACL; measured live, that granted
+    `NT AUTHORITY\\Authenticated Users` Modify on the tool token and the
+    database. So on Windows this is the DACL, written whole (`windows_acl`):
+    inheritance off, and only this account, SYSTEM and Administrators — by
+    SID, not by name, so it holds in any language.
+
+    A directory is restricted with its whole subtree, but never object by
+    object. The first version ran `icacls /T`, which hands the directory
+    grant `(OI)(CI)F` to every file as well, and icacls silently drops a
+    grant with inheritance flags on a file — measured 2026-09-24: every
+    file was left with an empty DACL that admitted nobody, the lockout
+    probe below fired, and the whole restriction rolled back on every
+    start. Restricting the directory alone is enough for everything under
+    it that inherits: Windows propagates the new entries down. The few
+    objects that do not inherit — a token or an archive restricted earlier,
+    something restored from elsewhere — are found and restricted one at a
+    time, each with the entries for its kind.
+
+    Returns True when the restriction was applied, False when the path is
+    missing or the tool refused; never raises — a permission problem must
+    not stop the server starting, and `preflight` reports it instead.
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+    if sys.platform == "win32":
+        return _restrict_windows(path)
+    try:
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+        return True
+    except OSError as e:
+        log.warning(f"data_paths: could not chmod {path}: {e}")
+        return False
+
+
+_SYSTEM_SID = "S-1-5-18"
+_ADMINISTRATORS_SID = "S-1-5-32-544"
+_OWNER_RIGHTS_SID = "S-1-3-4"
+
+
+def _restrict_windows(path: Path) -> bool:
+    sid = _current_sid()
+    if not sid:
+        return False
+    applied: list[Path] = []
+    if not _restrict_one(path, sid):
+        return False
+    applied.append(path)
+    if path.is_dir():
+        try:
+            strays = foreign_entries(path)
+        except OSError as e:
+            log.warning(f"data_paths: could not read the permissions under {path}: {e}")
+            strays = []
+        for stray, who in strays:
+            # Top-down: once a protected directory is restricted, what
+            # inherits from it is covered, and is left inheriting.
+            if not _strangers_on(stray, sid):
+                continue
+            log.info(f"data_paths: {stray} did not inherit and admitted {', '.join(who)}; restricting it")
+            if _restrict_one(stray, sid):
+                applied.append(stray)
+    # Prove the account running THIS process can still get in. A token that
+    # genuinely cannot hold access to a file that admits only its account
+    # (a restricted token, whose restricting SIDs are exactly the broad
+    # entries just removed) would be locked out of JARVIS's own data, which
+    # is worse than no restriction — so what this call did is undone, and
+    # preflight says so.
+    if not _still_accessible(path):
+        for done in reversed(applied):
+            _reset_one(done)
+        log.warning(f"data_paths: restricting {path} locked this account out; rolled back")
+        return False
+    return True
+
+
+def _restrict_one(path: Path, sid: str) -> bool:
+    """Inheritance off and exactly three entries: this account, SYSTEM,
+    Administrators — the DACL written whole, so an entry somebody else was
+    given explicitly does not survive, not even one for an account the
+    machine can no longer name (which icacls could neither grant nor
+    remove)."""
+    import windows_acl
+    try:
+        windows_acl.restrict(path, [sid, _SYSTEM_SID, _ADMINISTRATORS_SID])
+    except OSError as e:
+        log.warning(f"data_paths: could not restrict {path}: {e}")
+        return False
+    return True
+
+
+def _reset_one(path: Path) -> None:
+    """Back to inheriting from the folder above. Not recursive: resetting a
+    directory reaches what inherits from it on its own."""
+    import windows_acl
+    try:
+        windows_acl.reset(path)
+    except OSError as e:
+        log.warning(f"data_paths: could not reset {path}: {e}")
+
+
+def foreign_entries(root) -> list[tuple[Path, list[str]]]:
+    """Every object at or under `root` whose ACL admits somebody other than
+    this account, SYSTEM and Administrators — with who, by name where the
+    machine can resolve the SID and by SID where it cannot. `OWNER RIGHTS`
+    counts as the object's owner. Windows only; raises OSError when a
+    security descriptor cannot be read."""
+    import windows_acl
+    root = Path(root)
+    sid = _current_sid()
+    found: list[tuple[Path, list[str]]] = []
+    for path in _walk(root):
+        strangers = _strangers_on(path, sid)
+        if strangers:
+            found.append((path, [windows_acl.principal_name(s) for s in strangers]))
+    return found
+
+
+def _strangers_on(path: Path, sid: str | None) -> list[str]:
+    """The SIDs `path` admits that are neither this account, SYSTEM nor
+    Administrators. `OWNER RIGHTS` stands for the object's owner and is
+    fine when the owner is one of those three."""
+    import windows_acl
+    allowed = {sid, _SYSTEM_SID, _ADMINISTRATORS_SID}
+    owner, admitted = windows_acl.security(path)
+    return [s for s in admitted
+            if s not in allowed and not (s == _OWNER_RIGHTS_SID and owner in allowed)]
+
+
+def _walk(root: Path):
+    yield root
+    if root.is_dir():
+        for base, dirs, files in os.walk(root):
+            for name in dirs + files:
+                yield Path(base) / name
+
+
+def _still_accessible(path: Path) -> bool:
+    """Can this process still read `path` (for a directory: the first file
+    anywhere under it) after an ACL change? Opens something rather than
+    trusting `os.access`, which does not evaluate Windows ACLs."""
+    try:
+        if path.is_dir():
+            for child in _walk(path):
+                if child.is_file():
+                    with open(child, "rb"):
+                        pass
+                    break
+            return True
+        with open(path, "rb"):
+            return True
+    except OSError:
+        return False
+
+
+def _current_sid() -> str | None:
+    """The SID of the account this process runs as, read from its token."""
+    try:
+        import windows_acl
+        return windows_acl.current_user_sid()
+    except OSError as e:
+        log.warning(f"data_paths: could not read this process's SID: {e}")
+        return None
+
+
+def harden_private_root() -> bool:
+    """Restrict the data directory (and so the database, the memory folder,
+    the archives) and the tool token to this account. Called once at server
+    start, before the preflight check that would otherwise report it."""
+    ok = restrict_to_owner(data_dir())
+    token = tool_token_path()
+    if token.exists():
+        ok = restrict_to_owner(token) and ok
+    return ok
 
 
 def tool_token_path() -> Path:
@@ -384,16 +660,29 @@ def ensure_tool_token() -> str:
             os.write(fd, token.encode("utf-8"))
         finally:
             os.close(fd)
+        # 0600 at creation on POSIX; on Windows that mode is inert, so the
+        # ACL is restricted to this account as well.
+        restrict_to_owner(path)
         return token
 
-    fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+    # Windows has no O_NOFOLLOW, no fchmod and no uid to compare. The
+    # symlink refusal is done with lstat there instead — two lookups, but a
+    # planted link still makes this raise rather than be followed — and the
+    # ownership and mode checks are POSIX-only.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and path.is_symlink():
+        raise OSError(f"{path} is a symlink")
+    fd = os.open(str(path), os.O_RDWR | nofollow)
     try:
         info = os.fstat(fd)
         if not _stat.S_ISREG(info.st_mode):
             raise OSError(f"{path} is not a regular file")
-        if info.st_uid != os.getuid():
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        # And on Windows, where that mode is inert: the ACL, to this account.
+        restrict_to_owner(path)
         existing = os.read(fd, 4096).decode("utf-8", "ignore").strip()
         if existing:
             return existing

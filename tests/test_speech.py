@@ -129,6 +129,23 @@ async def h():
     await harness.sched.stop()
 
 
+
+async def _until(predicate, timeout=5.0, poll=0.01):
+    """Wait for a condition instead of for a clock.
+
+    The scheduler's own timings are what these tests are about, but the
+    machine's are not: `asyncio.sleep(0.15); assert u.sent == 1` asserts
+    that the loop kept up, and in a full 2,700-test run it sometimes has
+    not. Every such failure here was "not yet", never "wrong" — so the wait
+    is generous and the assertion is unchanged.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(poll)
+    return predicate()
+
 @pytest.mark.asyncio
 async def test_turn_streams_in_order_with_prefetch_and_status(h):
     s = h.sched
@@ -264,9 +281,14 @@ async def test_turn_reply_starts_even_though_user_just_spoke(h):
 async def test_low_items_are_batched_into_one_utterance(h):
     from speech import Priority
     s = h.sched
+    # The shared harness settles a batch after 50ms. Under a loaded full
+    # run the event loop can stall longer than that between the two `say`
+    # calls, the first flushes alone, and this failed for a reason that had
+    # nothing to do with batching. Ten times the room, and a wait to match.
+    s.batch_settle = 0.5
     await s.say("Chitauri finished.", priority=Priority.LOW)
     await s.say("Hammer finished.", priority=Priority.LOW)
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.7)
     await h.ack_all(rounds=4)
     texts = [t for _, _, t in h.audio()]
     assert texts == ["Chitauri finished.", "Hammer finished."]
@@ -875,7 +897,7 @@ def test_spec_defaults_are_the_spec_defaults():
     assert (s.prefetch, s.batch_interval, s.pause_after, s.stale_after, s.echo_window) == (2, 20.0, 3.0, 60.0, 6.0)
     assert s.batch_settle == 2.0 and s.ack_timeout == 45.0
     sp = SentenceSplitter()
-    assert (sp._first_chunk_max, sp._first_chunk_min) == (160, 40)
+    assert (sp._first_chunk_max, sp._first_chunk_min) == (80, 40)   # see test_the_first_chunk_is_capped_at_eighty_characters_by_default
 
 
 # ── interrupting him while he is still talking ──────────────────────────────
@@ -1231,14 +1253,12 @@ async def test_a_failed_synthesis_does_not_break_the_chain(h):
     u = await s.say("Alpha one. Bravo two.")
     assert not await s.wait_for(u, timeout=0.15), "chunk 0 is still playing"
     assert u.played == -1 and u.held_ack == 1
-    await asyncio.sleep(0.35)
-    assert u.played == 1 and u.done, "and it finishes on the audio's schedule"
+    assert await _until(lambda: u.played == 1 and u.done),         "and it finishes on the audio's schedule"
 
     u = await s.say("Alpha one. Bravo two. Charlie three.")
-    await asyncio.sleep(0.15)
-    assert u.sent == 1 and u.held_ack == 1, "the failed chunk waits its turn"
-    await asyncio.sleep(0.4)                  # chunk 0's floor lands, chunk 2 goes out
-    assert u.sent == 2
+    assert await _until(lambda: u.sent == 1 and u.held_ack == 1),         "the failed chunk waits its turn"
+    # chunk 0's floor lands, and only then does chunk 2 go out
+    assert await _until(lambda: u.sent == 2)
     assert u.chunks[2].earliest_ack >= u.chunks[0].earliest_ack + 0.3, \
         "chunk 2 cannot end before chunk 0 could, whatever happened to chunk 1"
 
@@ -1613,3 +1633,247 @@ async def test_the_quiet_room_bar_returns_once_his_audio_has_ended(h):
     await h.ack_all()
     await asyncio.sleep(0.05)
     assert not s.is_speaking
+
+
+# --- his voice, off ---------------------------------------------------------
+#
+# A second toggle beside the microphone's. While it is off nothing is
+# synthesized — no Fish call, no audio bytes — and every sentence goes out
+# through the text path the page renders in the Conversation panel. The
+# text path already existed for a FAILED synthesis; a deliberate silence
+# must not look like one.
+
+@pytest.mark.asyncio
+async def test_voice_is_on_until_told_otherwise(h):
+    assert h.sched.voice_on is True
+    h.sched.set_voice(False)
+    assert h.sched.voice_on is False
+
+
+@pytest.mark.asyncio
+async def test_voice_off_sends_text_and_never_calls_tts(h):
+    s = h.sched
+    s.set_voice(False)
+    u = s.begin_turn()
+    s.feed(u, "First one. Second one.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.15)
+    assert h.synth_calls == []
+    assert h.audio() == []
+    assert [m["text"] for m in h.msgs if m["type"] == "text"] == ["First one.", "Second one."]
+    assert u.done
+
+
+@pytest.mark.asyncio
+async def test_voice_off_is_not_a_failing_voice(h):
+    s = h.sched
+    s.set_voice(False)
+    u = s.begin_turn()
+    s.feed(u, "One. Two. Three. Four.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.15)
+    assert {"type": "text", "text": "My voice is failing, sir."} not in h.msgs
+    assert "speaking" not in [m.get("state") for m in h.msgs if m["type"] == "status"]
+    assert s._tts_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_voice_off_leaves_the_echo_window_alone(h):
+    """With the mic still on, a reply he never said aloud was never in the
+    room. Counting it as spoken would make his own text reply swallow the
+    user's next sentence as an echo of it."""
+    s = h.sched
+    s.set_voice(False)
+    u = s.begin_turn()
+    s.feed(u, "It uses WordPress, sir.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.15)
+    assert s._recent == []
+    assert await s.user_final("it uses wordpress sir") != "echo"
+
+
+@pytest.mark.asyncio
+async def test_voice_off_completes_at_once(h):
+    """No audio, so nothing to pace: a text reply is over when it is sent."""
+    s = h.sched
+    s.set_voice(False)
+    u = s.begin_turn()
+    s.feed(u, "A long sentence that would take a good while to play aloud, sir.")
+    await s.end_turn(u)
+    assert await s.wait_for(u, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_turning_voice_off_mid_reply_sends_the_rest_as_text(h):
+    s = h.sched
+    u = s.begin_turn()
+    s.feed(u, "First one. ")
+    await asyncio.sleep(0.1)                 # synthesized and sent as audio
+    s.set_voice(False)
+    s.feed(u, "Second one. Third one.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.15)
+    await h.ack_all()
+    assert [t for _, _, t in h.audio()] == ["First one."]
+    assert [m["text"] for m in h.msgs if m["type"] == "text"] == ["Second one.", "Third one."]
+    assert u.done
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_already_synthesized_goes_as_text_once_voice_is_off(h):
+    s = h.sched
+    u = s.begin_turn()
+    s.feed(u, "One. Two. Three.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.1)                 # all three synthesized; two sent (prefetch)
+    assert len(h.audio()) == 2
+    s.set_voice(False)
+    await h.ack_all()
+    assert [t for _, _, t in h.audio()] == ["One.", "Two."]
+    assert {"type": "text", "text": "Three."} in h.msgs
+    assert u.done
+
+
+@pytest.mark.asyncio
+async def test_turning_voice_on_mid_reply_speaks_the_rest(h):
+    s = h.sched
+    s.set_voice(False)
+    u = s.begin_turn()
+    s.feed(u, "First one. ")
+    await asyncio.sleep(0.05)
+    s.set_voice(True)
+    s.feed(u, "Second one.")
+    await s.end_turn(u)
+    await asyncio.sleep(0.15)
+    await h.ack_all()
+    assert "First one." in [m["text"] for m in h.msgs if m["type"] == "text"]
+    assert [t for _, _, t in h.audio()] == ["Second one."]
+    assert u.done
+
+
+@pytest.mark.asyncio
+async def test_the_first_chunk_records_when_it_was_cut_and_when_it_was_ready(h):
+    """What the server's latency line decomposes: the brain's text arrives,
+    the first chunk is cut from it, synthesis makes it ready, it is sent.
+    Each of those is a timestamp on the utterance, in that order, and the
+    second chunk never overwrites the first's."""
+    u = h.sched.begin_turn()
+    assert u.first_cut_at is None and u.first_ready_at is None
+    h.sched.feed(u, "First one. Second one.")
+    await h.sched.end_turn(u)
+    assert await _until(lambda: u.first_sent_at is not None)
+    assert u.first_cut_at is not None and u.first_ready_at is not None
+    assert u.created <= u.first_cut_at <= u.first_ready_at <= u.first_sent_at, \
+        (u.created, u.first_cut_at, u.first_ready_at, u.first_sent_at)
+    first = (u.first_cut_at, u.first_ready_at, u.first_sent_at)
+    await h.ack_all()
+    assert u.done
+    assert (u.first_cut_at, u.first_ready_at, u.first_sent_at) == first
+
+
+def test_the_first_chunk_is_capped_at_eighty_characters_by_default():
+    """Measured 2026-09-24: Fish returns its first byte after about half a
+    second and the whole chunk after that plus roughly a third of the
+    audio's length, so a 100-character first sentence costs 2.3 s of
+    synthesis before anything is heard, and a 60-character one 1.4 s. The
+    first chunk is therefore cut at its last clause break once it passes
+    80 characters (it was 160), while the sentence is still streaming; the
+    rest of the sentence is synthesized in parallel and is ready long
+    before the first part has finished playing. Later chunks are whole
+    sentences as before."""
+    from speech import SentenceSplitter
+    s = SentenceSplitter()
+    sentence = ("I can watch your Claude Code sessions, spawn runs or full builds, "
+                "and read or open your projects, sir. ")
+    out = []
+    for i in range(0, len(sentence), 10):          # streamed, ten characters at a time
+        out += s.feed(sentence[i:i + 10])
+    assert out[0] == "I can watch your Claude Code sessions, spawn runs or full builds,", out
+    assert out[1] == "and read or open your projects, sir.", out
+    assert s.feed("A short second sentence, with a comma. ") == ["A short second sentence, with a comma."]
+
+
+def test_the_cap_applies_to_a_first_sentence_that_arrives_whole():
+    """The hold in front of the mouth (server._OneLinePerTurn) releases the
+    opening 0.6 s of a reply in ONE piece, so the first sentence usually
+    arrives complete. Measured: with the cap applied only to a sentence still
+    streaming, a 100-character opener went to Fish whole and cost 2.2-3.4 s
+    before anything was heard. The cap holds either way: past 80 characters
+    the first chunk is cut at the last clause break past 40, so the second
+    chunk (synthesized in parallel) is ready before the first has played."""
+    from speech import SentenceSplitter
+    sentence = ("I can watch your Claude Code sessions, spawn runs or full builds, "
+                "and read or open your projects, sir. ")
+    assert SentenceSplitter().feed(sentence) == [
+        "I can watch your Claude Code sessions, spawn runs or full builds,",
+        "and read or open your projects, sir."]
+    # No clause break past 40 characters: the sentence goes whole rather
+    # than as a scrap the next chunk could not keep up with.
+    scrap = "Yes, sir, the build is running and two of the four tasks are done with nothing waiting on you. "
+    assert SentenceSplitter().feed(scrap) == [scrap.strip()]
+    # A short first sentence is untouched, and later ones are never cut.
+    assert SentenceSplitter().feed("Evening, sir. " + sentence) == [
+        "Evening, sir.",
+        "I can watch your Claude Code sessions, spawn runs or full builds, and read or open your projects, sir."]
+
+
+# Measured live, 2026-09-30: "Read connector tools' own names on the Claude
+# path has stopped and wants you, sir." is 82 characters, so it was cut at its
+# last comma, and "sir." was synthesized and played on its own and shown in
+# the chat panel as a message of its own. A cut is worth the tail's synthesis
+# time and no more — about a quarter second per 20 characters — so a first
+# chunk is not cut where what is left of its sentence is shorter than that.
+SCRAP_LINE = "Read connector tools' own names on the Claude path has stopped and wants you, sir."
+
+
+def _all(s, text, final=False):
+    out = s.feed(text, final=final) if final else s.feed(text)
+    tail = s.flush()
+    return out + ([tail] if tail else [])
+
+
+def test_a_whole_line_is_not_cut_to_leave_a_scrap():
+    """`SpeechScheduler.say` hands a line over whole with nothing after it:
+    the splitter is told it is final, so the end of the line is the end of
+    its sentence, and a cut leaving "sir." behind is not made."""
+    from speech import SentenceSplitter
+    assert len(SCRAP_LINE) > 80
+    assert _all(SentenceSplitter(), SCRAP_LINE, final=True) == [SCRAP_LINE]
+
+
+def test_a_complete_first_sentence_is_not_cut_to_leave_a_scrap():
+    from speech import SentenceSplitter
+    assert SentenceSplitter().feed(SCRAP_LINE + " Shall I look? ") == [
+        SCRAP_LINE, "Shall I look?"]
+
+
+def test_a_whole_line_with_a_long_tail_is_still_cut_early():
+    """The cap is kept wherever it buys something: the tail here is long
+    enough to be ready before the first part has played."""
+    from speech import SentenceSplitter
+    line = ("I can watch your Claude Code sessions, spawn runs or full builds, "
+            "and read or open your projects, sir.")
+    assert _all(SentenceSplitter(), line, final=True) == [
+        "I can watch your Claude Code sessions, spawn runs or full builds,",
+        "and read or open your projects, sir."]
+    dash = "I can manage your code sessions and answer questions, sir — just tell me what you need."
+    assert _all(SentenceSplitter(), dash, final=True) == [
+        "I can manage your code sessions and answer questions, sir —",
+        "just tell me what you need."]
+
+
+def test_a_strong_break_is_not_taken_to_leave_a_scrap_either():
+    from speech import SentenceSplitter
+    line = "The thread “Read connector tools' own names” is waiting on input, sir — go on."
+    assert _all(SentenceSplitter(), line, final=True) == [line]
+
+
+@pytest.mark.asyncio
+async def test_an_announcement_is_one_chunk_not_a_line_and_a_scrap(h):
+    """The live line, through the mouth: one synthesis, one chunk — so one
+    message in the chat panel, which records each chunk it is sent."""
+    await h.sched.say(SCRAP_LINE)
+    assert await _until(lambda: h.audio())
+    await h.ack_all()
+    assert [t for _, _, t in h.audio()] == [SCRAP_LINE]
+    assert h.synth_calls == [SCRAP_LINE]

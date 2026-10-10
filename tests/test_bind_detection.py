@@ -107,6 +107,16 @@ def test_running_the_script_with_no_flags_gets_jarvis_defaults():
     assert bind.source == "default"
 
 
+def test_module_launcher_and_windows_executable_defaults(monkeypatch):
+    for args in (["python", "-m", "uvicorn", "server:app"],
+                 [r"C:\venv\Scripts\uvicorn.exe", "server:app"]):
+        bind = web_auth.detect_bind(argv=args, environ={})
+        assert bind.port == 8000 and bind.source == "uvicorn default"
+    monkeypatch.setattr(web_auth.sys, "argv", ["__main__.py", "server:app"])
+    monkeypatch.setattr(web_auth.sys, "orig_argv", ["python", "-m", "uvicorn", "server:app"])
+    assert web_auth.detect_bind(environ={}).port == 8000
+
+
 def test_a_partial_command_line_fills_in_the_rest():
     bind = web_auth.detect_bind(
         argv=["uvicorn", "server:app", "--host", "0.0.0.0"], environ={})

@@ -119,7 +119,7 @@ def _sites() -> dict:
     """{`module.function`: [derivations]} for the whole class."""
     out = {}
     for path in MODULES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -243,7 +243,7 @@ def test_a_directory_index_that_is_a_link_to_jarviss_own_data_is_refused(
     import data_paths
     secret = data_paths.brain_home() / "mcp.json"
     secret.parent.mkdir(parents=True, exist_ok=True)
-    secret.write_text('{"token": "sk-not-a-real-one"}')
+    secret.write_text('{"token": "sk-not-a-real-one"}', encoding="utf-8")
 
     out = _drive_open_in_browser(server, monkeypatch, tmp_path, secret)
     assert "opened=[]" in out, out
@@ -260,7 +260,7 @@ def test_a_directory_index_that_is_a_link_out_of_every_project_is_refused(
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     secret = outside / "notes.txt"
-    secret.write_text("private")
+    secret.write_text("private", encoding="utf-8")
 
     out = _drive_open_in_browser(server, monkeypatch, tmp_path, secret)
     assert "opened=[]" in out, out
@@ -273,7 +273,7 @@ def test_naming_the_file_and_naming_its_directory_agree(server, monkeypatch,
     import data_paths
     secret = data_paths.brain_home() / "mcp.json"
     secret.parent.mkdir(parents=True, exist_ok=True)
-    secret.write_text("{}")
+    secret.write_text("{}", encoding="utf-8")
     _project_with_an_index_link(server, tmp_path, secret)
     opened = _opened(server, monkeypatch)
 
@@ -292,7 +292,7 @@ def test_an_ordinary_directory_index_still_opens(server, monkeypatch,
     projects = server._projects_root_for_test
     demo = projects / "demo"
     (demo / "site").mkdir(parents=True)
-    (demo / "site" / "index.html").write_text("<h1>hello</h1>")
+    (demo / "site" / "index.html").write_text("<h1>hello</h1>", encoding="utf-8")
     server.cached_projects[:] = [
         {"name": "demo", "path": str(demo), "branch": ""}]
     opened = _opened(server, monkeypatch)
@@ -313,7 +313,7 @@ def test_an_index_that_is_a_link_INSIDE_the_project_still_opens(
     demo = projects / "demo"
     (demo / "build").mkdir(parents=True)
     real = demo / "build" / "index.html"
-    real.write_text("<h1>built</h1>")
+    real.write_text("<h1>built</h1>", encoding="utf-8")
     (demo / "site").mkdir()
     (demo / "site" / "index.html").symlink_to(real)
     server.cached_projects[:] = [

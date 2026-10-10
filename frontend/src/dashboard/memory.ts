@@ -2,10 +2,10 @@
  * The Memory view: what JARVIS carries into every conversation, and a way
  * to read (and know you can edit) the plain-Markdown folder behind it.
  *
- * The backend endpoint this targets (`GET /api/memory`, `GET
- * /api/memory/<kind>/<slug>`) does not exist yet as of this view being
- * built — see the contract in the Memory view report. A 404 means "not
- * shipped yet", not "empty", and must degrade calmly with no console noise.
+ * Backed by `GET /api/memory` and `GET /api/memory/<kind>/<slug>` (and
+ * `POST /api/memory/reindex`, the one write). An empty memory is a 200 with
+ * empty lists; a 404 means the route is not wired at all — an older server
+ * — and degrades calmly with no console noise.
  *
  * Every string here — titles, hooks, and especially journal/memory body
  * text — can contain content JARVIS copied out of someone else's Claude
@@ -13,11 +13,11 @@
  * textContent, never innerHTML.
  */
 import {
-  getMemory, getMemoryDoc, ApiError,
+  getMemory, getMemoryDoc, reindexMemory, ApiError,
   type MemorySnapshot, type MemoryKind,
   type MemoryIndexEntry, type MemoryFileEntry, type ProjectNoteEntry, type JournalEntry,
 } from "./api";
-import { el, row, button, emptyState } from "./ui";
+import { el, row, button, callout, emptyState } from "./ui";
 
 let started = false;
 let openDocToken = 0;
@@ -136,11 +136,51 @@ function paintPath(path: string): void {
   );
 }
 
-function paintIndex(entries: MemoryIndexEntry[]): void {
+/**
+ * The index and the folder can disagree, and until this existed the page
+ * stated the fact twice ("Nothing indexed yet." beside four memory files)
+ * and the problem nowhere. The brain cannot see an unindexed note at boot,
+ * so this names them and offers the one repair. Never automatic: a note
+ * without a line may be one the user deliberately let go of.
+ */
+function unindexedNotice(orphans: MemoryFileEntry[]): HTMLElement {
+  const names = orphans.map((o) => o.title).join(", ");
+  const note = callout({
+    tone: "warn",
+    label: `${orphans.length} memory ${orphans.length === 1 ? "file is" : "files are"} not in the index`,
+  });
+  note.body.textContent =
+    `JARVIS does not know ${orphans.length === 1 ? "it exists" : "they exist"} until ${orphans.length === 1 ? "it is" : "they are"} listed here: ${names}.`;
+  const add = button("Add them to the index", () => {
+    add.disabled = true;
+    add.textContent = "Adding…";
+    reindexMemory()
+      .then((result) => {
+        if (result.left_out.length > 0) {
+          note.body.textContent = result.full
+            ? `The index is full — eighty is all that fits in every conversation. Left out: ${result.left_out.join(", ")}.`
+            : `Could not index (the index cannot name the file by its title): ${result.left_out.join(", ")}.`;
+        }
+        void reconcile();
+      })
+      .catch((e) => {
+        console.error("[memory] reindex failed", e);
+        add.disabled = false;
+        add.textContent = "Add them to the index";
+        note.body.textContent = "Could not update the index. Is the JARVIS server reachable?";
+      });
+  });
+  note.foot.hidden = false;
+  note.foot.append(add);
+  return note.root;
+}
+
+function paintIndex(entries: MemoryIndexEntry[], orphans: MemoryFileEntry[]): void {
   const list = section("memory-index-list");
   if (!list) return;
   list.replaceChildren();
   setMeta("memory-index-meta", entries.length);
+  if (orphans.length > 0) list.append(unindexedNotice(orphans));
   if (entries.length === 0) {
     list.append(emptyState("Nothing indexed yet.", true));
     return;
@@ -253,7 +293,7 @@ async function reconcile(): Promise<void> {
   setUnavailable(false);
   showBanner(null);
   paintPath(snap.path);
-  paintIndex(snap.index);
+  paintIndex(snap.index ?? [], snap.unindexed ?? []);
   paintMemories(snap.memories);
   paintProjects(snap.projects);
   paintJournalList(snap.journal, snap.latest_journal_slug);

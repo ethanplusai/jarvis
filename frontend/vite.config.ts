@@ -1,5 +1,8 @@
 import { defineConfig } from "vite";
 import { resolve } from "path";
+import { backendTarget } from "./backend-target";
+
+const target = backendTarget(resolve(__dirname, ".."), process.env.JARVIS_BACKEND_URL);
 
 // The same headers server.py's OriginGuard puts on everything it serves.
 // They have to be here too: in development the pages come from Vite, not
@@ -18,15 +21,16 @@ const SECURITY_HEADERS = {
 export default defineConfig({
   server: {
     port: 5173,
+    strictPort: true,
     headers: SECURITY_HEADERS,
     proxy: {
       "/ws": {
-        target: "https://localhost:8340",
+        target,
         ws: true,
         secure: false,
       },
       "/api": {
-        target: "https://localhost:8340",
+        target,
         secure: false,
       },
     },

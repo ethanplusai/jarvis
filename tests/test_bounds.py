@@ -41,7 +41,7 @@ def _resolvers() -> dict:
     """{function: env var it reads} for every `_resolve_*` in run_executor
     that takes a bound off the environment. Found in the source, so one
     added next year is bounded here before it can be removed there."""
-    tree = ast.parse(EXECUTOR.read_text())
+    tree = ast.parse(EXECUTOR.read_text(encoding="utf-8"))
     out = {}
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef):

@@ -1,3 +1,4 @@
+import { openBusiness } from "../business";
 // frontend/src/dashboard/main.ts
 //
 // The Runs view and the shell around it (masthead readouts, tab switching,
@@ -6,11 +7,11 @@
 // `prompt`, `project_name` and the now-line all originate in model output or
 // on someone's disk: every one of them goes through textContent.
 import {
-  listRuns, getStats, getUsageLimits,
+  listRuns, listActiveRuns, runTokens, getStats, getUsageLimits,
   type RunRow, type UsageSnapshot,
 } from "./api";
 import { connectLive } from "./live";
-import { openDetail, appendEvent, notifyRunChanged } from "./detail";
+import { openDetail, appendEvent, notifyRunChanged, refreshTranscript } from "./detail";
 import { summaryFor, noteEvent } from "./nowline";
 import { initSessions } from "./sessions";
 import { initMemory, refreshMemory } from "./memory";
@@ -29,6 +30,12 @@ const FAILED = new Set(["failed", "timed_out"]);
 const ATTENTION_LIMIT = 5;
 
 let runs: RunRow[] = [];
+let historyCursor: RunRow | undefined;
+let historyDone = false;
+let historyLoading = false;
+let historyProject = "";
+let historyGeneration = 0;
+const HISTORY_STATUS = "succeeded,failed,timed_out,cancelled";
 /** Runs whose status changed since the last paint — they get the flash. */
 const changed = new Set<string>();
 
@@ -50,7 +57,7 @@ function fmtCount(n: number): string {
  * subscription and bills nobody, so the CLI's cost figure is a price list
  * for an API call that never happened. Tokens are the honest quantity. */
 function fmtRunTokens(run: RunRow): string {
-  const total = run.input_tokens + run.output_tokens;
+  const total = runTokens(run);
   return total > 0 ? `${fmtCount(total)} tok` : "—";
 }
 
@@ -379,22 +386,37 @@ function paint(): void {
   );
   renderInto(
     "history-list", "history-meta",
-    runs.filter((r) => !ACTIVE.has(r.status)),
+    runs.filter((r) => !ACTIVE.has(r.status)
+      && (!historyProject || r.project_name.toLowerCase().includes(historyProject.toLowerCase()))),
     "No runs yet. Ask JARVIS to build something.",
   );
 }
 
 async function reconcile(): Promise<void> {
+  const generation = historyGeneration;
   try {
-    const [fresh, stats] = await Promise.all([listRuns(100), getStats("day")]);
+    const [active, history, stats] = await Promise.all([
+      listActiveRuns(), listRuns(100, { status: HISTORY_STATUS, project: historyProject }), getStats("day"),
+    ]);
+    if (generation !== historyGeneration) return;
+    const fresh = [...active, ...history.filter(r => !ACTIVE.has(r.status))];
     // Note which runs changed status so paint() can flash exactly those.
     const before = new Map(runs.map((r) => [r.id, r.status]));
     for (const r of fresh) {
       const was = before.get(r.id);
       if (was !== undefined && was !== r.status) changed.add(r.id);
     }
-    runs = fresh;
+    const merged = new Map(runs.filter(r => !ACTIVE.has(r.status)).map(r => [r.id, r]));
+    for (const r of fresh) merged.set(r.id, r);
+    runs = [...merged.values()].sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    if (!historyCursor) {
+      historyCursor = history[history.length - 1];
+      historyDone = history.length < 100;
+    }
+    updateHistoryButton();
     paint();
+    for (const run of fresh) notifyRunChanged(run);
+    refreshTranscript();
 
     const cells = mastheadEnsured();
     if (cells) {
@@ -404,7 +426,8 @@ async function reconcile(): Promise<void> {
       cells.ok.set(String(ok));
       cells.bad.set(String(bad), bad > 0 ? "bad" : "dim");
       cells.tokens.set(
-        fmtCount(stats.total_input_tokens + stats.total_output_tokens));
+        fmtCount(stats.total_tokens ?? (stats.total_input_tokens + stats.total_output_tokens
+          + (stats.total_cache_read_tokens || 0) + (stats.total_cache_creation_tokens || 0))));
     }
     showBanner(null);
   } catch (e) {
@@ -412,6 +435,34 @@ async function reconcile(): Promise<void> {
     showBanner("Cannot reach the JARVIS server.");
   }
   await refreshUsage();
+}
+
+function updateHistoryButton(): void {
+  const button = document.getElementById("history-more") as HTMLButtonElement | null;
+  if (button) { button.hidden = historyDone; button.disabled = historyLoading; }
+}
+
+async function loadOlderRuns(): Promise<void> {
+  if (historyDone || historyLoading || !historyCursor) return;
+  historyLoading = true;
+  updateHistoryButton();
+  const generation = historyGeneration;
+  try {
+    const page = await listRuns(100, { status: HISTORY_STATUS, project: historyProject,
+      before: historyCursor.created_at, before_id: historyCursor.id });
+    if (generation !== historyGeneration) return;
+    const merged = new Map(runs.map(r => [r.id, r]));
+    for (const r of page) if (!merged.has(r.id)) merged.set(r.id, r);
+    runs = [...merged.values()].sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    historyCursor = page[page.length - 1] ?? historyCursor;
+    historyDone = page.length < 100;
+    paint();
+  } catch {
+    showBanner("Could not load older runs. Try again.");
+  } finally {
+    historyLoading = false;
+    updateHistoryButton();
+  }
 }
 
 /**
@@ -494,6 +545,16 @@ function setupTabs(): void {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("history-more")?.addEventListener("click", () => void loadOlderRuns());
+  document.getElementById("history-filter")?.addEventListener("submit", e => {
+    e.preventDefault();
+    historyProject = (document.getElementById("history-project") as HTMLInputElement).value.trim();
+    historyGeneration++;
+    historyCursor = undefined;
+    historyDone = false;
+    runs = runs.filter(r => ACTIVE.has(r.status));
+    void reconcile();
+  });
   void reconcile();
   setupTabs();
   // Loads and live-updates in the background regardless of which tab is
@@ -535,3 +596,5 @@ document.addEventListener("DOMContentLoaded", () => {
   // on telling the truth about how old its numbers are.
   setInterval(() => void refreshUsage(), 60_000);
 });
+
+document.getElementById("btn-business")?.addEventListener("click", openBusiness);

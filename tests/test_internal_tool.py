@@ -1,4 +1,8 @@
+import sys
 import pytest
+
+_NEEDS_POSIX_MODES = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows has no POSIX mode bits to check")
 from fastapi.testclient import TestClient
 
 
@@ -110,6 +114,7 @@ def test_a_non_dict_json_body_is_refused_cleanly(client):
     assert r.json()["ok"] is False
 
 
+@_NEEDS_POSIX_MODES
 def test_the_token_file_is_not_world_readable(client):
     c, server = client
     server.data_paths.ensure_tool_token()
@@ -117,13 +122,14 @@ def test_the_token_file_is_not_world_readable(client):
     assert mode == 0o600
 
 
+@_NEEDS_POSIX_MODES
 def test_ensure_tool_token_fixes_permissions_of_a_pre_existing_file(client):
     """A local process that pre-creates the token path with looser
     permissions must not get to keep read access to it."""
     c, server = client
     path = server.data_paths.tool_token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("pre-existing-token")
+    path.write_text("pre-existing-token", encoding="utf-8")
     path.chmod(0o644)
 
     token = server.data_paths.ensure_tool_token()
@@ -131,6 +137,17 @@ def test_ensure_tool_token_fixes_permissions_of_a_pre_existing_file(client):
     assert token == "pre-existing-token"
     mode = path.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def _permissions(path):
+    """What a restriction that followed the link would change: the mode
+    bits, and on Windows — where `chmod` only toggles read-only and 0o644
+    reads back as 0o666 — the ACL `restrict_to_owner` would rewrite."""
+    mode = path.stat().st_mode & 0o777
+    if sys.platform == "win32":
+        import windows_acl
+        return mode, windows_acl.dacl_sids(path)
+    return mode
 
 
 def test_a_symlink_in_the_token_path_is_refused_not_followed(client, tmp_path):
@@ -148,16 +165,17 @@ def test_a_symlink_in_the_token_path_is_refused_not_followed(client, tmp_path):
     path = server.data_paths.tool_token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     planted = tmp_path / "planted"
-    planted.write_text("attacker-chosen-token")
+    planted.write_text("attacker-chosen-token", encoding="utf-8")
     planted.chmod(0o644)
+    before = _permissions(planted)
     path.unlink(missing_ok=True)          # the server made a real one at boot
     path.symlink_to(planted)
 
     with _pytest.raises(OSError):
         server.data_paths.ensure_tool_token()
 
-    assert planted.read_text() == "attacker-chosen-token"
-    assert planted.stat().st_mode & 0o777 == 0o644, "chmod followed the link"
+    assert planted.read_text(encoding="utf-8") == "attacker-chosen-token"
+    assert _permissions(planted) == before, "the restriction followed the link"
 
 
 class _FakeBrain:

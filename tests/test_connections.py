@@ -29,7 +29,7 @@ def _fresh(monkeypatch, tmp_path):
 
 
 def _template_text() -> str:
-    return (Path(__file__).parent.parent / "jarvis_home" / "connections.json").read_text()
+    return (Path(__file__).parent.parent / "jarvis_home" / "connections.json").read_text(encoding="utf-8")
 
 
 def _sha(text: str) -> str:
@@ -49,8 +49,8 @@ def test_the_file_lives_beside_the_brains_own_config(monkeypatch, tmp_path):
 def test_the_template_is_seeded_on_a_fresh_install(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     assert dp.sync_connections() == "seeded"
-    assert dp.connections_path().read_text() == _template_text()
-    record = json.loads(dp.connections_seed_path().read_text())
+    assert dp.connections_path().read_text(encoding="utf-8") == _template_text()
+    record = json.loads(dp.connections_seed_path().read_text(encoding="utf-8"))
     assert record["sha256"] == _sha(_template_text())
 
 
@@ -68,11 +68,11 @@ def test_a_user_who_declared_a_server_keeps_it_through_an_upgrade(
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_connections()
     mine = json.dumps({"mcpServers": {"notion": {"command": "npx"}}}, indent=2)
-    dp.connections_path().write_text(mine)
+    dp.connections_path().write_text(mine, encoding="utf-8")
 
     with caplog.at_level("WARNING"):
         assert dp.sync_connections() == "kept"
-    assert dp.connections_path().read_text() == mine
+    assert dp.connections_path().read_text(encoding="utf-8") == mine
     assert str(dp.connections_path()) in caplog.text
 
 
@@ -81,11 +81,11 @@ def test_an_untouched_template_is_brought_up_to_date(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_connections()
     old = json.dumps({"mcpServers": {}})
-    dp.connections_path().write_text(old)
-    dp.connections_seed_path().write_text(json.dumps({"sha256": _sha(old)}))
+    dp.connections_path().write_text(old, encoding="utf-8")
+    dp.connections_seed_path().write_text(json.dumps({"sha256": _sha(old)}), encoding="utf-8")
 
     assert dp.sync_connections() == "updated"
-    assert dp.connections_path().read_text() == _template_text()
+    assert dp.connections_path().read_text(encoding="utf-8") == _template_text()
 
 
 def test_first_run_after_this_ships_keeps_a_file_it_cannot_recognise(
@@ -93,9 +93,9 @@ def test_first_run_after_this_ships_keeps_a_file_it_cannot_recognise(
     dp = _fresh(monkeypatch, tmp_path)
     dp.brain_home().mkdir(parents=True, exist_ok=True)
     mine = json.dumps({"mcpServers": {"notion": {"command": "npx"}}})
-    dp.connections_path().write_text(mine)
+    dp.connections_path().write_text(mine, encoding="utf-8")
     assert dp.sync_connections() == "kept"
-    assert dp.connections_path().read_text() == mine
+    assert dp.connections_path().read_text(encoding="utf-8") == mine
 
 
 def test_ensure_brain_home_seeds_the_connections_file_too(monkeypatch, tmp_path):
@@ -139,7 +139,8 @@ def test_every_connections_template_this_project_has_shipped_is_listed(
         digest = hashlib.sha256(blob).hexdigest()
         if digest not in dp.KNOWN_CONNECTIONS_HASHES:
             missing[digest] = commit[:8]
-    here = hashlib.sha256(dp.connections_template_path().read_bytes()).hexdigest()
+    here = hashlib.sha256(     # as data_paths hashes it: CRLF is not an edit
+        dp.connections_template_path().read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     if here not in dp.KNOWN_CONNECTIONS_HASHES:
         missing[here] = "the working tree"
     assert not missing, (
@@ -151,7 +152,7 @@ def test_the_persona_and_the_connections_file_share_one_mechanism():
     """Two copies of "is this the user's file or ours" is two chances to get
     the destructive half wrong."""
     import data_paths
-    source = Path(data_paths.__file__).read_text()
+    source = Path(data_paths.__file__).read_text(encoding="utf-8")
     assert source.count("KNOWN_TEMPLATE_HASHES") >= 1
     assert "_sync_template(" in source, \
         "sync_persona and sync_connections must go through one function"
@@ -172,7 +173,7 @@ def srv(monkeypatch, tmp_path):
 
 def _declare(dp, servers: dict) -> None:
     dp.brain_home().mkdir(parents=True, exist_ok=True)
-    dp.connections_path().write_text(json.dumps({"mcpServers": servers}, indent=2))
+    dp.connections_path().write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
 
 
 def test_a_declared_server_is_written_into_the_config_the_brain_is_given(
@@ -186,7 +187,7 @@ def test_a_declared_server_is_written_into_the_config_the_brain_is_given(
                                      "env": {"NOTION_TOKEN": "secret"}}})
     home = tmp_path / "home"
     home.mkdir()
-    written = json.loads(srv._write_mcp_config(home).read_text())
+    written = json.loads(srv._write_mcp_config(home).read_text(encoding="utf-8"))
 
     assert written["mcpServers"]["notion"]["command"] == "npx"
     assert written["mcpServers"]["notion"]["env"] == {"NOTION_TOKEN": "secret"}
@@ -199,7 +200,7 @@ def test_an_http_server_is_carried_through_unchanged(srv, tmp_path):
     _declare(data_paths, {"linear": {"type": "http", "url": "https://mcp.linear.app/mcp"}})
     home = tmp_path / "home"
     home.mkdir()
-    written = json.loads(srv._write_mcp_config(home).read_text())
+    written = json.loads(srv._write_mcp_config(home).read_text(encoding="utf-8"))
     assert written["mcpServers"]["linear"] == {"type": "http",
                                                "url": "https://mcp.linear.app/mcp"}
 
@@ -207,7 +208,7 @@ def test_an_http_server_is_carried_through_unchanged(srv, tmp_path):
 def test_no_connections_file_changes_nothing(srv, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    written = json.loads(srv._write_mcp_config(home).read_text())
+    written = json.loads(srv._write_mcp_config(home).read_text(encoding="utf-8"))
     assert list(written["mcpServers"]) == ["jarvis"]
     assert srv.declared_connections().problems == []
 
@@ -219,7 +220,7 @@ def test_a_file_that_does_not_parse_is_named_not_swallowed(srv):
     would otherwise make every server they added vanish in silence."""
     import data_paths
     data_paths.brain_home().mkdir(parents=True, exist_ok=True)
-    data_paths.connections_path().write_text('{"mcpServers": {"notion": {},}}')
+    data_paths.connections_path().write_text('{"mcpServers": {"notion": {},}}', encoding="utf-8")
 
     report = srv.declared_connections()
     assert report.servers == {}
@@ -235,7 +236,7 @@ def test_servers_written_outside_the_mcpServers_block_are_named(srv):
     import data_paths
     data_paths.brain_home().mkdir(parents=True, exist_ok=True)
     data_paths.connections_path().write_text(
-        json.dumps({"notion": {"command": "npx"}}))
+        json.dumps({"notion": {"command": "npx"}}), encoding="utf-8")
 
     report = srv.declared_connections()
     assert report.servers == {}
@@ -268,7 +269,7 @@ def test_a_user_cannot_replace_jarvis_himself(srv, tmp_path):
     _declare(data_paths, {"jarvis": {"command": "/tmp/evil"}})
     home = tmp_path / "home"
     home.mkdir()
-    written = json.loads(srv._write_mcp_config(home).read_text())
+    written = json.loads(srv._write_mcp_config(home).read_text(encoding="utf-8"))
 
     assert written["mcpServers"]["jarvis"]["command"] != "/tmp/evil"
     assert str(Path(srv.__file__).parent / "jarvis_mcp.py") in \
@@ -292,7 +293,7 @@ def test_the_problems_are_sentences_a_butler_could_say(srv):
     """They are read out by `connections`, not printed to a terminal."""
     import data_paths
     data_paths.brain_home().mkdir(parents=True, exist_ok=True)
-    data_paths.connections_path().write_text("not json at all")
+    data_paths.connections_path().write_text("not json at all", encoding="utf-8")
     problems = srv.declared_connections().problems
     assert problems
     for problem in problems:
@@ -361,7 +362,7 @@ def test_the_server_hands_the_brain_the_names_it_accepted(srv, tmp_path):
                           "nope": {"args": ["x"]}})
     home = tmp_path / "home"
     home.mkdir()
-    written = json.loads(srv._write_mcp_config(home).read_text())
+    written = json.loads(srv._write_mcp_config(home).read_text(encoding="utf-8"))
     config = brain.BrainConfig.from_env(home)
     config.connections = sorted(srv.LAST_CONNECTIONS.servers)
 
@@ -383,7 +384,7 @@ async def test_the_brain_records_what_connected_and_what_did_not(tmp_path):
     (home / "mcp.json").write_text(json.dumps({"mcpServers": {
         "weather": {"command": "/usr/bin/true"},
         "broken-notion": {"command": "/nowhere/at/all"},
-    }}))
+    }}), encoding="utf-8")
     b = brain.Brain(_config(tmp_path, mcp_config=home / "mcp.json"))
     await b.start()
     try:
@@ -409,6 +410,139 @@ async def test_the_inventory_is_rebuilt_for_each_generation(tmp_path):
         await b.stop()
 
 
+@pytest.mark.asyncio
+async def test_the_brain_learns_each_connectors_own_tool_names(tmp_path, monkeypatch, caplog):
+    """The init event and the PreToolUse hook carry only the CLI's spelling:
+    `get&delete` arrives as `mcp__files__get_delete`, one verb to the gate.
+    The CLI's own `mcp_status` carries the connector's name, and only once
+    the servers have connected — so it is asked after the init event."""
+    import logging
+    from tests.test_brain import _config, _wait_until
+    import brain
+    caplog.set_level(logging.DEBUG)       # a leak at any level, not only WARNING
+    monkeypatch.setenv("FAKE_BRAIN_TOOLS", json.dumps({"files": ["get&delete", "list.issues"]}))
+    home = tmp_path / "jarvis"
+    home.mkdir(parents=True)
+    (home / "mcp.json").write_text(json.dumps({"mcpServers": {
+        "files": {"command": "x", "env": {"FILES_TOKEN": "sekrit-token-123"}},
+    }}), encoding="utf-8")
+    b = brain.Brain(_config(tmp_path, mcp_config=home / "mcp.json"))
+    await b.start()
+    try:
+        assert "mcp__files__get_delete" in b.live_tools
+        assert await _wait_until(lambda: b.own_tool_names("mcp__files__get_delete") is not None)
+        assert b.own_tool_names("mcp__files__get_delete") == {"get&delete"}
+        assert b.own_tool_names("mcp__files__list_issues") == {"list.issues"}
+        assert b.own_tool_names("mcp__files__probe") is None, "no such tool"
+    finally:
+        await b.stop()
+    assert b.own_tool_names("mcp__files__get_delete") is None, \
+        "a process that is gone makes no more calls, and its names go with it"
+    assert "sekrit-token-123" not in caplog.text, "the answer echoes each server's config"
+
+
+class _Pipe:
+    def __init__(self):
+        self.sent = []
+
+    def write(self, data):
+        self.sent.append(json.loads(data.decode()))
+
+
+class _Proc:
+    def __init__(self):
+        self.stdin = _Pipe()
+
+
+def _names_answer(rid, tools, server="files"):
+    return {"type": "control_response", "response": {
+        "subtype": "success", "request_id": rid, "response": {"mcpServers": [
+            {"name": server, "status": "connected",
+             "tools": [{"name": t, "annotations": {}} for t in tools]}]}}}
+
+
+def test_each_init_asks_again_and_only_the_latest_answer_counts(tmp_path):
+    """A server can join late or change its tools, so every init asks. An
+    answer the brain did not ask for, or one a later ask overtook, is not
+    the process's inventory."""
+    from tests.test_brain import _config
+    import brain
+    b = brain.Brain(_config(tmp_path))
+    proc = _Proc()
+    b._proc = proc
+    init = {"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}
+    b._handle(init, proc)
+    b._handle(init, proc)
+    first, second = proc.stdin.sent
+    assert first["type"] == second["type"] == "control_request"
+    assert first["request"] == second["request"] == {"subtype": "mcp_status"}
+    assert first["request_id"] != second["request_id"]
+    b._handle(_names_answer(second["request_id"], ["list.issues"]), proc)
+    b._handle(_names_answer(first["request_id"], ["get&delete"]), proc)
+    b._handle(_names_answer("not-asked", ["get&delete"]), proc)
+    assert b.own_tool_names("mcp__files__list_issues") == {"list.issues"}
+    assert b.own_tool_names("mcp__files__get_delete") is None
+
+
+def test_every_live_process_counts_and_jarvis_own_are_not_kept(tmp_path):
+    """Mid-rotation the predecessor held in reserve can still make a call,
+    so what it reported stands beside the new generation's."""
+    from tests.test_brain import _config
+    import brain
+    b = brain.Brain(_config(tmp_path))
+    old, new = _Proc(), _Proc()
+    init = {"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}
+    b._proc = old
+    b._handle(init, old)
+    b._handle(_names_answer(old.stdin.sent[0]["request_id"], ["get_delete"]), old)
+    b._reserved, b._proc = old, new
+    b._handle(init, new)
+    b._handle(_names_answer(new.stdin.sent[0]["request_id"], ["get&delete"]), new)
+    assert b.own_tool_names("mcp__files__get_delete") == {"get_delete", "get&delete"}
+    b._handle(init, new)
+    b._handle(_names_answer(new.stdin.sent[1]["request_id"], ["remember"], server="jarvis"), new)
+    assert b.own_tool_names("mcp__jarvis__remember") is None
+
+
+def _block_start(name):
+    return {"type": "stream_event", "event": {
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "toolu_x", "name": name, "input": {}}}}
+
+
+def _tool_use(name):
+    return {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "toolu_x", "name": name, "input": {}}]}}
+
+
+def test_reaching_for_a_users_tool_asks_again(tmp_path):
+    """A server may re-spell a tool mid-turn under the same CLI name
+    (`notifications/tools/list_changed`): the CLI lists it again, and the
+    names asked at the last init are stale. So the brain asks again the
+    moment the model reaches for one of the user's tools — as the tool's name
+    streams, and again when the message is whole — and the answer races the
+    hook, whose own Python process has still to start."""
+    from tests.test_brain import _config
+    import brain
+    b = brain.Brain(_config(tmp_path))
+    proc = _Proc()
+    b._proc = proc
+    b._handle({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}, proc)
+    b._handle(_names_answer(proc.stdin.sent[0]["request_id"], ["get_delete"]), proc)
+    assert b.own_tool_names("mcp__files__get_delete") == {"get_delete"}
+
+    b._handle(_block_start("mcp__files__get_delete"), proc)
+    b._handle(_tool_use("mcp__files__get_delete"), proc)
+    for mine in ("mcp__jarvis__remember", "Bash", "WebFetch"):
+        b._handle(_block_start(mine), proc)
+        b._handle(_tool_use(mine), proc)
+
+    asks = proc.stdin.sent
+    assert [a["request"]["subtype"] for a in asks] == ["mcp_status"] * 3, asks
+    b._handle(_names_answer(asks[1]["request_id"], ["get&delete"]), proc)
+    assert b.own_tool_names("mcp__files__get_delete") == {"get&delete"}
+
+
 # --- 6. every added tool costs context ------------------------------------
 
 @pytest.mark.asyncio
@@ -420,7 +554,7 @@ async def test_the_resident_floor_is_measured_not_guessed(tmp_path):
     b = brain.Brain(_config(tmp_path))
     await b.start()
     try:
-        assert b.baseline_tokens == 10 + 9000      # the prompt as sent; cache_creation is it being cached, not more of it
+        assert b.baseline_tokens == 10 + 9000 + 1000   # the whole prompt: input, cache read and cache written
     finally:
         await b.stop()
 

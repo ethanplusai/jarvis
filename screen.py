@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger("jarvis.screen")
+_windows = sys.platform == "win32"
 
 # Each of these must finish WELL inside `jarvis_mcp.TIMEOUT_SEC` (20s), and
 # the caller puts its own hard deadline on top: a handler that outlives it
@@ -286,6 +287,12 @@ async def capture_screen(display: int | None = None) -> Shot:
 
     Call this ONLY on a turn the user drove. See the module docstring.
     """
+    if _windows:
+        import windows_desktop
+        try:
+            return Shot(**await windows_desktop.capture_screen(display))
+        except Exception as error:
+            raise ScreenError(f"I couldn't capture your Windows desktop: {error}") from error
     if screen_recording_granted() is False:
         raise ScreenError(_NO_PERMISSION)
 
@@ -386,6 +393,12 @@ async def list_windows() -> list[Window]:
     Raises ScreenError when Accessibility is missing. An empty list would have
     JARVIS say "nothing is open" — a lie with a remedy attached.
     """
+    if _windows:
+        import windows_desktop
+        try:
+            return [Window(**row) for row in await windows_desktop.list_windows()]
+        except Exception as error:
+            raise ScreenError(f"I couldn't read your Windows windows: {error}") from error
     rc, stdout, stderr = await _run("osascript", "-e", _WINDOWS_SCRIPT,
                                     timeout=WINDOWS_TIMEOUT_SEC)
     if rc != 0:

@@ -20,8 +20,10 @@ import {
   el, row, panel, bar, pill, button, statusDot, statusPill, stateStyle,
   emptyState, stack, type Tone,
 } from "./ui";
+import { handFor, hostWaitLine } from "./promptowner";
 
 let started = false;
+let desktopCapabilities: Record<string, boolean> = {};
 let projects: ProjectListItem[] = [];
 let selectedName: string | null = null;
 let detail: ProjectDetail | null = null;
@@ -166,7 +168,8 @@ function whereItIs(d: ProjectDetail): HTMLElement {
   ];
   for (const [target, label] of targets) {
     const btn = button(label, () => void doOpen(d, target, btn));
-    btn.disabled = !d.directory_exists;
+    btn.disabled = !d.directory_exists || desktopCapabilities[`open_${target}`] !== true;
+    if (desktopCapabilities[`open_${target}`] !== true) btn.title = "This action is unavailable on this server.";
     actions.append(btn);
   }
   body.append(actions);
@@ -186,7 +189,7 @@ async function doOpen(d: ProjectDetail, target: OpenTarget, btn: HTMLButtonEleme
   }
   setTimeout(() => {
     btn.textContent = original;
-    btn.disabled = !d.directory_exists;
+    btn.disabled = !d.directory_exists || desktopCapabilities[`open_${target}`] !== true;
   }, 1500);
 }
 
@@ -203,12 +206,16 @@ function sessionRow(s: SessionRow): HTMLElement {
     const reason = s.needs || (s.last_text ? s.last_text.replace(/\s+/g, " ").slice(0, 200)
                                             : "stopped and wants you");
     r.addBody(el("div", "session-reason", reason));
-    if (s.needs_a_human_hand) {
+    // Whose it is and where — the same words as the Sessions view.
+    if (s.needs_a_human_hand || s.origin === "background") {
+      const owner = handFor(s.origin);
       const hand = el("div", "session-hand");
-      hand.append(pill("your keystroke", "bad"),
-        el("span", "row-meta", "JARVIS can't answer this one"));
+      hand.append(pill(owner.pill, owner.tone),
+        el("span", "row-meta", owner.note));
       r.addBody(hand);
     }
+  } else if ((s.waiting_on_host ?? null) !== null) {
+    r.addBody(el("div", "session-summary", hostWaitLine(s.waiting_on_host ?? "")));
   } else if (s.summary) {
     r.addBody(el("div", "session-summary", s.summary.replace(/\s+/g, " ")));
   }
@@ -386,6 +393,10 @@ function showBanner(text: string | null): void {
 
 async function reconcile(): Promise<void> {
   try {
+    const response = await fetch("/api/capabilities");
+    desktopCapabilities = response.ok ? await response.json() : {};
+  } catch { desktopCapabilities = {}; }
+  try {
     projects = await listProjectViews();
     showBanner(null);
   } catch (e) {
@@ -412,6 +423,7 @@ async function reconcile(): Promise<void> {
   // Re-render the list (tones/counts may have moved) without re-fetching a
   // detail pane that is still valid.
   if (detail === null) void selectProject(selectedName as string);
+  else renderDetail();
 }
 
 export function initProjects(): void {

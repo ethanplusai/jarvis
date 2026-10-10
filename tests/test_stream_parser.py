@@ -11,7 +11,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "stream_success.jsonl"
 
 
 def _events():
-    return [stream_parser.parse_line(l) for l in FIXTURE.read_text().splitlines() if l.strip()]
+    return [stream_parser.parse_line(l) for l in FIXTURE.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 def test_parse_line_returns_dict():

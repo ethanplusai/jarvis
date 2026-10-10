@@ -9,6 +9,11 @@ import pytest
 
 import session_steer
 
+# The inbox is a Unix socket and Python on Windows has no AF_UNIX, so none of
+# this can be staged there. tests/test_windows_compat.py pins the refusal.
+pytestmark = pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
+                                reason="Python here has no AF_UNIX")
+
 
 def _wait_for_receipt(received, timeout=2.0):
     """`post_to_session` returns as soon as `sendall` completes, not once the
@@ -577,7 +582,8 @@ class ScriptedBrain:
         self.tool_results = []
         self.tool_seconds = []
 
-    async def turn(self, text, origin="user", on_delta=None, on_tool=None):
+    async def turn(self, text, origin="user", on_delta=None, on_tool=None,
+                   on_switch=None):
         for args in self._calls:
             t0 = time.monotonic()
             # The real brain fires this as the CLI reports each tool_use; the

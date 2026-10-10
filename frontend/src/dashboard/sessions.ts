@@ -31,6 +31,7 @@ import {
   type SessionRow, type SessionUsage, type AgentUsage,
 } from "./api";
 import { connectSessionsLive } from "./sessions-live";
+import { handFor, hostWaitLine, startedAs } from "./promptowner";
 import {
   el, row, panel, group, stack, kv, button, callout, splitView,
   statusDot, statusPill, stateStyle, pill, emptyState,
@@ -315,7 +316,12 @@ function askBand(s: SessionRow): HTMLElement {
     meta: s.since === null ? "" : `${SINCE_LABEL[s.state] ?? "for"} ${fmtSpan(now() - s.since)}`,
   });
 
-  if (!needsYou) {
+  const hostWait = s.waiting_on_host ?? null;
+  if (!needsYou && hostWait !== null) {
+    // A program's session, paused on the program that drives it. `working`
+    // is true — and so is the pause, which is what "where is it?" is asking.
+    c.body.textContent = hostWaitLine(hostWait);
+  } else if (!needsYou) {
     c.body.textContent = ask.line;
   } else if (s.needs) {
     c.body.textContent = s.needs;
@@ -329,10 +335,12 @@ function askBand(s: SessionRow): HTMLElement {
   }
 
   if (needsYou) {
-    if (s.needs_a_human_hand) {
-      c.foot.prepend(pill("your keystroke", "bad"));
-      c.foot.append(el("span", "callout-note",
-        "JARVIS cannot answer this one — it wants a key pressed in that terminal."));
+    // Whose it is and where, by origin (promptowner.ts). A program's prompt
+    // is the program's whatever it waits on — the socket reaches none of them.
+    if (s.needs_a_human_hand || s.origin === "background") {
+      const hand = handFor(s.origin);
+      c.foot.prepend(pill(hand.pill, hand.tone));
+      c.foot.append(el("span", "callout-note", hand.note));
     } else if (s.steerable) {
       c.foot.prepend(pill("steerable", "ok", "ghost"));
       c.foot.append(el("span", "callout-note",
@@ -502,7 +510,7 @@ function sessionPanel(s: SessionRow): HTMLElement {
 
   fields.add("project", s.project || "(unknown)");
   fields.add("folder", s.cwd || "(unknown)");
-  fields.add("started as", s.origin);
+  fields.add("started as", startedAs(s.origin, s.entrypoint));
   fields.add("steerable", s.steerable
     ? "yes — it bound an inbox socket"
     : "no — no inbox socket to reach it on", s.steerable ? "ok" : "warn");

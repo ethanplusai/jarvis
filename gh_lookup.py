@@ -128,19 +128,16 @@ async def _run_gh(args: list[str], timeout: float) -> tuple[int, str, str]:
     binary = gh_path()
     if binary is None:
         raise FileNotFoundError("gh")
-    proc = await asyncio.create_subprocess_exec(
+    import process_tree
+    proc = await process_tree.spawn(
         binary, *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
-    except (asyncio.TimeoutError, TimeoutError):
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        raise
-    return (proc.returncode or 0,
-            out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+        return (proc.returncode or 0,
+                out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+    finally:
+        await process_tree.stop(proc, grace=1)
 
 
 def _problem_from(stderr: str) -> str:

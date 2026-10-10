@@ -1,13 +1,9 @@
 # Run the suite on every push and pull request.
 #
-# macOS, not Ubuntu, on purpose: JARVIS is a macOS-only project, and while
-# every macOS-specific subprocess (osascript, screencapture, sips, claude) is
-# faked at the seam in tests, the environment the suite was written against
-# is a Mac. A green run here means what a green run on the author's machine
-# means. Ubuntu would be cheaper and would also be a second environment
-# nobody develops on.
+# Both supported server platforms are checked, including the frontend tests.
+# Desktop-specific subprocesses are faked at the test seam.
 #
-# The suite needs: Python 3.11+ (the code uses `X | None` at runtime; 3.9,
+# The suite supports Python 3.12/3.13 (the code uses `X | None` at runtime; 3.9,
 # which macOS ships as `python3`, dies at import), Node for the frontend
 # build that tests/test_dashboard_page.py drives, and Playwright's Chromium
 # for the same test plus read_page / look_at_page. It does NOT need a Fish
@@ -22,15 +18,23 @@ on:
 
 jobs:
   pytest:
-    runs-on: macos-latest
-    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    # A hang guard, not a budget. The suite takes ~10 minutes on macOS but
+    # ~28 on the Windows runner — no one test, just ~0.4 s apiece of process
+    # and ACL work across 4,400 — so 25 there cancelled the suite at 98%.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - uses: actions/setup-node@v4
@@ -39,8 +43,27 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # Into a clean virtualenv, as docs/dependency-upgrades.md says: the lock
+      # check below compares EVERY installed distribution with constraints.txt,
+      # and the runner's own Python is not the project's alone (the Windows
+      # image ships pipx and its dependencies in it). Every later step finds
+      # the venv's python first on PATH.
+      - name: Project virtualenv
+        shell: bash
+        env:
+          VENV: ${{ runner.temp }}/venv
+        run: |
+          python -m venv "$VENV"
+          if [ "$RUNNER_OS" = "Windows" ]; then echo "$VENV/Scripts"; else echo "$VENV/bin"; fi >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$VENV" >> "$GITHUB_ENV"
+
       - name: Python dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install -r requirements-dev.txt -c constraints.txt
+
+      - name: Verify dependency constraints
+        run: |
+          python -m pip check
+          python scripts/lock_dependencies.py
 
       - name: Playwright Chromium
         run: python -m playwright install chromium
@@ -51,6 +74,10 @@ jobs:
 
       - name: Frontend typecheck
         run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: Frontend tests
+        run: npm test
         working-directory: frontend
 
       - name: Frontend build

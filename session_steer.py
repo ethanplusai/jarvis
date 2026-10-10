@@ -53,13 +53,24 @@ def post_to_session(socket_path: str | None, prompt: str,
                              "message": {"role": "user", "content": prompt.strip()}}))
     payload = ("\n".join(lines) + "\n").encode()
 
+    if not hasattr(socket, "AF_UNIX"):
+        if os.name == "nt":
+            import windows_inbox
+            try:
+                windows_inbox.send(socket_path, payload, timeout)
+                return SENT
+            except OSError as error:
+                return NOT_LIVE if error.errno == 10061 else FAILED
+        return FAILED
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         sock.connect(socket_path)
     except (ConnectionRefusedError, FileNotFoundError):
+        sock.close()
         return NOT_LIVE           # a stale .sock from a process that has gone
     except OSError:
+        sock.close()
         return FAILED
     try:
         sock.sendall(payload)

@@ -60,3 +60,22 @@ async def test_empty_text_or_missing_key_short_circuits():
         assert await tts.synthesize_chunk("   ", api_key="k", voice_id="v", client=c) is None
         assert await tts.synthesize_chunk("hi", api_key="", voice_id="v", client=c) is None
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_warm_touches_the_service_once_and_never_raises():
+    """A connection opened while the brain is still thinking is one the
+    first sentence does not have to open: measured, a pool idle for more
+    than a few seconds paid 0.2 s on the first byte."""
+    import tts
+    calls = []
+
+    async with _client(lambda req: calls.append(str(req.url)) or httpx.Response(404, content=b"")) as c:
+        assert await tts.warm(c) is True
+    assert len(calls) == 1 and calls[0].startswith("https://api.fish.audio"), calls
+
+    def boom(request):
+        raise httpx.ConnectError("down")
+
+    async with _client(boom) as c:
+        assert await tts.warm(c) is False

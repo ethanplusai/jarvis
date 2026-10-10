@@ -295,7 +295,7 @@ def _fake_claude(tmp_path: Path) -> str:
         f"sys.stdout.write(open({str(FIXTURE)!r}).read())\n"
         "sys.stdout.flush()\n"
         "sys.exit(0)\n"
-    )
+    , encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return f"{sys.executable} {script}"
 

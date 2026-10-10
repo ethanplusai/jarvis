@@ -32,6 +32,8 @@ def wired(monkeypatch, tmp_path):
 
 
 class _Executor:
+    async def shutdown(self):
+        pass
     """Records cancellations. Never touches a process."""
 
     def __init__(self, store, answer=True, boom=False):

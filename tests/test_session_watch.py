@@ -45,9 +45,9 @@ def test_unreadable_and_half_written_roster_files_are_skipped_not_raised(tmp_pat
     """The CLI writes these files live; a tick must survive reading one mid-write."""
     root = tmp_path / ".claude"
     write_roster(root, pid=os.getpid(), session_id="good", cwd="/p", name="n")
-    (root / "sessions" / "999999.json").write_text('{"pid": 999999, "sess')  # truncated
-    (root / "sessions" / "888888.json").write_text("")                       # empty
-    (root / "sessions" / "777777.json").write_text('{"no": "pid"}')          # missing keys
+    (root / "sessions" / "999999.json").write_text('{"pid": 999999, "sess', encoding="utf-8")  # truncated
+    (root / "sessions" / "888888.json").write_text("", encoding="utf-8")                       # empty
+    (root / "sessions" / "777777.json").write_text('{"no": "pid"}', encoding="utf-8")          # missing keys
 
     entries = sw.read_roster([root])
 
@@ -89,7 +89,8 @@ def test_project_name_is_unaffected_for_a_normal_non_worktree_path():
 
 
 def test_config_roots_includes_both_defaults_and_the_env_extras(monkeypatch, tmp_path):
-    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", f"{tmp_path}/x:{tmp_path}/y")
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS",
+                       os.pathsep.join([f"{tmp_path}/x", f"{tmp_path}/y"]))
     roots = sw.config_roots()
     names = [r.name for r in roots]
     assert ".claude" in names and ".claude-orcha" in names
@@ -175,7 +176,7 @@ def test_a_partial_first_line_that_would_itself_parse_is_still_discarded(tmp_pat
                                 "content": [{"type": "text", "text": "A"}]}}),
     ]
     content = "\n".join(lines) + "\n"
-    p.write_text(content)
+    p.write_text(content, encoding="utf-8")
 
     brace_index = content.index(ghost_obj)
     nbytes = len(content.encode("utf-8")) - brace_index  # seek lands exactly on '{'
@@ -208,7 +209,7 @@ def test_subagent_lines_are_excluded_from_the_recap(tmp_path):
         json.dumps({"type": "ai-title", "aiTitle": "T"}),
         json.dumps({"type": "last-prompt", "lastPrompt": "P"}),
         "",
-    ]) + "\n")
+    ]) + "\n", encoding="utf-8")
 
     r = sw.read_recap(root, "/p/s", "s4")
 
@@ -253,7 +254,7 @@ def test_unknown_line_types_and_broken_lines_are_ignored(tmp_path):
         '{"type": "ai-title", "aiTitle": "Still found it"}',
         '{"type": "last-prompt", "lastPrompt": "and this"}',
         "",
-    ]) + "\n")
+    ]) + "\n", encoding="utf-8")
 
     r = sw.read_recap(root, "/p/odd", "s5")
 
@@ -1022,12 +1023,12 @@ def test_one_bad_line_does_not_freeze_the_snapshot(tmp_path, monkeypatch):
     write_roster(root, pid=os.getpid(), session_id="s", cwd="/p/one", name="one")
     path = write_transcript(root, cwd="/p/one", session_id="s",
                             title="T", last_prompt="P")
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     lines.append(json.dumps({
         "type": "assistant", "isSidechain": False, "sessionId": "s",
         "message": {"role": "assistant",
                     "content": [{"type": "text", "text": 12345}]}}))
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     watcher = sw.SessionWatcher(roots=[root])
     watcher.poll_once()
@@ -1044,7 +1045,7 @@ def _write_agents(root, cwd, session_id, count, *, recent):
     old = 1788404571.0 - 10 * 3600
     for i in range(count):
         f = d / f"agent-{i:04d}.jsonl"
-        f.write_text("{}\n")
+        f.write_text("{}\n", encoding="utf-8")
         if i not in recent:
             os.utime(f, (old, old))
     return d
@@ -1196,3 +1197,45 @@ def test_excluding_nothing_is_the_same_snapshot(tmp_path, monkeypatch):
 
     assert snap.excluding(set()) is snap
     assert snap.excluding({"not-here"}) is snap
+
+
+# --- a busy named pipe is still a bound inbox ---------------------------------
+#
+# Measured live on Windows, 2026-09-23: `Path.exists()` on a Claude Code
+# inbox pipe that another client held open raised
+# `OSError: [WinError 231] All pipe instances are busy`, out of the
+# `steerable` property, out of `build_snapshot`, and every watcher tick died
+# on it — sixteen in ten minutes. The Sessions tab and every "needs you"
+# announcement were silently dead the whole time.
+
+import sys as _sys
+
+_WINDOWS_ONLY = pytest.mark.skipif(_sys.platform != "win32",
+                                   reason="ERROR_PIPE_BUSY is a Windows answer")
+
+
+def _entry(tmp_path, socket_path):
+    return sw.RosterEntry(pid=1, session_id="s1", cwd=str(tmp_path), name="x",
+                          root=tmp_path, socket_path=socket_path)
+
+
+@_WINDOWS_ONLY
+def test_a_busy_named_pipe_is_still_steerable(monkeypatch, tmp_path):
+    def busy(self):
+        raise OSError(22, "All pipe instances are busy", None, 231)
+    monkeypatch.setattr(sw.Path, "exists", busy)
+    assert _entry(tmp_path, r"\.\pipe\LOCAL\cc-msg-busy").steerable is True
+
+
+def test_any_other_stat_failure_is_not_steerable_and_not_a_crash(monkeypatch, tmp_path):
+    def denied(self):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(sw.Path, "exists", denied)
+    assert _entry(tmp_path, str(tmp_path / "gone.sock")).steerable is False
+
+
+def test_a_present_socket_is_steerable_and_none_is_not(tmp_path):
+    sock = tmp_path / "s.sock"
+    sock.write_text("", encoding="utf-8")
+    assert _entry(tmp_path, str(sock)).steerable is True
+    assert _entry(tmp_path, None).steerable is False

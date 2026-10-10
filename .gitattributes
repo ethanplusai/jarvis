@@ -1,0 +1,18 @@
+# One line ending in the repository and on every checkout. The index has
+# always been LF; with core.autocrlf=true and no attributes, a Windows
+# checkout rewrote every touched file to CRLF on the way back and git
+# warned about each one, while macOS CI checked out different bytes.
+* text=auto eol=lf
+
+# Binary content: never normalised, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.wav binary
+*.zip binary
+*.pdf binary

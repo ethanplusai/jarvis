@@ -24,7 +24,9 @@ def _event(kind="needs_you", **over):
                "state": "needs_you", "needs": "permission prompt",
                "needs_a_human_hand": True, "title": "Fix the redirect",
                "summary": "Fix the redirect", "last_text": "Shall I proceed?",
-               "steerable": True}
+               # Every real payload carries one (`session_to_dict`), and the
+               # announcement says where the prompt is from it.
+               "origin": "terminal", "steerable": True}
     session.update(over.pop("session", {}))
     return {"kind": kind, "at": 1.0, "session": session, **over}
 

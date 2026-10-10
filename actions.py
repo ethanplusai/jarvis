@@ -10,8 +10,23 @@ import logging
 import os
 import re
 import shutil
+import shlex
+import sys
+import windows_desktop
 
+_windows = sys.platform == "win32"
 log = logging.getLogger("jarvis.actions")
+
+
+def directory_command(path: str) -> str:
+    if _windows:
+        return "Set-Location -LiteralPath '" + path.replace("'", "''") + "'"
+    return f"cd {shlex.quote(path)}"
+
+
+def project_command(path: str, command: str) -> str:
+    change = directory_command(path)
+    return f"{change}; if ($?) {{ {command} }}" if _windows else f"{change} && {command}"
 
 async def _mark_terminal_as_jarvis(revert_after: float = 5.0):
     """Temporarily set the front Terminal window to Ocean theme, then revert.
@@ -80,8 +95,19 @@ def applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", " ")
 
 
-async def open_terminal(command: str = "") -> dict:
-    """Open Terminal.app and optionally run a command. Marks it blue for JARVIS."""
+async def open_terminal(command: str = "", env: dict | None = None) -> dict:
+    """Open Terminal.app and optionally run a command. Marks it blue for JARVIS.
+
+    `env` is the window's environment on Windows, where the console is a
+    child of the backend and would otherwise inherit all of it. Terminal.app
+    starts its own shell and never sees the backend's, so it has nothing to
+    pass on there."""
+    if _windows:
+        try:
+            await windows_desktop.open_terminal(command, env=env)
+            return {"success": True, "confirmation": "Terminal is open, sir."}
+        except OSError as error:
+            return {"success": False, "confirmation": f"I couldn't open Terminal: {error}"}
     if command:
         escaped = applescript_escape(command)
         script = (
@@ -125,6 +151,12 @@ async def open_browser(url: str, browser: str = "chrome") -> dict:
     README, so this is a straight line from attacker text to a shell.
     `tests/test_applescript_url_injection.py` runs the payload.
     """
+    if _windows:
+        try:
+            await windows_desktop.open_browser(url, browser.lower())
+            return {"success": True, "confirmation": f"Opened that in {browser}, sir."}
+        except (OSError, ValueError) as error:
+            return {"success": False, "confirmation": f"I couldn't open {browser}: {error}"}
     escaped_url = applescript_escape(url)
 
     if browser.lower() == "firefox":
@@ -218,6 +250,12 @@ def _vscode_command(path: str) -> list[str] | None:
 
 async def open_in_editor(path: str) -> dict:
     """Open a file or directory in VS Code, else in the system default."""
+    if _windows:
+        try:
+            editor = await windows_desktop.open_editor(path)
+            return {"success": True, "editor": editor, "confirmation": f"Opened that in {editor}, sir."}
+        except OSError:
+            return {"success": False, "editor": "editor", "confirmation": "I couldn't open an editor, sir."}
     argv = _vscode_command(path)
     editor = "VS Code"
     if argv is None:

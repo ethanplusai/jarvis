@@ -9,6 +9,7 @@ project's own known directories before handing it to `actions`.
 
 import importlib
 
+from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,6 +47,10 @@ def _session(session_id, project, cwd, state=sw.IDLE):
 
 
 class _Actions:
+    @staticmethod
+    def directory_command(path):
+        import shlex
+        return f"cd {shlex.quote(path)}"
     def __init__(self, success=True):
         self.editor: list[str] = []
         self.terminal: list[str] = []
@@ -139,11 +144,11 @@ def test_detail_returns_repo_and_build_summaries(wired, tmp_path):
     server, _store = wired
     project = tmp_path / "demo"
     project.mkdir()
-    (project / "README.md").write_text("# demo\n\nA small tool.\n")
-    (project / "main.py").write_text("print(1)\n")
+    (project / "README.md").write_text("# demo\n\nA small tool.\n", encoding="utf-8")
+    (project / "main.py").write_text("print(1)\n", encoding="utf-8")
     spec_dir = project / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True)
-    (spec_dir / "2026-01-01-thing-design.md").write_text("# Thing\n")
+    (spec_dir / "2026-01-01-thing-design.md").write_text("# Thing\n", encoding="utf-8")
 
     with TestClient(server.app, headers=BROWSER) as c:
         server.session_watcher = _Watcher([_session("s1", "demo", str(project))])
@@ -207,16 +212,19 @@ def test_open_in_terminal_calls_actions(wired, monkeypatch):
     assert fake.terminal == ["cd /p/chitauri"]
 
 
-def test_open_in_browser_calls_actions_with_a_file_uri(wired, monkeypatch):
+def test_open_in_browser_calls_actions_with_a_file_uri(wired, monkeypatch, tmp_path):
     server, _store = wired
     fake = _Actions()
     with TestClient(server.app, headers=BROWSER) as c:
         monkeypatch.setattr(server, "actions", fake)
-        server.session_watcher = _Watcher([_session("s1", "chitauri", "/p/chitauri")])
+        # Absolute on this platform: `as_uri` refuses anything else, and
+        # "/p/chitauri" is not absolute on Windows.
+        where = str(tmp_path / "p" / "chitauri")
+        server.session_watcher = _Watcher([_session("s1", "chitauri", where)])
         r = c.post("/api/projects/open",
-                   json={"name": "chitauri", "path": "/p/chitauri", "target": "browser"})
+                   json={"name": "chitauri", "path": where, "target": "browser"})
     assert r.status_code == 200
-    assert fake.browser == ["file:///p/chitauri"]
+    assert fake.browser == [Path(where).as_uri()]
 
 
 def test_open_reports_actions_failure(wired, monkeypatch):

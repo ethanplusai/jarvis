@@ -94,8 +94,8 @@ def wired(monkeypatch, tmp_path):
 
     project = tmp_path / "chitauri"
     project.mkdir()
-    (project / "README.md").write_text(HOSTILE_README)
-    (project / "main.py").write_text("needle = 1\n")
+    (project / "README.md").write_text(HOSTILE_README, encoding="utf-8")
+    (project / "main.py").write_text("needle = 1\n", encoding="utf-8")
     monkeypatch.setattr(server_module, "cached_projects",
                         [{"name": "chitauri", "path": str(project)}])
     return server_module, project
@@ -215,7 +215,7 @@ def test_the_refusal_names_what_he_read(call):
 def _memory_state(server):
     import jarvis_memory
     index = jarvis_memory._index_path()
-    return (index.read_text() if index.exists() else "",
+    return (index.read_text(encoding="utf-8") if index.exists() else "",
             sorted(p.name for p in jarvis_memory.data_paths.memory_dir().glob("*.md")))
 
 
@@ -275,7 +275,7 @@ def test_a_later_clean_turn_may_still_write(call):
     out = _call("remember", title="Tony prefers Postgres",
                 body="He said so out loud.")
     assert out["ok"] is True, out
-    assert "Postgres" in jarvis_memory._index_path().read_text()
+    assert "Postgres" in jarvis_memory._index_path().read_text(encoding="utf-8")
 
 
 # --- what a tainted turn may still do ------------------------------------
@@ -297,7 +297,10 @@ def test_answering_a_dialog_survives(call):
     most of what JARVIS is for: "what's it asking? … allow it"."""
     server = call[2]
     assert server._untrusted_content_refusal("answer_dialog", True) is None
-    assert server.TAINT_EXEMPT_ACTING == {"answer_dialog"}
+    # `message_user` is the other: an output channel to the owner's own
+    # phone (WhatsApp, Telegram) and nobody else's — see tests/test_whatsapp.py
+    # and tests/test_telegram.py for the reasoning held against the code.
+    assert server.TAINT_EXEMPT_ACTING == {"answer_dialog", "message_user"}
 
 
 def test_steering_and_running_a_command_are_no_longer_exempt(call):

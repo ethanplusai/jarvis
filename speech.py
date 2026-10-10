@@ -32,15 +32,34 @@ def _word_before(text: str, i: int) -> str:
 
 
 class SentenceSplitter:
-    def __init__(self, first_chunk_max: int = 160, first_chunk_min: int = 40):
+    def __init__(self, first_chunk_max: int = 80, first_chunk_min: int = 40,
+                 last_chunk_min: int = 20):
         self._buf = ""
         self.emitted = 0
         self._first_chunk_max = first_chunk_max
         self._first_chunk_min = first_chunk_min
+        self._last_chunk_min = last_chunk_min
 
-    def feed(self, delta: str) -> list[str]:
+    def feed(self, delta: str, final: bool = False) -> list[str]:
+        """The chunks `delta` completes. `final`: nothing follows it — the
+        whole line was handed over at once (`SpeechScheduler.say`) — so the
+        end of the buffer is the end of its last sentence."""
         self._buf += delta
         out: list[str] = []
+        if self.emitted == 0:
+            # A first sentence that is already complete and longer than
+            # `first_chunk_max` is cut at its last clause break past
+            # `first_chunk_min`, the same as one still streaming would be.
+            # The hold in front of the mouth releases the opening of a reply
+            # in one piece, so this is the common case, not the exception.
+            end = self._boundary(self._buf)
+            if end is None and final:
+                end = len(self._buf.rstrip())
+            if end is not None and end > self._first_chunk_max:
+                cut = self._last_clause_break(self._buf[:self._first_chunk_max])
+                if (cut is not None and cut >= self._first_chunk_min
+                        and self._leaves_enough(cut, end)):
+                    out.append(self._take(cut))
         while True:
             cut = self._boundary(self._buf)
             if cut is None:
@@ -51,12 +70,34 @@ class SentenceSplitter:
             # semicolon, colon) appears past `first_chunk_min`, cut there — it is
             # a pause the listener expects anyway. Past `first_chunk_max` with no
             # sentence end, fall back to the last break of any kind.
+            #
+            # `first_chunk_max` is 80, down from 160, on a measurement
+            # (2026-09-24): Fish returns its first byte after ~0.5 s and the
+            # whole chunk after that plus about a third of the audio's
+            # length, so every 20 characters of first chunk is ~0.25 s of
+            # silence before anything is heard. The rest of the sentence is
+            # synthesized in parallel and is ready long before the first part
+            # has finished playing, so the join at a comma costs nothing but
+            # the comma's own pause.
             cut = self._first_strong_break(self._buf, self._first_chunk_min)
             if cut is None and len(self._buf) >= self._first_chunk_max:
                 cut = self._last_clause_break(self._buf)
-            if cut:
+                if cut is not None and cut < self._first_chunk_min:
+                    cut = None      # a scrap the next chunk could not keep up with
+            end = len(self._buf.rstrip()) if final else None
+            if cut and self._leaves_enough(cut, end):
                 out.append(self._take(cut))
         return [c for c in out if c]
+
+    def _leaves_enough(self, cut: int, end: Optional[int]) -> bool:
+        """Whether cutting the first chunk at `cut` buys anything. What it
+        buys is the synthesis time of what is left of the sentence, about a
+        quarter second per 20 characters (see above), so a tail shorter than
+        `last_chunk_min` is left on: measured live, 2026-09-30, "…has
+        stopped and wants you," and then "sir." on its own, heard as two and
+        shown in the chat panel as two messages. An end not yet known — a
+        reply still streaming — is cut as before."""
+        return end is None or end - cut >= self._last_chunk_min
 
     @staticmethod
     def _first_strong_break(text: str, min_pos: int) -> Optional[int]:
@@ -280,7 +321,10 @@ class Chunk:
     audio: Optional[bytes] = None
     ready: bool = False
     notice: bool = False        # this chunk's failure was the third in a row: warn after it
+    silent: bool = False        # never synthesized ON PURPOSE (voice off): text, not a failure
     earliest_ack: float = 0.0   # no honest ack can arrive before this (see ACK_FLOOR_FACTOR)
+    cut_at: float = 0.0         # when its text was cut from the stream
+    ready_at: Optional[float] = None   # when synthesis finished (or was skipped)
 
 
 @dataclass
@@ -309,6 +353,12 @@ class Utterance:
     paused_at: Optional[float] = None
     resumes: int = 0
     first_sent_at: Optional[float] = None
+    # Where the time before the first audio went, for the server's latency
+    # line: the first chunk was cut from the brain's text at `first_cut_at`
+    # and its synthesis finished at `first_ready_at`; `first_sent_at` is
+    # when its audio left. The second chunk never overwrites these.
+    first_cut_at: Optional[float] = None
+    first_ready_at: Optional[float] = None
     last_progress_at: Optional[float] = None    # last send or ack; the ack watchdog reads it
     alias: Optional["Utterance"] = None         # a batched LOW item points at the merged utterance
     splitter: SentenceSplitter = field(default_factory=SentenceSplitter)
@@ -396,6 +446,10 @@ class SpeechScheduler:
         self._cancel_window_open = False
         self._cancel_event = asyncio.Event()
         self._speaking = False
+        # His voice, off or on — the speaker button beside the microphone's.
+        # Off, nothing is synthesized and every sentence leaves as a `text`
+        # frame; see `set_voice`.
+        self.voice_on = True
         self._wake = asyncio.Event()
         self._tick_task: Optional[asyncio.Task] = None
         self._tasks: set[asyncio.Task] = set()
@@ -504,7 +558,7 @@ class SpeechScheduler:
         self._kick()
 
     def _fill(self, u: Utterance, text: str) -> None:
-        for chunk in u.splitter.feed(text):
+        for chunk in u.splitter.feed(text, final=True):
             self._add_chunk(u, chunk)
         tail = u.splitter.flush()
         if tail:
@@ -736,8 +790,10 @@ class SpeechScheduler:
                 for r in recent)
             for t in toks)
 
-    async def user_final(self, text: str) -> str:
+    async def user_final(self, text: str, *, typed: bool = False) -> str:
         verdict = self.classify(text)
+        if typed and verdict == "echo":
+            verdict = "speech"
         if verdict == "echo":
             return verdict
         self._last_user_speech = self._clock()
@@ -745,7 +801,7 @@ class SpeechScheduler:
         is_cancel_word = " ".join(_tokens(text)) in self.cancel_words
         if verdict == "cancel":
             self._cancel_event.set()
-        if self._speaking and (is_cancel_word or verdict == "replay" or self._nonmatching(text) >= 2):
+        if self._speaking and (typed or is_cancel_word or verdict == "replay" or self._nonmatching(text) >= 2):
             # A cancel — or a replay request — is an answer to what was being
             # said: it was heard, so it must not come back as "Before I
             # forget —". A single-word replay trigger ("repeat", "pardon")
@@ -883,13 +939,58 @@ class SpeechScheduler:
         await self._set_speaking(False)
         self._kick()
 
+    def set_voice(self, on: bool) -> None:
+        """His voice, off or on. Independent of the microphone.
+
+        Off: `_synthesize` calls nothing and marks the chunk `silent`, and
+        `_send_ready` sends it through the text path — the one that already
+        existed for a FAILED synthesis, minus everything that made a failure
+        a failure: no failure count (so no "My voice is failing, sir."), no
+        speaking state, and no entry in the echo window, because a reply he
+        never said aloud was never in the room and must not swallow the
+        user's next sentence as an echo of it. A chunk that already has
+        audio when the voice goes off is sent as text too.
+
+        On again: sentences skipped while silent and not yet sent are
+        synthesized after all, so the rest of a reply follows the switch.
+        """
+        on = bool(on)
+        if on == self.voice_on:
+            return
+        self.voice_on = on
+        log.info("speech: voice %s", "on" if on else "off (text only)")
+        if on:
+            live = [u for u in (self._current, self._paused, *self._pending) if u is not None]
+            for u in live:
+                for idx, chunk in enumerate(u.chunks):
+                    if idx > u.sent and chunk.silent:
+                        chunk.silent = False
+                        chunk.ready = False
+                        self._spawn(self._synthesize(u, chunk))
+        self._kick()
+
     # ── internals ──────────────────────────────────────────────────────
     def _add_chunk(self, utt: Utterance, text: str) -> None:
-        chunk = Chunk(text)
+        chunk = Chunk(text, cut_at=self._clock())
         utt.chunks.append(chunk)
+        if utt.first_cut_at is None:
+            utt.first_cut_at = chunk.cut_at
         self._spawn(self._synthesize(utt, chunk))
 
+    def _mark_ready(self, utt: Utterance, chunk: Chunk) -> None:
+        chunk.ready = True
+        chunk.ready_at = self._clock()
+        if utt.first_ready_at is None and utt.chunks and utt.chunks[0] is chunk:
+            utt.first_ready_at = chunk.ready_at
+
     async def _synthesize(self, utt: Utterance, chunk: Chunk) -> None:
+        if not self.voice_on:
+            # Deliberate silence: no call to TTS, and marked so that delivery
+            # knows this is not a synthesis that failed.
+            chunk.silent = True
+            self._mark_ready(utt, chunk)
+            self._kick()
+            return
         audio: Optional[bytes] = None
         try:
             audio = await self._synth(self._prepare(chunk.text))
@@ -898,13 +999,7 @@ class SpeechScheduler:
         if utt.cancelled:
             return
         chunk.audio = audio
-        chunk.ready = True
-        if audio is None:
-            self._tts_failures += 1
-            if self._tts_failures == 3:
-                chunk.notice = True              # the send loop warns right after this chunk
-        else:
-            self._tts_failures = 0
+        self._mark_ready(utt, chunk)
         self._kick()
 
     def _user_silent(self, now: float) -> bool:
@@ -1140,7 +1235,16 @@ class SpeechScheduler:
             chunk = u.chunks[idx]
             if not chunk.ready:
                 break
-            if chunk.audio is None:
+            # Synthesis runs concurrently and can finish out of order. Count
+            # failures in delivery order, once per chunk (resumes may replay).
+            silent = chunk.silent or not self.voice_on
+            if idx > u.high_sent and not silent:
+                if chunk.audio is None:
+                    self._tts_failures += 1
+                    chunk.notice = self._tts_failures == 3
+                else:
+                    self._tts_failures = 0
+            if chunk.audio is None or silent:
                 # Nothing to play, so nothing to ack — but it still takes its
                 # TURN. Without a link here the next chunk's chain restarted
                 # at `now`, and a single failed synthesis let `wait_for` say
@@ -1172,7 +1276,7 @@ class SpeechScheduler:
                 chunk.earliest_ack = max(previous, now) + ack_floor_seconds(chunk.audio)
                 u.sent = idx
                 if u.first_sent_at is None:
-                    u.first_sent_at = now
+                    u.first_sent_at = self._clock()   # this moment, not the tick's
                 u.last_progress_at = now
                 try:
                     await self._emit_raw({"type": "audio", "utt": u.id, "idx": idx,

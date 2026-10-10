@@ -97,3 +97,40 @@ def test_a_second_round_of_narration_cannot_slip_out_between_tools():
         ("tool",),
         ("text", "Done, sir."),
     ]) == ["Done, sir."]
+
+
+import asyncio
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_the_hold_releases_on_its_own_clock_not_on_the_next_delta():
+    """Measured 2026-09-24 on the latency line: first_cut equalled the turn's
+    whole duration on every turn. The CLI delivers a short reply in one or
+    two partial messages inside the hold window, and the release was only
+    checked when ANOTHER delta arrived, so a reply that had fully arrived
+    sat in the hold until the turn ended, about a second later. The hold is
+    a timer: what it holds goes out when the window closes, delta or no
+    delta."""
+    out = []
+    gate = server._OneLinePerTurn(out.append, hold_for=0.05)
+    gate.delta("Evening, sir. All quiet on the sessions.")
+    assert out == [], "held for the window"
+    await asyncio.sleep(0.2)
+    assert out == ["Evening, sir. All quiet on the sessions."], "released by the clock, before finish()"
+    gate.delta(" Nothing waiting on you.")
+    assert out[-1] == " Nothing waiting on you.", "and streaming from then on"
+    gate.finish()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_inside_the_window_still_bins_the_narration():
+    out = []
+    gate = server._OneLinePerTurn(out.append, hold_for=0.05)
+    gate.delta("Will say that to the session.")
+    gate.tool_started()
+    await asyncio.sleep(0.2)
+    assert out == [], "the timer must not release what a tool has already binned"
+    gate.delta("Passed that to chitauri, sir.")
+    gate.finish()
+    assert out == ["Passed that to chitauri, sir."]

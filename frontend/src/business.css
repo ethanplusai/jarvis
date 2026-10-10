@@ -1,0 +1,36 @@
+/* A window, not a modal: opened with show(), fixed, no backdrop. Until the
+   user drags it the stylesheet places it; then inline left/top take over. */
+#business { position: fixed; top: 64px; left: 3vw; right: auto; bottom: auto; margin: 0; z-index: 40; width: min(960px, 94vw); max-height: 90vh; padding: 0 24px 24px; background: #11191d; color: #edf3f4; border: 1px solid #45606a; border-radius: 12px; overflow: auto; font: 15px/1.55 system-ui, sans-serif; box-shadow: 0 18px 48px #000a; }
+#business header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+/* The header is the handle: drag it, focus it, minimise from it. */
+/* Sticky, so the handle and the Minimise button stay reachable however far
+   the desk has been scrolled. */
+#business-head { position: sticky; top: 0; z-index: 1; background: #11191d; cursor: grab; user-select: none; touch-action: none; margin: 0 -8px 0; padding: 20px 8px 10px; border-radius: 0 0 8px 8px; }
+#business.minimized #business-head { padding: 6px 8px; }
+#business.dragging #business-head { cursor: grabbing; }
+#business #business-toggle { margin-left: auto; }
+#business.minimized { width: auto; min-width: 280px; max-height: none; padding: 10px 16px; overflow: hidden; }
+#business-body[hidden], #business.minimized #business-body { display: none; }
+.business-meta { color: #95b3bd; font-size: 13px; margin: 6px 0; }
+.business-warning { color: #ffd27a; border-left: 3px solid #ffb020; padding: 4px 8px; margin: 8px 0; }
+.business-linkedin { border: 1px solid #2a3a40; border-radius: 6px; padding: 4px 10px; margin: 8px 0; }
+.business-text pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 22em; overflow: auto; }
+.business-meta time { font-variant-numeric: tabular-nums; }
+#business h2, #business h3, #business h4 { color: #f4fbfc; margin: 12px 0; }
+#business nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0; }
+#business article { border-top: 1px solid #34505b; padding: 16px 0; }
+#business section { margin-bottom: 24px; }
+#business label { display: block; margin: 12px 0; }
+#business input:not([type=checkbox]), #business textarea, #business select { display: block; box-sizing: border-box; width: 100%; border: 1px solid #617b85; border-radius: 5px; padding: 10px; background: #0b1115; color: #fff; font: inherit; }
+#business input[type=checkbox] { margin-right: 10px; }
+#business textarea { font-family: ui-monospace, monospace; }
+#business button { padding: 9px 14px; margin: 4px 8px 4px 0; border: 1px solid #617b85; border-radius: 6px; background: #203942; color: #f4fbfc; cursor: pointer; font: inherit; }
+#business button:disabled { opacity: .45; cursor: default; }
+#business button.armed { background: #5a2626; border-color: #b04a4a; }
+.business-tools:empty { display: none; }
+#business :focus-visible { outline: 2px solid #78ded9; outline-offset: 3px; }
+#business pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #0a1216; max-height: 400px; overflow: auto; }
+#business a { color: #8ce3e0; }
+#business summary { cursor: pointer; }
+#business [role=status] { color: #95e3dc; min-height: 24px; }
+@media(max-width: 600px) { #business { padding: 14px; } #business nav button { flex: 1 0 35%; } }

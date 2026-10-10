@@ -48,10 +48,10 @@ def test_ensure_brain_home_seeds_the_template_and_spares_an_edit(monkeypatch, tm
     home = data_paths.ensure_brain_home()
     claude_md = home / "CLAUDE.md"
     assert claude_md.exists()
-    assert "JARVIS" in claude_md.read_text()
-    claude_md.write_text("user edited")
+    assert "JARVIS" in claude_md.read_text(encoding="utf-8")
+    claude_md.write_text("user edited", encoding="utf-8")
     data_paths.ensure_brain_home()
-    assert claude_md.read_text() == "user edited"   # never overwritten
+    assert claude_md.read_text(encoding="utf-8") == "user edited"   # never overwritten
 
 
 # --- the persona template: shipped improvements must arrive, and edits must
@@ -78,7 +78,7 @@ def _fresh(monkeypatch, tmp_path):
 
 
 def _template_text() -> str:
-    return (Path(__file__).parent.parent / "jarvis_home" / "CLAUDE.md").read_text()
+    return (Path(__file__).parent.parent / "jarvis_home" / "CLAUDE.md").read_text(encoding="utf-8")
 
 
 def _sha(text: str) -> str:
@@ -88,8 +88,8 @@ def _sha(text: str) -> str:
 def test_a_missing_persona_is_seeded_and_the_seed_is_recorded(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     assert dp.sync_persona() == "seeded"
-    assert dp.persona_path().read_text() == _template_text()
-    record = json.loads(dp.persona_seed_path().read_text())
+    assert dp.persona_path().read_text(encoding="utf-8") == _template_text()
+    record = json.loads(dp.persona_seed_path().read_text(encoding="utf-8"))
     assert record["sha256"] == _sha(_template_text()), (
         "without the record there is no telling an unedited file from an "
         "edited one at the next upgrade")
@@ -101,12 +101,12 @@ def test_an_unedited_older_persona_is_brought_up_to_date(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_persona()
     old = "# JARVIS\n\nAn older shipped persona.\n"
-    dp.persona_path().write_text(old)
-    dp.persona_seed_path().write_text(json.dumps({"sha256": _sha(old)}))
+    dp.persona_path().write_text(old, encoding="utf-8")
+    dp.persona_seed_path().write_text(json.dumps({"sha256": _sha(old)}), encoding="utf-8")
 
     assert dp.sync_persona() == "updated"
-    assert dp.persona_path().read_text() == _template_text()
-    assert json.loads(dp.persona_seed_path().read_text())["sha256"] == \
+    assert dp.persona_path().read_text(encoding="utf-8") == _template_text()
+    assert json.loads(dp.persona_seed_path().read_text(encoding="utf-8"))["sha256"] == \
         _sha(_template_text()), "the new text is now the thing we compare against"
 
 
@@ -115,11 +115,11 @@ def test_an_edited_persona_is_never_overwritten_and_names_both_files(
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_persona()
     mine = _template_text() + "\n\nAlways call me Captain.\n"
-    dp.persona_path().write_text(mine)
+    dp.persona_path().write_text(mine, encoding="utf-8")
 
     with caplog.at_level("WARNING"):
         assert dp.sync_persona() == "kept"
-    assert dp.persona_path().read_text() == mine, "the user's words survive"
+    assert dp.persona_path().read_text(encoding="utf-8") == mine, "the user's words survive"
     said = caplog.text
     assert str(dp.persona_path()) in said and str(dp.persona_template_path()) in said, \
         "a warning that names neither file cannot be acted on"
@@ -142,7 +142,7 @@ def test_a_current_persona_with_no_record_is_recorded_not_warned_about(
     dp.persona_seed_path().unlink()
     with caplog.at_level("WARNING"):
         assert dp.sync_persona() == "current"
-    assert json.loads(dp.persona_seed_path().read_text())["sha256"] == \
+    assert json.loads(dp.persona_seed_path().read_text(encoding="utf-8"))["sha256"] == \
         _sha(_template_text())
     assert "edited" not in caplog.text.lower()
 
@@ -156,12 +156,12 @@ def test_first_run_updates_a_persona_it_can_prove_is_a_shipped_template(
     dp = _fresh(monkeypatch, tmp_path)
     old = "# JARVIS\n\nThe persona as it shipped in some earlier release.\n"
     dp.brain_home().mkdir(parents=True, exist_ok=True)
-    dp.persona_path().write_text(old)
+    dp.persona_path().write_text(old, encoding="utf-8")
     monkeypatch.setattr(dp, "KNOWN_TEMPLATE_HASHES", frozenset({_sha(old)}))
 
     assert dp.sync_persona() == "updated"
-    assert dp.persona_path().read_text() == _template_text()
-    assert json.loads(dp.persona_seed_path().read_text())["sha256"] == \
+    assert dp.persona_path().read_text(encoding="utf-8") == _template_text()
+    assert json.loads(dp.persona_seed_path().read_text(encoding="utf-8"))["sha256"] == \
         _sha(_template_text())
 
 
@@ -171,10 +171,10 @@ def test_first_run_keeps_a_persona_it_cannot_recognise(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     mine = "# JARVIS\n\nRules I wrote myself before the upgrade.\n"
     dp.brain_home().mkdir(parents=True, exist_ok=True)
-    dp.persona_path().write_text(mine)
+    dp.persona_path().write_text(mine, encoding="utf-8")
 
     assert dp.sync_persona() == "kept"
-    assert dp.persona_path().read_text() == mine
+    assert dp.persona_path().read_text(encoding="utf-8") == mine
 
 
 def test_an_unreadable_record_is_treated_as_no_record(monkeypatch, tmp_path):
@@ -183,11 +183,11 @@ def test_an_unreadable_record_is_treated_as_no_record(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_persona()
     mine = "# JARVIS\n\nMy own rules.\n"
-    dp.persona_path().write_text(mine)
-    dp.persona_seed_path().write_text("{not json at all")
+    dp.persona_path().write_text(mine, encoding="utf-8")
+    dp.persona_seed_path().write_text("{not json at all", encoding="utf-8")
 
     assert dp.sync_persona() == "kept"
-    assert dp.persona_path().read_text() == mine
+    assert dp.persona_path().read_text(encoding="utf-8") == mine
 
 
 def test_ensure_brain_home_runs_the_sync(monkeypatch, tmp_path):
@@ -196,10 +196,10 @@ def test_ensure_brain_home_runs_the_sync(monkeypatch, tmp_path):
     dp = _fresh(monkeypatch, tmp_path)
     dp.sync_persona()
     old = "# JARVIS\n\nolder\n"
-    dp.persona_path().write_text(old)
-    dp.persona_seed_path().write_text(json.dumps({"sha256": _sha(old)}))
+    dp.persona_path().write_text(old, encoding="utf-8")
+    dp.persona_seed_path().write_text(json.dumps({"sha256": _sha(old)}), encoding="utf-8")
     dp.ensure_brain_home()
-    assert dp.persona_path().read_text() == _template_text()
+    assert dp.persona_path().read_text(encoding="utf-8") == _template_text()
 
 
 def test_every_template_this_project_has_shipped_is_listed(monkeypatch, tmp_path):
@@ -227,9 +227,64 @@ def test_every_template_this_project_has_shipped_is_listed(monkeypatch, tmp_path
         digest = hashlib.sha256(blob).hexdigest()
         if digest not in dp.KNOWN_TEMPLATE_HASHES:
             missing[digest] = commit[:8]
-    here = hashlib.sha256(dp.persona_template_path().read_bytes()).hexdigest()
+    here = hashlib.sha256(     # as data_paths hashes it: CRLF is not an edit
+        dp.persona_template_path().read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     if here not in dp.KNOWN_TEMPLATE_HASHES:
         missing[here] = "the working tree"
     assert not missing, (
         "add these to data_paths.KNOWN_TEMPLATE_HASHES: "
         + ", ".join(f"{d} ({c})" for d, c in missing.items()))
+
+
+# --- the user's own words live in LOCAL.md, so CLAUDE.md can stay ours ------
+#
+# Measured live on 2026-09-22: five lines appended to the brain's CLAUDE.md
+# made its hash stop matching the seed record, so `sync_persona` took the
+# "kept" branch on every start, and every persona change shipped after that
+# — the memory instructions, the injection rules — was inert on that
+# install, announced only by a log line. The design could not hold both a
+# user's additions AND auto-upgrade in one file. Now it does not have to.
+
+def test_the_local_persona_is_seeded_once_and_never_rewritten(monkeypatch, tmp_path):
+    dp = _fresh(monkeypatch, tmp_path)
+    dp.ensure_brain_home()
+    local = dp.local_persona_path()
+
+    assert local.name == "LOCAL.md"
+    assert local.is_file()
+    assert "CLAUDE.md" in local.read_text(encoding="utf-8"), "it explains itself"
+
+    local.write_text("Always call him Captain.\n", encoding="utf-8")
+    dp.ensure_brain_home()
+    assert local.read_text(encoding="utf-8") == "Always call him Captain.\n"
+
+
+def test_the_shipped_persona_imports_the_local_file():
+    assert "@LOCAL.md" in _template_text()
+
+
+def test_persona_status_is_a_pure_read_that_names_the_four_states(monkeypatch, tmp_path):
+    dp = _fresh(monkeypatch, tmp_path)
+    assert dp.persona_status() == "missing"
+    assert not dp.persona_path().exists(), "asking must not seed"
+
+    dp.sync_persona()
+    assert dp.persona_status() == "current"
+
+    old = "# JARVIS\n\nAn older shipped persona.\n"
+    dp.persona_path().write_text(old, encoding="utf-8")
+    dp.persona_seed_path().write_text(json.dumps({"sha256": _sha(old)}), encoding="utf-8")
+    assert dp.persona_status() == "unedited"
+
+    dp.persona_path().write_text(_template_text() + "\n## Mine\nextra\n", encoding="utf-8")
+    assert dp.persona_status() == "edited"
+
+
+def test_an_edited_persona_warning_points_at_the_local_file(monkeypatch, tmp_path, caplog):
+    dp = _fresh(monkeypatch, tmp_path)
+    dp.sync_persona()
+    dp.persona_path().write_text(_template_text() + "\n\nAlways call me Captain.\n",
+                                 encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert dp.sync_persona() == "kept"
+    assert "LOCAL.md" in caplog.text, "the warning must say where the words go instead"

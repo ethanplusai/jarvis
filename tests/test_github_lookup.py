@@ -107,6 +107,9 @@ def gh(monkeypatch):
 
     fake = _Gh()
     monkeypatch.setattr(gh_lookup, "_run_gh", fake.run)
+    # `look_up` asks whether gh exists before it reaches the seam above;
+    # the answer must not depend on what this machine has installed.
+    monkeypatch.setattr(gh_lookup, "gh_path", lambda: "gh")
     # The login is looked up once and cached; never let a test hit the real one.
     fake.when(lambda a: a[:2] == ["api", "user"], out="tonystark\n")
     return gh_lookup, fake
@@ -286,8 +289,30 @@ def _fake_gh(tmp_path, body="print('[]')"):
         f"#!{sys.executable}\n"
         "import json, sys, os\n"
         "open(os.environ['ARGV_LOG'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        f"{body}\n")
+        f"{body}\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+def _use_fake_gh(monkeypatch, tmp_path, body="print('[]')"):
+    """Point `gh_lookup` at a fake `gh`, on every platform.
+
+    POSIX runs the script through its shebang. Windows cannot execute a
+    script at all, so there the exec seam is wrapped to hand the very same
+    argv to the interpreter: still an argument list, still no shell.
+    """
+    import gh_lookup
+    script = _fake_gh(tmp_path, body)
+    monkeypatch.setattr(gh_lookup, "gh_path", lambda: str(script))
+    if sys.platform == "win32":
+        real = asyncio.create_subprocess_exec
+
+        async def via_interpreter(program, *args, **kw):
+            if program == str(script):
+                return await real(sys.executable, str(script), *args, **kw)
+            return await real(program, *args, **kw)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", via_interpreter)
     return script
 
 
@@ -301,7 +326,7 @@ async def test_the_repository_name_is_an_argument_and_never_a_shell_string(
     importlib.reload(gh_lookup)
     log = tmp_path / "argv.log"
     monkeypatch.setenv("ARGV_LOG", str(log))
-    monkeypatch.setattr(gh_lookup, "gh_path", lambda: str(_fake_gh(tmp_path)))
+    _use_fake_gh(monkeypatch, tmp_path)
 
     # The marker lives in tmp_path, not /tmp: a leftover from an earlier run
     # would otherwise fail this test for a reason that is not this test's.
@@ -309,7 +334,7 @@ async def test_the_repository_name_is_an_argument_and_never_a_shell_string(
     nasty = f"arcreactor; touch {marker} && echo `whoami`"
     await gh_lookup.look_up(nasty)
 
-    lines = [json.loads(x) for x in log.read_text().splitlines()]
+    lines = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
     assert lines, "the fake gh was never run"
     assert not marker.exists(), "a shell ran"
     flat = [arg for line in lines for arg in line]
@@ -335,12 +360,12 @@ async def test_a_search_query_can_never_be_read_as_a_flag(tmp_path, monkeypatch)
     importlib.reload(gh_lookup)
     log = tmp_path / "argv.log"
     monkeypatch.setenv("ARGV_LOG", str(log))
-    monkeypatch.setattr(gh_lookup, "gh_path", lambda: str(_fake_gh(tmp_path)))
+    _use_fake_gh(monkeypatch, tmp_path)
 
     query = "--json=/etc/passwd arcreactor"
     await gh_lookup.look_up(query)
 
-    searches = [json.loads(x) for x in log.read_text().splitlines()
+    searches = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()
                 if json.loads(x)[:2] == ["search", "repos"]]
     assert searches, "no search was run"
     for argv in searches:
@@ -355,12 +380,45 @@ async def test_a_gh_that_never_returns_is_killed(tmp_path, monkeypatch):
     importlib.reload(gh_lookup)
     monkeypatch.setenv("ARGV_LOG", str(tmp_path / "argv.log"))
     monkeypatch.setattr(gh_lookup, "GH_CALL_TIMEOUT", 0.3)
-    monkeypatch.setattr(gh_lookup, "gh_path",
-                        lambda: str(_fake_gh(tmp_path, "import time; time.sleep(30)")))
+    pids = tmp_path / "pids.log"
+    _use_fake_gh(monkeypatch, tmp_path,
+                "import os,time\n"
+                f"with open({str(pids)!r}, 'a', encoding='utf-8') as f: f.write(str(os.getpid())+'\\n')\n"
+                "time.sleep(30)")
 
     found = await asyncio.wait_for(gh_lookup.look_up("killian/ArcReactor"), 10.0)
     assert found.repo is None
     assert found.problem in ("timeout", "unavailable")
+    import procs
+    assert pids.exists()
+    assert all(not procs.pid_alive(int(pid)) for pid in pids.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gh_call_reaps_process(tmp_path, monkeypatch):
+    import gh_lookup
+    import procs
+    monkeypatch.setenv("ARGV_LOG", str(tmp_path / "argv.log"))
+    marker = tmp_path / "pid"
+    _use_fake_gh(monkeypatch, tmp_path,
+                "import os,time,pathlib\n"
+                f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                "time.sleep(30)")
+    task = asyncio.create_task(gh_lookup._run_gh(["--version"], 30))
+    async def started():
+        while not marker.exists() or not marker.read_text(encoding="utf-8"):
+            await asyncio.sleep(.01)
+        return int(marker.read_text(encoding="utf-8"))
+    try:
+        pid = await asyncio.wait_for(started(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not procs.pid_alive(pid)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 # --- the tool JARVIS actually holds ----------------------------------------
@@ -558,7 +616,7 @@ def test_the_brain_is_told_to_take_the_fast_path_and_to_fill_the_wait():
     first, then do the slow thing — what he writes is spoken as he writes it,
     so it fills the wait rather than following it."""
     guidance = Path(__file__).resolve().parents[1] / "jarvis_home" / "CLAUDE.md"
-    text = guidance.read_text()
+    text = guidance.read_text(encoding="utf-8")
     assert "`github_repo`, never a search" in text
     assert "BEFORE you look" in text
     assert "Looking now, sir." in text
