@@ -140,7 +140,7 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
 
 - **macOS, or Windows 10/11.** On macOS, terminal control, window listing,
   screenshots and notifications all go through AppleScript. Windows runs
-  everything except screenshots, window listing and keypresses into other
+  everything except reading the Chrome tab and keypresses into other
   terminals; see [Windows](#windows). There is no Linux path today.
 - **Google Chrome.** Not a preference — a constraint. The microphone uses the
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
@@ -229,8 +229,10 @@ that the port has not moved.
 ## Windows
 
 JARVIS runs on Windows 10 and 11. The brain, runs, the dashboard, session
-watching and steering, and his voice all work. What does not work yet is
-everything that needed AppleScript to see or touch other windows.
+watching and steering, his voice, and his sight (the window list and
+screenshots) all work. What does not work yet is the two things that reach
+inside another app: reading Chrome's tab, and pressing keys in another
+console.
 
 **Setup, in PowerShell.** The same steps as above, with three differences:
 
@@ -289,7 +291,9 @@ him, because his ears are the Chrome tab.
 | Opening a terminal, browser, or editor | Works: a new `cmd` console; the browser you name, else Edge; VS Code, else Notepad (File Explorer for a folder) |
 | Notifications when no tab is open | Works, as Windows toast notifications |
 | Answering a permission prompt by pressing a key | Not offered: there is no keypress bridge into another console |
-| Screenshots, listing windows, reading the Chrome tab | Not yet: these were AppleScript and `screencapture` |
+| Listing windows ("what's on my screen") | Works: every visible window, front to back, with the front app marked |
+| Screenshots ("look at my screen") | Works: one display (primary first, then left to right), shrunk in memory, never written to disk. A locked desk or UAC prompt is refused as blank |
+| Reading the Chrome tab | Not yet: there is no scripting bridge into Chrome on Windows |
 
 ## Connections: bring your own
 
@@ -386,7 +390,7 @@ invariants hold throughout it:
 | Communication | WebSocket — JSON messages, base64 MP3 audio |
 | Brain | One long-lived `claude -p` process, Sonnet by default, on your subscription |
 | Voice | Fish Audio, one request per sentence |
-| System | AppleScript — Terminal, Chrome, notifications, screenshots (macOS); consoles and toasts (Windows) |
+| System | AppleScript — Terminal, Chrome, notifications, screenshots (macOS); consoles, toasts, and user32/gdi32 for windows and screenshots (Windows) |
 | Storage | SQLite for runs and usage; plain Markdown for memory |
 
 ### Key files

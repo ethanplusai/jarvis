@@ -117,6 +117,14 @@ def _bmp(pixels: bytes, bpp: int = 24) -> bytes:
     return bytes(header) + pixels
 
 
+@pytest.fixture(autouse=True)
+def _the_macos_half(monkeypatch):
+    """Everything in this file drives the macOS half through its `_run` seam.
+    On Windows `screen` hands both calls to `screen_windows` instead, which
+    test_screen_windows.py covers."""
+    monkeypatch.setattr(real_screen, "_WINDOWS", False)
+
+
 @pytest.fixture
 def runner(monkeypatch):
     fake = _Runner()

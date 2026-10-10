@@ -418,11 +418,10 @@ def _check_screen_recording_sync() -> Check:
     not ask for, at every boot, is precisely what this capability must not do.
     """
     if sys.platform == "win32":
-        # Windows asks no permission for this. What it lacks today is the
-        # capture itself, which screen.py says when it is asked.
+        # Windows asks no permission for this. A locked desk still captures
+        # as black, which screen_windows refuses at capture time.
         return Check(name="screen_recording", status=STATUS_OK,
-                     message="No permission to grant on Windows; screen "
-                             "capture is not ported yet.")
+                     message="No permission to grant on Windows.")
     try:
         granted = screen.screen_recording_granted()
     except Exception as e:  # the module must never take startup down
