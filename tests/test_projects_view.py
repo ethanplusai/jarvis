@@ -213,8 +213,8 @@ def test_repo_summary_says_the_directory_is_gone(tmp_path):
 
 
 def test_repo_summary_reuses_repo_read_overview(tmp_path):
-    (tmp_path / "README.md").write_text("# demo\n\nA small tool.\n")
-    (tmp_path / "main.py").write_text("print('hi')\n")
+    (tmp_path / "README.md").write_text("# demo\n\nA small tool.\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
     out = pv.repo_summary(str(tmp_path), "demo")
     assert out["exists"] is True
     assert "demo" in out["headline"]
@@ -234,13 +234,13 @@ def test_build_summary_with_a_missing_directory():
 def test_build_summary_reports_spec_and_progress(tmp_path):
     spec_dir = tmp_path / "docs" / "superpowers" / "specs"
     spec_dir.mkdir(parents=True)
-    (spec_dir / "2026-01-01-thing-design.md").write_text("# Thing\n")
+    (spec_dir / "2026-01-01-thing-design.md").write_text("# Thing\n", encoding="utf-8")
 
     plan_dir = tmp_path / "docs" / "superpowers" / "plans"
     plan_dir.mkdir(parents=True)
     (plan_dir / "plan.md").write_text(
         "## Task 1: First\n- [x] step one\n- [ ] step two\n"
-        "## Task 2: Second\n- [ ] step one\n")
+        "## Task 2: Second\n- [ ] step one\n", encoding="utf-8")
 
     out = pv.build_summary(str(tmp_path))
     assert out["has_spec"] is True

@@ -29,7 +29,11 @@ import os
 import stat
 from pathlib import Path
 
+import sys
 import pytest
+
+_NEEDS_POSIX_MODES = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows has no POSIX mode bits to check")
 
 SECRET = "sk-live-notion-token-do-not-read-me"
 
@@ -62,18 +66,18 @@ def wired(monkeypatch, tmp_path):
     home = jarvis_memory.ensure_layout()
     (home / "mcp.json").write_text(json.dumps(
         {"mcpServers": {"notion": {"command": "npx",
-                                   "env": {"NOTION_TOKEN": SECRET}}}}))
+                                   "env": {"NOTION_TOKEN": SECRET}}}}), encoding="utf-8")
     (home / "connections.json").write_text(json.dumps(
-        {"notion": {"command": "npx", "env": {"NOTION_TOKEN": SECRET}}}))
-    (home / "MEMORY.md").write_text(f"- [a memory](x.md) — {SECRET}\n")
-    (data_paths.memory_dir() / "x.md").write_text(f"# x\n\n{SECRET}\n")
-    (data_paths.journal_dir() / "j.md").write_text(f"# j\n\n{SECRET}\n")
-    (data_paths.projects_dir() / "p.md").write_text(f"# p\n\n{SECRET}\n")
+        {"notion": {"command": "npx", "env": {"NOTION_TOKEN": SECRET}}}), encoding="utf-8")
+    (home / "MEMORY.md").write_text(f"- [a memory](x.md) — {SECRET}\n", encoding="utf-8")
+    (data_paths.memory_dir() / "x.md").write_text(f"# x\n\n{SECRET}\n", encoding="utf-8")
+    (data_paths.journal_dir() / "j.md").write_text(f"# j\n\n{SECRET}\n", encoding="utf-8")
+    (data_paths.projects_dir() / "p.md").write_text(f"# p\n\n{SECRET}\n", encoding="utf-8")
 
     # Something ordinary in the same project, so a refusal that refuses
     # everything would be visible.
-    (project / "README.md").write_text("# JARVIS\n\nA voice assistant.\n")
-    (project / "server.py").write_text("PORT = 8340\n")
+    (project / "README.md").write_text("# JARVIS\n\nA voice assistant.\n", encoding="utf-8")
+    (project / "server.py").write_text("PORT = 8340\n", encoding="utf-8")
 
     monkeypatch.setattr(server_module, "cached_projects",
                         [{"name": "jarvis-repo", "path": str(project)}])
@@ -156,8 +160,8 @@ def test_the_wall_is_a_path_and_not_a_name(wired, tmp_path):
     import repo_read
     other = tmp_path / "somebody-elses-project"
     (other / "config").mkdir(parents=True)
-    (other / "config" / "mcp.json").write_text("{}\n")
-    (other / "MEMORY.md").write_text("# notes\n")
+    (other / "config" / "mcp.json").write_text("{}\n", encoding="utf-8")
+    (other / "MEMORY.md").write_text("# notes\n", encoding="utf-8")
 
     for name in ("config/mcp.json", "MEMORY.md"):
         assert repo_read.resolve_within(other, name).exists(), name
@@ -180,6 +184,7 @@ def test_a_symlink_into_the_brain_home_is_refused(wired, tmp_path):
 
 # --- the file the credentials are copied INTO ----------------------------
 
+@_NEEDS_POSIX_MODES
 def test_the_generated_mcp_config_is_not_world_readable(wired):
     """`_write_mcp_config` copies every `env` block out of the user's
     `connections.json` — their Notion token, their GitHub token — into
@@ -192,13 +197,14 @@ def test_the_generated_mcp_config_is_not_world_readable(wired):
     assert mode == 0o600, oct(mode)
 
 
+@_NEEDS_POSIX_MODES
 def test_a_pre_existing_mcp_config_has_its_mode_forced_back(wired):
     """Adopting a file somebody else created with looser permissions would
     keep their read access — the same rule `ensure_tool_token` already
     applies to the token."""
     server, _project, dp = wired
     path = dp.brain_home() / "mcp.json"
-    path.write_text("{}")
+    path.write_text("{}", encoding="utf-8")
     os.chmod(path, 0o644)
     server._write_mcp_config(dp.brain_home())
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
@@ -223,8 +229,8 @@ async def test_open_in_browser_refuses_a_private_file(monkeypatch, tmp_path):
 
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
-    (home / ".ssh" / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
-    (home / "index.html").write_text("<h1>fine</h1>")
+    (home / ".ssh" / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n", encoding="utf-8")
+    (home / "index.html").write_text("<h1>fine</h1>", encoding="utf-8")
 
     opened: list[str] = []
 
@@ -414,7 +420,7 @@ async def test_search_refuses_every_spelling_of_the_root(wired, monkeypatch):
 def brain_home_as_project(wired, monkeypatch):
     server, _project, dp = wired
     home = dp.brain_home()
-    (home / "CLAUDE.md").write_text("# persona\n")
+    (home / "CLAUDE.md").write_text("# persona\n", encoding="utf-8")
     monkeypatch.setattr(server, "cached_projects",
                         [{"name": "jarvis-brain", "path": str(home)}])
     return server, home
@@ -479,7 +485,7 @@ def test_somebody_elses_data_directory_is_not_jarviss(wired, tmp_path):
     import repo_read
     other = tmp_path / "not-jarvis"
     (other / "data").mkdir(parents=True)
-    (other / "data" / "notes.md").write_text("# ordinary\n")
+    (other / "data" / "notes.md").write_text("# ordinary\n", encoding="utf-8")
     assert repo_read.resolve_within(other, "data/notes.md").exists()
 
 
@@ -513,3 +519,55 @@ def test_the_kernel_decides_where_the_spelling_cannot(wired):
         [p.casefold() for p in real.parts], (aliased, real)
     assert repo_read.private_reason(aliased), aliased
     assert repo_read.private_reason(aliased / "jarvis" / "mcp.json"), aliased
+
+
+# --- the brain's own transcripts are JARVIS's data too ----------------------
+#
+# The brain is a Claude Code child with `cwd=brain_home`, so the CLI writes
+# every one of its conversations, verbatim, to
+# `<config root>/projects/<encoded brain home>/<session>.jsonl`. Measured
+# live: 66 files, 25 MB — outside `data/`, so outside the one private root,
+# and readable by `read_file` from any project whose tree reaches it.
+
+def _brain_transcript_dir(root: Path) -> Path:
+    import session_watch
+    return root / "projects" / session_watch.encode_cwd(session_watch.brain_cwd())
+
+
+def test_the_brains_own_transcripts_are_private(wired, tmp_path, monkeypatch):
+    import repo_read
+    root = tmp_path / "claude-config"
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", str(root))
+
+    assert repo_read.private_reason(_brain_transcript_dir(root) / "abc.jsonl")
+    assert repo_read.private_reason(_brain_transcript_dir(root))
+
+
+def test_another_projects_transcripts_are_not(wired, tmp_path, monkeypatch):
+    """The wall is the brain's own directory, not every transcript on the
+    machine: `session_detail` reading a user's session is a feature."""
+    import repo_read
+    root = tmp_path / "claude-config"
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", str(root))
+
+    assert repo_read.private_reason(root / "projects" / "C--dev-other" / "abc.jsonl") is None
+
+
+def test_every_default_config_root_is_covered(wired):
+    import repo_read
+    import session_watch
+    for raw in session_watch.DEFAULT_ROOTS:
+        path = _brain_transcript_dir(Path(raw).expanduser()) / "abc.jsonl"
+        assert repo_read.private_reason(path), raw
+
+
+def test_the_private_roots_follow_the_config_dirs_variable(wired, tmp_path, monkeypatch):
+    """Cached, so the cache key has to include what the roots depend on."""
+    import repo_read
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", str(first))
+    assert repo_read.private_reason(_brain_transcript_dir(first) / "a.jsonl")
+    assert repo_read.private_reason(_brain_transcript_dir(second) / "a.jsonl") is None
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", str(second))
+    assert repo_read.private_reason(_brain_transcript_dir(second) / "a.jsonl")

@@ -437,7 +437,13 @@ def list_documents(project_path: str) -> list[dict]:
             meta = _document_meta(project_path, path, kind)
             if meta is not None:
                 out.append(meta)
-    out.sort(key=lambda d: d["modified"], reverse=True)
+    # Newest first. Two files can share a modification time — Windows
+    # stamps writes at the system-timer tick, so a plan written right after
+    # its spec ties with it more often than not — and a tie is broken the
+    # way the files are made: a plan comes from a spec, so it is the later
+    # one; then by path, so the answer never depends on directory order.
+    out.sort(key=lambda d: (d["modified"], d["kind"] == "plan", d["path"]),
+             reverse=True)
     return out
 
 

@@ -4,6 +4,49 @@
   box-sizing: border-box;
 }
 
+#conversation {
+  position: fixed; z-index: 15; right: 24px; bottom: 24px;
+  width: min(420px, calc(100vw - 48px)); max-height: 65vh;
+  display: flex; flex-direction: column; gap: 12px; padding: 20px;
+  background: rgba(8, 16, 28, .94); color: #d7e4f1;
+  border: 1px solid #23384e; border-radius: 12px;
+  font-size: 14px; backdrop-filter: blur(12px);
+}
+#conversation h2 { font-size: 16px; font-weight: 500; }
+/* The header is the handle: drag it, focus it, minimise from it. */
+#conversation-head { display: flex; align-items: center; gap: 10px; margin: -8px -8px 0; padding: 8px; border-radius: 8px; cursor: grab; user-select: none; touch-action: none; }
+#conversation-head:focus-visible { outline: 2px solid #0ea5e9; outline-offset: 2px; }
+#conversation.dragging { user-select: none; }
+#conversation.dragging #conversation-head { cursor: grabbing; }
+#conversation #conversation-toggle { margin-left: auto; padding: 4px 10px; font-size: 12px; }
+#conversation-body { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+/* `display: flex` above outranks the UA's `[hidden]`; say it explicitly, or
+   Minimise flips the attribute and hides nothing (the browser test caught it). */
+#conversation-body[hidden], #conversation.minimized #conversation-body { display: none; }
+#conversation.minimized { gap: 0; padding: 10px 16px; width: auto; min-width: 240px; max-height: none; }
+.message-meta { display: flex; gap: 8px; align-items: baseline; color: #9cbcd5; font-size: 12px; }
+.message-meta time { font-variant-numeric: tabular-nums; }
+.message-meta .dot { opacity: .5; }
+#conversation .message-delete { margin-left: auto; padding: 2px 8px; font-size: 11px; opacity: .7; }
+#conversation .message-delete:hover { opacity: 1; }
+#conversation .message-delete.armed { opacity: 1; color: #fff; background: #5a2626; border-color: #b04a4a; }
+#diagnostics { margin: auto; width: min(720px, 94vw); max-height: 85vh; overflow: auto; padding: 28px; background: #0b1522; color: #d7e4f1; border: 1px solid #35536e; border-radius: 12px; }
+#diagnostics::backdrop { background: #000a; }
+#diagnostics p { margin: 12px 0; line-height: 1.5; }
+#diagnostics h3 { margin-top: 24px; }
+#diagnostics button { margin: 8px 8px 0 0; padding: 10px 14px; background: #17364c; color: white; border: 1px solid #35536e; border-radius: 5px; cursor: pointer; }
+#voice-connection { color: #9cbcd5; font-size: 12px; }
+#conversation-log { overflow-y: auto; min-height: 40px; max-height: 35vh; }
+.message { padding: 12px 0; border-bottom: 1px solid #23384e; }
+.message p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; margin: 6px 0; }
+.message small { color: #9cbcd5; }
+#conversation button { padding: 7px 12px; border: 1px solid #35536e; border-radius: 5px; background: #152a3c; color: #e6f3ff; cursor: pointer; }
+#conversation button:disabled { opacity: .5; cursor: default; }
+#composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+#composer label { grid-column: 1 / -1; font-size: 12px; }
+#message-input { width: 100%; resize: vertical; min-height: 52px; max-height: 160px; color: #e6f3ff; background: #090f19; border: 1px solid #35536e; border-radius: 5px; padding: 8px; font: inherit; }
+@media (max-width: 650px) { #conversation { right: 12px; bottom: 12px; width: calc(100vw - 24px); max-height: 48vh; } #conversation-log { max-height: 20vh; } }
+
 html, body {
   width: 100%;
   height: 100%;
@@ -250,6 +293,7 @@ html, body {
   color: rgba(255, 255, 255, 0.3);
 }
 
+.settings-field .settings-hint { margin-top: 6px; font-size: 12px; line-height: 1.45; color: #9cbcd5; }
 .settings-field {
   margin-bottom: 14px;
 }
@@ -270,6 +314,7 @@ html, body {
 
 .settings-field input[type="text"],
 .settings-field input[type="password"],
+.settings-field input[type="tel"],
 .settings-field select,
 .settings-field textarea {
   width: 100%;
@@ -309,6 +354,30 @@ html, body {
   font-size: 11px;
   line-height: 1.4;
   color: rgba(255, 255, 255, 0.3);
+}
+
+/* Pairing: what the owner must read and type on his phone, so it is not a
+   hint — full-contrast text, and the code itself large on a line of its own. */
+.settings-pairing {
+  margin: 10px 0 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.settings-pairing:empty {
+  margin: 0;
+}
+
+.pairing-code {
+  display: block;
+  margin: 8px 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  color: #00d4ff;
+  user-select: all;
 }
 
 .settings-restart-notice {
@@ -352,6 +421,23 @@ html, body {
   margin-top: 8px;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A checkbox that rides beside a button ("as a voice note too"). */
+.settings-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9cbcd5;
+}
+
+.settings-inline input[type="checkbox"] {
+  width: auto;
+  margin: 0;
 }
 
 /* Status dots */

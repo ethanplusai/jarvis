@@ -130,11 +130,28 @@ def test_retry_terminal_run_spawns(client, status, monkeypatch):
 
     monkeypatch.setattr(server.run_executor_instance, "spawn", fake_spawn)
     run_id = store.create_run("build", "proj", "/tmp/proj", "voice")
-    store.update_run(run_id, status=status)
+    store.update_run(run_id, status=status, started_at=1)
 
     r = c.post(f"/api/runs/{run_id}/retry")
     assert r.status_code == 200
     assert spawned[0][4] == run_id, "the retry must fork from the original"
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_retry_preserves_configuration_and_only_resumes_started_runs(client, monkeypatch, started):
+    c, store = client
+    import server
+    captured = {}
+    async def spawn(*args, **kwargs):
+        captured.update(kwargs)
+        return "new-run"
+    monkeypatch.setattr(server.run_executor_instance, "spawn", spawn)
+    run_id = store.create_run("p", "p", "/tmp/p", "api")
+    store.update_run(run_id, status="failed", requested_model="opus", timeout_sec=123,
+                     started_at=1 if started else None)
+    assert c.post(f"/api/runs/{run_id}/retry").status_code == 200
+    assert captured == {"model": "opus", "timeout_sec": 123,
+                        "resume_from": run_id if started else None}
 
 
 def test_stats_shape(client):

@@ -67,7 +67,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import session_watch
@@ -158,8 +158,13 @@ def _tokens_from(usage) -> Tokens:
 # `fromisoformat` accepts that string happily, so catching only its ValueError
 # left the second call unguarded. Two years of slack at each end covers every
 # UTC offset without needing to know the local one.
-_DAY_MIN = datetime(2, 1, 1).timestamp()
-_DAY_MAX = datetime(9997, 1, 1).timestamp()
+#
+# Computed as UTC arithmetic rather than `.timestamp()`: on Windows the C
+# runtime refuses local-time conversion of anything before 1970 (OSError
+# EINVAL), and the two-year slack makes the UTC/local distinction moot.
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_DAY_MIN = (datetime(2, 1, 1, tzinfo=timezone.utc) - _EPOCH_UTC).total_seconds()
+_DAY_MAX = (datetime(9997, 1, 1, tzinfo=timezone.utc) - _EPOCH_UTC).total_seconds()
 
 
 def _epoch(stamp) -> float | None:
@@ -495,7 +500,7 @@ def read_agent_meta(path: Path, cache: Cache) -> dict:
     if hit is not None:
         return hit
     try:
-        body = json.loads(side.read_text())
+        body = json.loads(side.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         body = {}
     if not isinstance(body, dict):

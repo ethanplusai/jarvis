@@ -55,7 +55,7 @@ async def test_a_normal_name_makes_a_directory_a_repo_and_a_readme(root):
     assert target.is_dir()
     assert (target / ".git").exists(), "a project is a git repository"
     assert (target / "README.md").exists()
-    readme = (target / "README.md").read_text()
+    readme = (target / "README.md").read_text(encoding="utf-8")
     assert "chitauri" in readme and "a cost tracker" in readme
 
 
@@ -123,14 +123,14 @@ async def test_a_duplicate_name_refuses_and_leaves_the_directory_alone(root):
     root.mkdir(parents=True)
     existing = root / "chitauri"
     existing.mkdir()
-    (existing / "important.txt").write_text("somebody else's work")
+    (existing / "important.txt").write_text("somebody else's work", encoding="utf-8")
     before = sorted(p.name for p in existing.iterdir())
 
     result = await project_maker.create("chitauri", root=root)
 
     assert result["created"] is False and result["reason"] == "exists"
     assert sorted(p.name for p in existing.iterdir()) == before
-    assert (existing / "important.txt").read_text() == "somebody else's work"
+    assert (existing / "important.txt").read_text(encoding="utf-8") == "somebody else's work"
     assert not (existing / "README.md").exists(), "nothing was written into it"
     assert not (existing / ".git").exists(), "it was not turned into a repo"
 
@@ -138,12 +138,12 @@ async def test_a_duplicate_name_refuses_and_leaves_the_directory_alone(root):
 @pytest.mark.asyncio
 async def test_a_name_taken_by_a_file_is_refused_too(root):
     root.mkdir(parents=True)
-    (root / "chitauri").write_text("not a directory")
+    (root / "chitauri").write_text("not a directory", encoding="utf-8")
 
     result = await project_maker.create("chitauri", root=root)
 
     assert result["created"] is False
-    assert (root / "chitauri").read_text() == "not a directory"
+    assert (root / "chitauri").read_text(encoding="utf-8") == "not a directory"
 
 
 # --- the names that must never become a path -----------------------------
@@ -202,7 +202,10 @@ def test_a_symlinked_root_still_compares_equal(tmp_path):
     real = tmp_path / "real-projects"
     real.mkdir()
     link = tmp_path / "Projects"
-    link.symlink_to(real)
+    try:
+        link.symlink_to(real)
+    except OSError as e:                 # Windows without the privilege
+        pytest.skip(f"cannot create symlinks here ({e})")
 
     target = project_maker.target_for("chitauri", link)
 

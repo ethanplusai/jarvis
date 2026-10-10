@@ -225,7 +225,7 @@ def test_a_conversation_with_no_stamp_at_all_never_outranks_a_stamped_one(tmp_pa
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{pid}.json").write_text(json.dumps({
         "pid": pid, "sessionId": "unstamped", "cwd": "/p/one",
-        "name": "a", "entrypoint": "cli"}))
+        "name": "a", "entrypoint": "cli"}), encoding="utf-8")
     write_transcript(root, cwd="/p/one", session_id="unstamped", last_prompt="x")
     live(root, session_id="stamped", cwd="/p/one", name="b",
          active_ms=NOW_MS - 9 * 3600 * MS)
@@ -300,7 +300,7 @@ def _agent_file(root, cwd, session_id, agent_id, mtime):
     d = root / "projects" / encode(cwd) / session_id / "subagents"
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"agent-{agent_id}.jsonl"
-    p.write_text('{"type":"assistant","isSidechain":true}\n')
+    p.write_text('{"type":"assistant","isSidechain":true}\n', encoding="utf-8")
     os.utime(p, (mtime, mtime))
     return p
 
@@ -339,7 +339,7 @@ def test_the_sidecars_beside_the_transcripts_do_not_eat_the_cap(tmp_path):
         _agent_file(root, "/p/one", "a", f"n{i:04d}", NOW - 4000)
         # The sidecar the CLI writes beside every one of them.
         (root / "projects" / "-p-one" / "a" / "subagents"
-         / f"agent-n{i:04d}.meta.json").write_text('{"agentType":"general-purpose"}')
+         / f"agent-n{i:04d}.meta.json").write_text('{"agentType":"general-purpose"}', encoding="utf-8")
     entries = len(list((root / "projects" / "-p-one" / "a" / "subagents").iterdir()))
     assert entries == 2 * agents
 

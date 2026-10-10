@@ -27,7 +27,7 @@ def test_a_memory_is_one_file_with_a_readable_name(home):
 
     assert path.parent == home / "memory"
     assert path.name == "tony-prefers-postgres-over-sqlite.md"
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "Tony prefers Postgres over SQLite" in text
     assert "chitauri" in text
 
@@ -37,7 +37,7 @@ def test_writing_the_same_title_twice_updates_rather_than_duplicating(home):
     p = jm.write_memory("A fact", "second version")
 
     assert len(jm.list_memories()) == 1
-    assert "second version" in p.read_text()
+    assert "second version" in p.read_text(encoding="utf-8")
 
 
 def test_slugify_makes_a_filename_out_of_anything_sayable(home):
@@ -79,7 +79,7 @@ def test_a_project_note_appends_rather_than_replacing(home):
     jm.write_project_note("chitauri", "Uses WordPress for the marketing site.")
     p = jm.write_project_note("chitauri", "The 301 redirect was fixed on the 2nd.")
 
-    text = p.read_text()
+    text = p.read_text(encoding="utf-8")
     assert "WordPress" in text and "301 redirect" in text
     assert text.index("WordPress") < text.index("301 redirect"), "chronological"
 
@@ -99,7 +99,7 @@ def test_a_journal_entry_is_timestamped_and_labelled(home):
 
     assert p.parent == home / "journal"
     assert p.name.endswith("-rotation.md")
-    assert "Postgres" in p.read_text()
+    assert "Postgres" in p.read_text(encoding="utf-8")
 
 
 def test_the_latest_journal_is_the_most_recent_and_is_bounded(home):
@@ -123,11 +123,11 @@ def test_add_to_index_preserves_hand_written_prose(home):
         "# What JARVIS remembers\n\n"
         "Tony asked me to always check the chitauri staging env before prod.\n\n"
         "- [Old fact](old-fact.md) — some hook\n"
-    )
+    , encoding="utf-8")
 
     jm.add_to_index("New fact", "a hook")
 
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "Tony asked me to always check the chitauri staging env before prod." in text
     assert "- [Old fact](old-fact.md) — some hook" in text
     assert "- [New fact](new-fact.md) — a hook" in text
@@ -142,8 +142,8 @@ def test_two_journal_entries_with_the_same_reason_in_one_minute_both_survive(hom
 
     assert p1 != p2
     assert p1.exists() and p2.exists()
-    assert "first entry" in p1.read_text()
-    assert "second entry" in p2.read_text()
+    assert "first entry" in p1.read_text(encoding="utf-8")
+    assert "second entry" in p2.read_text(encoding="utf-8")
 
     latest = jm.latest_journal()
     assert "second entry" in latest
@@ -276,8 +276,8 @@ def test_two_genuinely_different_titles_that_slugify_identically_both_survive(ho
 
     assert p1 != p2
     assert p1.exists() and p2.exists()
-    assert "first body" in p1.read_text()
-    assert "second body" in p2.read_text()
+    assert "first body" in p1.read_text(encoding="utf-8")
+    assert "second body" in p2.read_text(encoding="utf-8")
     assert len(jm.list_memories()) == 2
 
 
@@ -287,7 +287,7 @@ def test_the_same_title_written_twice_still_produces_one_file(home):
 
     assert p1 == p2
     assert len(jm.list_memories()) == 1
-    text = p1.read_text()
+    text = p1.read_text(encoding="utf-8")
     assert "sqlite" in text
     assert "postgres" not in text
 
@@ -298,7 +298,7 @@ def test_a_title_differing_only_by_apostrophe_or_case_is_the_same_memory(home):
 
     assert p1 == p2
     assert len(jm.list_memories()) == 1
-    text = p1.read_text()
+    text = p1.read_text(encoding="utf-8")
     assert "sqlite" in text
     assert "postgres" not in text
 
@@ -324,7 +324,7 @@ def test_editing_an_old_journal_entrys_mtime_does_not_change_the_latest(home):
 
     # Touch/rewrite the OLDER entry well after the newer one was written.
     time.sleep(0.01)
-    p1.write_text(p1.read_text() + "\ncorrected typo\n")
+    p1.write_text(p1.read_text(encoding="utf-8") + "\ncorrected typo\n", encoding="utf-8")
     future = time.time() + 10_000
     os.utime(p1, (future, future))
 
@@ -335,7 +335,7 @@ def test_editing_an_old_journal_entrys_mtime_does_not_change_the_latest(home):
 
 def test_a_journal_file_with_an_unparseable_name_is_skipped_not_crashed(home):
     jm.write_journal("real entry", reason="shutdown")
-    (data_paths.journal_dir() / "renamed-by-hand.md").write_text("# mystery\n\nstray note\n")
+    (data_paths.journal_dir() / "renamed-by-hand.md").write_text("# mystery\n\nstray note\n", encoding="utf-8")
 
     latest = jm.latest_journal()
     assert "real entry" in latest
@@ -453,3 +453,133 @@ def test_journal_entries_are_ordered_by_the_filename_stamp(home):
 def test_an_empty_journal_folder_carries_nothing(home):
     assert jm.journal_entries() == []
     assert jm.latest_journal() is None
+
+
+# --- the index and the folder can disagree ---------------------------------
+#
+# Measured live on 2026-09-22: four notes in memory/, written outside
+# `tool_remember`, and a MEMORY.md still at its seeded header. The index is
+# the ONLY thing that tells the brain a note exists at boot, so those four
+# were invisible for five days and nothing said so.
+
+def test_a_memory_with_no_index_line_is_reported_as_unindexed(home):
+    jm.write_memory("StarNet station and how to work it", "Start with starnet_status.")
+    jm.write_memory("Tony prefers Postgres", "said during chitauri work")
+    jm.add_to_index("Tony prefers Postgres", "database preference")
+
+    assert [e["slug"] for e in jm.unindexed_memories()] == \
+        ["starnet-station-and-how-to-work-it"]
+
+
+def test_reindex_gives_every_orphan_a_line_the_brain_will_see(home):
+    jm.write_memory("StarNet station and how to work it",
+                    "Start with starnet_status for health, model and roster.\n\n"
+                    "The crew is a sales-pipeline team.")
+
+    result = jm.reindex()
+
+    assert result == {"indexed": ["starnet-station-and-how-to-work-it"],
+                      "left_out": [], "full": False}
+    assert jm.unindexed_memories() == []
+    [entry] = jm.index_entries()
+    assert entry["title"] == "StarNet station and how to work it"
+    assert entry["hook"] == "Start with starnet_status for health, model and roster."
+
+
+def test_reindex_hooks_are_one_short_line_never_the_title_or_the_stamp(home):
+    jm.write_memory("A long story", "x" * 400)
+    jm.reindex()
+    [entry] = jm.index_entries()
+    assert entry["hook"] != "A long story"
+    assert len(entry["hook"]) <= jm.HOOK_MAX_CHARS + 1      # room for the ellipsis
+    assert entry["hook"].endswith("…")
+
+
+def test_reindex_is_idempotent_and_leaves_a_hand_written_hook_alone(home):
+    jm.write_memory("A fact", "first")
+    jm.add_to_index("A fact", "hand-written hook")
+
+    assert jm.reindex() == {"indexed": [], "left_out": [], "full": False}
+    assert jm.index_entries()[0]["hook"] == "hand-written hook"
+
+
+def test_reindex_stops_at_the_cap_and_says_who_was_left_out(home):
+    for i in range(jm.MEMORY_INDEX_MAX):
+        jm.add_to_index(f"Fact number {i}", "hook")
+    jm.write_memory("One more", "body")
+
+    result = jm.reindex()
+
+    assert result == {"indexed": [], "left_out": ["one-more"], "full": True}
+
+
+def test_reindex_never_points_the_index_at_a_file_it_cannot_name(home):
+    """Two titles, one slug (see `write_memory`'s collision rule): the second
+    file is `<slug>-2.md`, and `add_to_index` would name `<slug>.md` for it.
+    An index line that names the wrong file is worse than no line."""
+    prefix = "x" * jm.SLUG_MAX
+    jm.write_memory(prefix + " first topic", "first body")
+    jm.write_memory(prefix + " second topic", "second body")
+
+    result = jm.reindex()
+
+    assert result["indexed"] == [prefix]
+    assert result["left_out"] == [prefix + "-2"]
+    files = set(jm.list_memories())
+    assert all(e["slug"] in files for e in jm.index_entries())
+
+
+# --- project notes are read, not only written ------------------------------
+
+def test_project_history_reads_the_notes_back_oldest_first(home):
+    import re
+    jm.write_project_note("chitauri", "Uses WordPress.")
+    jm.write_project_note("chitauri", "301 fixed.")
+
+    text = jm.project_history("chitauri")
+
+    assert text.index("WordPress") < text.index("301 fixed")
+    assert "_" not in text, "a stamp is said as a date, not as markdown"
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} — Uses WordPress\.", text)
+
+
+def test_project_history_is_none_for_a_project_never_noted(home):
+    assert jm.project_history("nope") is None
+
+
+def test_project_history_keeps_the_newest_lines_when_it_must_cut(home):
+    import re
+    for i in range(200):
+        jm.write_project_note("big", f"note number {i}")
+
+    text = jm.project_history("big", limit=600)
+
+    assert len(text) <= 600
+    assert "note number 199" in text
+    assert not re.search(r"note number 0\b", text)
+
+
+def test_project_names_are_the_titles_of_the_note_files(home):
+    jm.write_project_note("chitauri", "x")
+    jm.write_project_note("Hammer", "y")
+    assert sorted(jm.project_names()) == ["Hammer", "chitauri"]
+
+
+def test_nothing_before_a_fresh_start_is_carried(home):
+    """"Start fresh" leaves a wall in the journal: no later start — this
+    process's, or the next — reads past it."""
+    jm.write_journal("before the fresh start", reason="rotation")
+    jm.write_journal("the wall", reason=jm.FRESH_START_REASON)
+    assert jm.latest_journal() is None
+    jm.write_journal("after it", reason="rotation")
+    assert "after it" in jm.latest_journal()
+    assert jm.is_placeholder_reason(jm.FRESH_START_REASON)
+
+
+
+def test_the_dashboard_marks_what_a_new_brain_will_carry_after_a_fresh_start(home):
+    jm.write_journal("before", reason="rotation")
+    jm.write_journal("the wall", reason=jm.FRESH_START_REASON)
+    assert jm.latest_journal_slug() is None
+    jm.write_journal("after", reason="rotation")
+    assert jm.latest_journal_slug().endswith("-rotation")

@@ -77,10 +77,18 @@ def _blank():
         # forbids a space) was erasing every one of them.
         state="needs_you", voice_name="hammer in Projects, the auth flow one",
         roster_name="hammer",
+        # The roster's `name` made sayable. Set so the sweep drives it as a
+        # foreign field; a None default would leave it out of the list.
+        thread_name="Fix the auth flow",
         needs="input needed", title="a topic", last_prompt="carry on",
         last_text="done", recent_tools=["Bash"], started=0.0, since=0.0,
         steerable=True, socket_path="/tmp/cc-socks/s1.sock",
-        origin="terminal", primary_reason="only one")
+        origin="terminal", primary_reason="only one",
+        # Both are roster strings: `entrypoint` verbatim, and the reason a
+        # program's session is paused on its host. Set here so the class
+        # tests below drive a hostile value through every path for them too
+        # — a None default would leave `waiting_on_host` out of the list.
+        entrypoint="sdk-ts", waiting_on_host="permission prompt")
 
 
 def _session(field: str):
@@ -107,7 +115,8 @@ def test_the_field_list_is_derived_from_the_real_session_class():
     """If this ever shrinks, every parametrised test below passes vacuously."""
     assert len(FOREIGN_FIELDS) >= 9, FOREIGN_FIELDS
     for expected in ("needs", "recent_tools", "state", "voice_name", "title",
-                     "last_prompt", "last_text", "project", "cwd"):
+                     "last_prompt", "last_text", "project", "cwd", "origin",
+                     "entrypoint", "waiting_on_host"):
         assert expected in FOREIGN_FIELDS, expected
 
 
@@ -158,7 +167,7 @@ def test_the_detailed_listing_is_only_ever_used_wrapped(server):
     with no escaping of its own, which is fine ONLY because every caller
     puts the whole listing inside a block. Checked statically, so a caller
     added later has to make that decision on purpose."""
-    tree = ast.parse(SERVER.read_text())
+    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
     wrapped_args = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -267,7 +276,7 @@ def _run_text_columns() -> set[str]:
     `project_name` comes from `POST /api/runs` and from a directory name on
     disk — and it reaches the same headers and the same spoken lines as a
     session does."""
-    src = (REPO / "run_store.py").read_text()
+    src = (REPO / "run_store.py").read_text(encoding="utf-8")
     body = src.split("CREATE TABLE IF NOT EXISTS runs (", 1)[1].split(");", 1)[0]
     out = set()
     for line in body.splitlines():
@@ -367,7 +376,7 @@ def _functions_that_print_a_foreign_field() -> dict:
     source of every module in the repository."""
     out = {}
     for path in MODULES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -384,6 +393,36 @@ PRINTERS = _functions_that_print_a_foreign_field()
 # to-do: every one of them is a place where a session's own words DO reach a
 # string, and the argument is why that string is safe.
 EXEMPT = {
+    "server.internal_pretool": (
+        "the PreToolUse gate. The one value it interpolates into a sentence "
+        "the brain will read is the SERVER name out of `tool_name`, which "
+        "the hook relays from whatever the model asked for — so it goes "
+        "through `_plain_name(raw_server, 'that service')` before it is "
+        "spoken, the same wall `_perform_command` relies on. The unwalled "
+        "`raw_server` is used only as a `provider` column in the actions "
+        "table, which the Business UI renders with textContent, and the "
+        "payload it stages is the user's own post, shown to him for "
+        "approval and never wrapped in JARVIS's voice"),
+    "server.tool_business_action": (
+        "one approval card. Outside its untrusted block it prints only the "
+        "card's id (a uuid, through `_plain_name`), its state (from the "
+        "store's closed set, or `_plain_name`), JARVIS's own ISO times and "
+        "counts; provider, operation and payload go INSIDE the block. Held "
+        "with hostile state, provider and operation rows by "
+        "tests/test_business_action.py::test_a_hostile_row_cannot_write_a_line_of_jarvis"),
+    "server._card_state_line": (
+        "reads a card's `state`, which only business_store's transitions "
+        "write, from a closed set; anything outside it is spoken through "
+        "`_plain_name`. The one time it interpolates is `business_api.when`'s "
+        "own ISO stamp. Driven through tool_business_action by the same test"),
+    "dialog.answer": (
+        "The Windows helper's status is returned as a closed outcome string, "
+        "not interpolated into brain instructions; the only formatted values "
+        "in this function go to diagnostic logs. Keys are validated before dispatch."),
+    "server.voice_handler": (
+        "Receipt status is serialized as JSON for the conversation UI, which "
+        "renders it with textContent. User transcript text is intentionally "
+        "the user's own input; it is not a foreign session instruction header."),
     "server._session_line": (
         "it prints `summary()` — another session's own words — with no "
         "escaping at all, and that is correct only because every caller puts "
@@ -441,12 +480,18 @@ EXEMPT = {
         "below already do against the source"),
 
     # --- the brain's own process, not somebody else's ---------------------
-    "brain._handle": (
-        "`session_id`, `model` and `status` here are the CLI's own "
-        "stream-json fields for JARVIS's OWN brain process, not another "
-        "conversation's roster entry. They reach a log line and the state "
-        "callback the frontend reads; the only text this composes for the "
-        "model is the assistant delta, which is the model's own output"),
+    # (`_handle` reads the CLI's `session_id` and `model` for itself and
+    # prints neither; the two below print, out of the same stream.)
+    "brain._note_rate_limit": (
+        "`status` is the CLI's own rate-limit event about JARVIS's OWN "
+        "subscription, not another conversation's roster entry. It reaches "
+        "`log.warning`/`log.info` and `self.usage`, which the Subscription "
+        "panel reads; never the brain's context, never spoken"),
+    "brain._turn_event": (
+        "the stream-json of JARVIS's OWN brain process, for the turn it is "
+        "answering. The `subtype` and the error text reach `log.error` and "
+        "the turn's own result; the only text it composes for the model is "
+        "the assistant delta, which is the model's own output"),
     "brain._spawn_locked": (
         "the same: the `session_id` is the one the CLI just gave this "
         "process for itself, and it goes to `log.info`. A log is not the "
@@ -455,6 +500,25 @@ EXEMPT = {
         "`origin` is one of this repository's own four literals (\"voice\", "
         "\"api\", \"system\", \"work\"), set by the caller that started the "
         "turn, and it is a `__repr__`-style debug line"),
+    "brain.card_phrase": (
+        "not a session: an approval card out of JARVIS's own ledger, whose "
+        "`state` is one of the store's own literals and is only ever LOOKED "
+        "UP in `_CARD_STATES` — a state not in that table drops the card, it "
+        "is never printed. The values that did come from elsewhere (the tool "
+        "and server names, out of a model's tool call and the user's "
+        "connections.json) go through `plain_name`, an id that is not a "
+        "uuid drops the card, and the request itself is never read. Driven "
+        "with the header payload in every field, through `launch_prompt`, "
+        "by tests/test_system_prompt_header.py "
+        "(HOSTILE_INPUTS['approval_cards']) and "
+        "tests/test_boot_approval_cards.py"),
+    "business_store.desk_cards": (
+        "builds no sentence. Its f-strings are SQL made of the module's own "
+        "`_DESK_LIVE` and `_DESK_LIVE_RANK` constants, every value is a bound parameter, and the `state` "
+        "it reads is compared with the store's own literals to mark a card "
+        "lapsed. It returns rows; the one place they become prose is "
+        "`brain.card_phrase`, exempted above and driven through the launch "
+        "prompt"),
 
     # --- somebody else's words, but already inside a block ---------------
     "browser.read_page": (
@@ -513,11 +577,14 @@ EXEMPT = {
         "that comes out is a number; no name from this reaches a header"),
 
     # --- session_watch BUILDS the names; it never speaks them ------------
-    "session_watch._assign_voice_names": (
+    # `_assign_voice_names` itself composes nothing since a thread's own
+    # name came first: it hands a name through whole, or passes the session
+    # to `_name_by_folder` or `_name_group`, where the composing now is.
+    "session_watch._name_by_folder": (
         "this module is the SOURCE of the foreign values, not a consumer of "
-        "them: it reads the roster and composes a voice name. It imports "
-        "neither `speech` nor anything that returns text to the brain. Every "
-        "name it can emit is driven through the wall by "
+        "them: it reads the roster and composes a voice name from a folder. "
+        "It imports neither `speech` nor anything that returns text to the "
+        "brain. Every name it can emit is driven through the wall by "
         "test_no_real_voice_name_is_refused_by_the_wall, which is a stronger "
         "check than driving the composer would be"),
     "session_watch._name_by_topic": (
@@ -530,11 +597,38 @@ EXEMPT = {
     "session_watch._name_words": (
         "the helper that splits a title into words for `_name_by_topic`; "
         "same argument, and its output is bounded there"),
+    "session_watch._thread_name": (
+        "the SOURCE of `thread_name`: it reads the roster's `name` and "
+        "returns it only as `_sayable_name` cuts it — the wall's own "
+        "character class and bound — or None. It compares `cwd`'s folder "
+        "against it and says nothing. tests/test_thread_names.py drives "
+        "hostile and malformed names through it, and the voice-name sweep "
+        "drives what it yields through the real wall"),
     "session_watch.resolve": (
         "it MATCHES a spoken name against the roster and returns "
         "SessionState objects — the f-strings in it are the lowered "
         "comparison keys, not a sentence. What the caller then says about "
         "the matches is `server._resolve_or_explain`, which is driven"),
+
+    # --- who is at the other end: a closed set, never said ---------------
+    "session_watch._origin": (
+        "reads the roster's `entrypoint` and returns one of six constants "
+        "out of `_ORIGIN_BY_ENTRYPOINT`, or OTHER; the roster's own string "
+        "never comes out of it. It is the SOURCE of `origin`, the same "
+        "argument as `_assign_voice_names`, and "
+        "tests/test_prompt_owner.py pins every value it can return"),
+    "server._origin_of": (
+        "reads `origin` off a session or an event payload and returns it "
+        "only if it is one of session_watch's own constants — anything else "
+        "becomes OTHER. Every phrase built on it comes out of `_PROMPT_SHOWN` "
+        "or a literal, so a hostile `origin` is never said: driven through "
+        "the announcement by test_an_origin_outside_the_table_is_never_said"),
+    "server._host_wait": (
+        "it IS the wall for `waiting_on_host`, the same one `_phrase_needs` "
+        "is for `needs`: a known reason through `_NEEDS_PHRASES`, anything "
+        "else through `_plain_phrase`, an empty one named as nothing. Driven "
+        "with the hostile payload through session_detail's header by "
+        "tests/test_prompt_owner_speech.py::test_a_hostile_host_wait_never_reaches_a_header"),
 
     # --- values compared, not printed ------------------------------------
     "server._approval_clause": (
@@ -577,6 +671,40 @@ EXEMPT = {
     "server.tool_run_command": (
         "the same; and the staged item it builds carries that already-"
         "sanitised name, which is why `_perform_command` is exempt above"),
+    "server.tool_project_history": (
+        "NOT the same: like `tool_project_note` it never resolves the "
+        "project. The name it prints is `_plain_name`'d in place, and the "
+        "notes it reads back go INSIDE a block (`_wrap_untrusted`) exactly as "
+        "`tool_recall`'s do. Driven by tests/test_memory_tools.py and "
+        "tests/test_tool_argument_echo.py"),
+    "jarvis_memory.reindex": (
+        "it prints nothing. The titles it hands to `add_to_index` are "
+        "round-tripped through `_index_line`, which refuses anything that is "
+        "not one index line (tests/test_jarvis_memory.py), and what it "
+        "returns is a list of slugs — filenames, which `tool_recall`'s rule "
+        "already keeps out of anything spoken"),
+    "preflight._check_memory_index_sync": (
+        "a startup log line and a dashboard message, never spoken — "
+        "`_phrase_for` replaces it with a fixed phrase — naming memory titles "
+        "the brain wrote through the gated `remember`, each `one_line`d "
+        "before it reached the file"),
+    "business_api._a_human_in_the_browser": (
+        "`what` is one of two literals this module passes itself ('Delete "
+        "approvals', 'Clear approvals') into a 403 detail; nothing from a "
+        "request, a row or a session reaches it"),
+    "business_api._find_args": (
+        "`status` here is `business_find`'s own argument, read only to test "
+        "it against RECORD_STATES. Every sentence it builds is joined out of "
+        "RECORD_KINDS and RECORD_STATES, never out of what it was given. "
+        "Driven with an instruction in each argument by "
+        "tests/test_business_find.py::test_a_refused_search_never_repeats_what_it_was_given"),
+    "business_api._merged_update": (
+        "`id` is the brain's argument, used only to look the record up; the "
+        "stored `kind` is compared, and named only once it is one of "
+        "RECORD_STATES' four. The other values it interpolates are the "
+        "validated Literal kind, a field name from a literal pair and a "
+        "length. Driven with a hostile id and a hand-edited row's kind by "
+        "tests/test_business_find.py::test_a_refused_update_never_repeats_an_id_or_a_stored_kind"),
     "server.tool_project_note": (
         "NOT the same: it never resolves the project. The name it prints is "
         "`_plain_name`\'d in place, and the note\'s own text goes to a "
@@ -911,6 +1039,103 @@ def _drive_announce_needs_you(server, session, monkeypatch):
 
 
 DRIVERS["server._announce_needs_you"] = _drive_announce_needs_you
+
+
+# --- the WhatsApp line ----------------------------------------------------
+#
+# Two kinds of sentence here. The outcome lines the voice path speaks after a
+# steer or a keypress were extracted from `_perform_steer` / `_perform_dialog`
+# so the phone could say the same thing; they still print a voice name, so
+# they are driven exactly as their parents are. Everything else prints to the
+# OWNER'S PHONE, or to the Conversation panel through textContent, or to a
+# log — never into the brain's context, which is the one place a forged
+# header line does harm. Those carry their reason below.
+
+def _drive_steer_outcome_line(server, session, monkeypatch):
+    import session_steer
+    item = server._StagedSteer(session.session_id, session.voice_name,
+                               session.project, "carry on", session.socket_path)
+    return [server._steer_outcome_line(item, outcome)
+            for outcome in (session_steer.SENT, session_steer.NOT_LIVE, "failed")]
+
+
+def _drive_dialog_outcome_line(server, session, monkeypatch):
+    import dialog
+    item = server._StagedDialog(session.session_id, session.voice_name,
+                                session.project, 4242, "return")
+    return [server._dialog_outcome_line(item, outcome)
+            for outcome in (dialog.SENT, dialog.NOT_FOUND, dialog.NOT_PERMITTED,
+                            dialog.NO_TTY, "failed")]
+
+
+DRIVERS["server._steer_outcome_line"] = _drive_steer_outcome_line
+DRIVERS["server._dialog_outcome_line"] = _drive_dialog_outcome_line
+
+EXEMPT.update({
+    "server._phone_readback": (
+        "the read-back of a staged steer, command or keypress, sent to the "
+        "owner's phone as text and appended to the phone reply the "
+        "Conversation panel renders with textContent. It names the session "
+        "through `_said_name` and prints the command and project raw, as "
+        "`_perform_command` speaks them: the owner is reading the exact "
+        "words he is about to approve, and nothing here reaches the brain"),
+    "server._do_staged": (
+        "performs one confirmed item. It reads `socket_path` only to hand it "
+        "to `session_steer.post_to_session`, and every sentence it returns "
+        "is a literal or comes from `_steer_outcome_line` / "
+        "`_dialog_outcome_line`, which are driven above; the text goes to "
+        "the owner's phone, never to the brain"),
+    "server._record_staged": (
+        "writes the audit row for a staged item. The session fields it reads "
+        "go into `run_store.record_steer` as data; the only text it builds "
+        "is `dialog:<outcome>`, and the outcome is a closed set the dialog "
+        "module returns, never a session's words"),
+    "whatsapp._send": (
+        "reads the message id WhatsApp returns for what JARVIS just sent and "
+        "stores it in the whatsapp_messages table; it is shown at "
+        "GET /api/whatsapp/recent as JSON and never spoken, never in the "
+        "brain's tool replies (`tool_whatsapp_message` reports only whether "
+        "it went and by which route)"),
+    "whatsapp.upload_media": (
+        "reads the media id WhatsApp returns for an uploaded voice note and "
+        "hands it straight back into the next send payload; the f-string it "
+        "builds is the upload's filename out of a closed table of extensions"),
+    "messaging.button_ids": (
+        "builds the Approve and Reject button ids out of a card's id (a uuid "
+        "the store generated) and its digest (sha256 hex); both are JARVIS's "
+        "own values, and the ids travel to WhatsApp and back, never to the brain"),
+    "whatsapp.announce_card": (
+        "the policy's card on the WhatsApp wire: buttons, or — when the "
+        "24-hour window is shut — one line naming the provider, operation "
+        "and the card's id through `messaging.name`, with the words to "
+        "answer it. Reads `id` to say which card. Phone only, never the brain"),
+    "messaging._outcome_line": (
+        "what the owner is told after a decision from his phone: provider "
+        "and operation through `_name`, the card's `state` out of the "
+        "store's closed set, a failed provider's message through `_name` and "
+        "clipped. Sent to the phone, never spoken, never to the brain"),
+    "messaging._decide_by_words": (
+        "resolves 'approve <prefix>' against the live cards and, when more "
+        "than one waits, lists them to the owner's phone by id prefix, "
+        "provider and operation through `_name`. Reads `state` and `id` to "
+        "choose; the reply goes to the phone only"),
+    "whatsapp._error_of": (
+        "turns a provider's error body into a ChannelError. The SENTENCE — "
+        "what `tool_whatsapp_message` hands the brain — is written here out "
+        "of the HTTP status and Meta's numeric code; the provider's own "
+        "message goes into `detail`, bounded and stripped of control "
+        "characters, for the log and for the status line the Settings panel "
+        "renders with textContent"),
+    "chatgpt_fallback.run": (
+        "one ChatGPT fallback turn, reading Codex's own JSONL. The `error` it "
+        "reads is Codex's failure message — a usage limit, a dropped stream — "
+        "and it goes to the log and to `TurnResult.error`, which nothing speaks "
+        "and nothing puts in a brain's context: `server._error_line` is a "
+        "literal. The only text built from what Codex reports is a tool's "
+        "name, through `claude_env.mcp_tool_name` out of the MCP names JARVIS "
+        "configured, exactly as the Claude path's own tool_use carries them; "
+        "`_what_the_turn_had_done` walls those before any is spoken"),
+})
 
 
 # --- THE OTHER FOREIGN RECORD: a run row ---------------------------------
@@ -1443,10 +1668,13 @@ def _every_voice_name_session_watch_can_produce() -> list:
     own format; a wall that admits only the first erases the other two."""
     import session_watch
 
-    def _s(sid, cwd, title=None, state="idle", started=0.0):
+    def _s(sid, cwd, title=None, state="idle", started=0.0, thread=None):
+        # A thread's name goes through the same step `build_snapshot` puts it
+        # through, so what is driven below is what the roster really yields.
         return session_watch.SessionState(
             session_id=sid, cwd=cwd, project=session_watch.project_name(cwd),
-            state=state, title=title, started=started, since=started)
+            state=state, title=title, started=started, since=started,
+            thread_name=session_watch._sayable_name(thread))
 
     groups = [
         # one alone: the bare project name
@@ -1466,6 +1694,18 @@ def _every_voice_name_session_watch_can_produce() -> list:
          _s("c", "/p/hammer", started=1.0)],
         # a directory name with a space in it, which is an ordinary folder
         [_s("a", "/Users/e/My Projects/note taker")],
+        # a thread's own name, with an apostrophe, and one that needed making
+        # sayable: a colon, quotes, an ampersand, a line separator, length
+        [_s("a", "/s/scratch-1", thread="Read connector tools' own names on "
+                                        "the Claude path"),
+         _s("b", "/s/scratch-1", thread='Fix: the "login" redirect & retry\n'
+                                        'then ship it before the release goes '
+                                        'out on Friday')],
+        # two threads given one long name: the composed forms still fit
+        [_s("a", "/s/x", state="working", thread="Investigate why the nightly "
+                                                 "export job keeps timing out"),
+         _s("b", "/s/y", state="idle", thread="Investigate why the nightly "
+                                              "export job keeps timing out")],
     ]
     names = []
     for group in groups:
@@ -1484,6 +1724,8 @@ def test_no_real_voice_name_is_refused_by_the_wall(server):
     assert any(" " in n for n in names), names
     assert any("," in n for n in names), names
     assert any("'" in n for n in names), names
+    # A thread's own name is one of them, not quietly replaced by its folder.
+    assert "Read connector tools' own names on the Claude path" in names, names
     for name in names:
         session = _blank()
         session.voice_name = name
@@ -1515,7 +1757,9 @@ ALT = {
     "last_prompt": "revert the schema",
     "last_text": "finished",
     "needs": "dialog open",
-    "origin": "vscode",
+    "origin": "desktop",
+    "entrypoint": "claude-desktop",
+    "waiting_on_host": "input needed",
     # `pids` is `list[int]` off the roster, so it is in FOREIGN_FIELDS by
     # type. Nothing prints it; `_tty_for_session_or_explain` iterates it.
     "pids": [99],
@@ -1526,6 +1770,7 @@ ALT = {
     "session_id": "s2",
     "socket_path": "/tmp/cc-socks/s2.sock",
     "state": "working",
+    "thread_name": "Read connector tools' own names on the Claude path",
     "title": "the run pipeline",
     "voice_name": "chitauri in Desktop",
 }
@@ -1611,7 +1856,7 @@ def _compiled_patterns() -> dict[str, str]:
     the method it is called with, so the test has to know about every regex
     in the file, including the ones written after this one.
     """
-    tree = ast.parse(SERVER.read_text())
+    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
     out: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -1633,7 +1878,7 @@ def _compiled_patterns() -> dict[str, str]:
 def _called_with(method: str) -> set[str]:
     """Compiled-pattern names used as `NAME.<method>(…)` in server.py."""
     known = set(_compiled_patterns())
-    tree = ast.parse(SERVER.read_text())
+    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
     return {node.func.value.id for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -1753,3 +1998,66 @@ def test_an_ordinary_document_title_still_reaches_the_user(server,
     out = server.tool_review_document({"project": "chitauri"})
     assert "The Chitauri Plan" in out, out
     assert "1 sections" in out or "1 section" in out, out
+
+
+# The connector-outcome record (tests/test_linkedin_posting.py). What a user's
+# own MCP server answered is somebody else's text; each of these decides
+# where it may go, and none of them puts it in front of the brain.
+EXEMPT.update({
+    "tool_outcome.summarise": (
+        "turns a connector's answer into a bounded receipt for the approval "
+        "card: whitespace collapsed, clipped, URLs only when https. It is "
+        "stored as the card's result and shown to the owner on the desk; no "
+        "brain-facing tool prints a connector card's result"),
+    "business_store.record_outcome": (
+        "writes the receipt as JSON into the card's `result` column and an "
+        "audit event `outcome:<status>` clipped to 40 characters; it prints "
+        "nothing and returns the row to its caller, the posttool route"),
+    "server.internal_posttool": (
+        "the PostToolUse report route. It answers the hook `{}` whatever "
+        "happened, so nothing it reads reaches the CLI or the brain; its log "
+        "lines carry the tool name clipped and the card id's first 8 hex"),
+    "business_api.repeat_note": (
+        "the warning on a card for bytes already sent. In full, with the "
+        "earlier outcome redacted and clipped, it goes to the desk and the "
+        "owner's phone only; `for_brain=True`, which the gate's reason uses, "
+        "carries the time and card id and none of the connector's words"),
+    "messaging._card_parts": (
+        "lays out the phone card: names through `name`, the request through "
+        "`business_api.redact`, the repeat warning from `repeat_note`. It is "
+        "sent to the owner's phone as plain text with buttons, never to the brain"),
+    "messaging.announce": (
+        "sends one card to one phone line: the redacted request ahead of it "
+        "when it is too long, then `card_text`. Its log line names the line "
+        "only; what it sends goes to the owner's phone and nowhere else"),
+})
+
+
+# LinkedIn's limits, stop, official API and hand-post route (tests/
+# test_linkedin_guard.py, test_linkedin_api.py, test_linkedin_handpost.py).
+EXEMPT.update({
+    "linkedin_api._check_media": (
+        "validates a hand-post or API card's media against the media folder and "
+        "its sha256; it reads the payload's own fields and raises a fixed "
+        "sentence naming the field, never echoing the value back"),
+    "linkedin_api._post": (
+        "builds the Posts API request from the approved card and sends it to "
+        "LinkedIn; what it returns is the post URN and a link built from it, "
+        "stored as the card's receipt for the owner, never shown to the brain"),
+    "linkedin_api._upload_video": (
+        "sends the approved video to LinkedIn in the parts LinkedIn names and "
+        "reads back their ETags and the processing status; nothing it reads is "
+        "printed anywhere — it returns only the video URN for the post"),
+    "linkedin_handpost.perform": (
+        "sends the owner, on his own Telegram line, the exact text and file of a "
+        "card he approved; the header it writes is a fixed sentence and the post "
+        "text is the payload he saw, delivered to him and to nobody else"),
+    "server._linkedin_result_objects": (
+        "reads a LinkedIn connector call's own status, message, reason, error and "
+        "url fields only to test them against the challenge pattern; it returns "
+        "the matched phrase to the halt record and prints nothing to the brain"),
+    "telegram.handle": (
+        "routes one message from the owner: a reply that answers a hand-post with "
+        "a LinkedIn link is recorded on its card and confirmed to him with that "
+        "link; everything else goes to messaging.on_text unchanged, as before"),
+})

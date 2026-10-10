@@ -81,7 +81,7 @@ def test_write_spec_creates_both_superpowers_directories(tmp_path):
     relative = builds.write_spec(str(tmp_path), SPEC,
                                  today=datetime.date(2026, 9, 3))
     assert (tmp_path / relative).is_file()
-    assert "no database" in (tmp_path / relative).read_text()
+    assert "no database" in (tmp_path / relative).read_text(encoding="utf-8")
     # A fresh project from create_project has neither directory, and the brief
     # points the session at the plans one.
     assert (tmp_path / builds.PLAN_DIR).is_dir()
@@ -196,9 +196,9 @@ def test_a_task_heading_with_no_steps_is_never_counted_done():
 def test_progress_reads_the_most_recently_modified_plan(tmp_path):
     plans = tmp_path / builds.PLAN_DIR
     plans.mkdir(parents=True)
-    (plans / "2026-01-01-old.md").write_text("## Task 1: Old\n\n- [x] done\n")
+    (plans / "2026-01-01-old.md").write_text("## Task 1: Old\n\n- [x] done\n", encoding="utf-8")
     newer = plans / "2026-09-03-current.md"
-    newer.write_text(PLAN)
+    newer.write_text(PLAN, encoding="utf-8")
     import os
     os.utime(plans / "2026-01-01-old.md", (1, 1))
 
@@ -226,7 +226,7 @@ def test_a_plan_in_the_real_emitted_shape_parses():
     recognising any one of them fails here.
     """
     from pathlib import Path
-    text = (Path(__file__).parent / "fixtures" / "plan_real_shape.md").read_text()
+    text = (Path(__file__).parent / "fixtures" / "plan_real_shape.md").read_text(encoding="utf-8")
     tasks = builds.parse_plan(text)
 
     assert [t.number for t in tasks] == [1, 2, 3, 4]
@@ -281,14 +281,14 @@ def test_only_things_that_start_a_project_are_allowed(command, tmp_path):
 def test_a_path_inside_the_project_that_exists_is_allowed(tmp_path):
     script = tmp_path / "scripts" / "dev.sh"
     script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
     assert builds.command_problem("./scripts/dev.sh", str(tmp_path)) is None
 
 
 def test_a_path_that_escapes_the_project_is_refused(tmp_path):
     project = tmp_path / "p"
     project.mkdir()
-    (tmp_path / "outside.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "outside.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     problem = builds.command_problem("../outside.sh", str(project))
     assert problem and "run nothing" in problem
 
@@ -299,19 +299,19 @@ def test_a_command_too_long_to_read_back_is_refused(tmp_path):
 
 
 def test_a_readme_start_command_counts_as_documented(tmp_path):
-    (tmp_path / "README.md").write_text("Run it with `npm run dev` and open the page.")
+    (tmp_path / "README.md").write_text("Run it with `npm run dev` and open the page.", encoding="utf-8")
     assert builds.is_documented("npm run dev", str(tmp_path))
     assert not builds.is_documented("npm run nowhere", str(tmp_path))
 
 
 def test_a_package_json_script_counts_as_documented(tmp_path):
-    (tmp_path / "package.json").write_text('{"scripts": {"dev": "vite"}}')
+    (tmp_path / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
     assert builds.is_documented("npm run dev", str(tmp_path))
     assert not builds.is_documented("npm run build", str(tmp_path))
 
 
 def test_a_makefile_target_counts_as_documented(tmp_path):
-    (tmp_path / "Makefile").write_text("dev:\n\tpython server.py\n")
+    (tmp_path / "Makefile").write_text("dev:\n\tpython server.py\n", encoding="utf-8")
     assert builds.is_documented("make dev", str(tmp_path))
     assert not builds.is_documented("make ship", str(tmp_path))
 
@@ -339,6 +339,8 @@ def wired(monkeypatch, tmp_path):
 
 
 class _Executor:
+    async def shutdown(self):
+        pass
     """Records what was spawned. Never starts a process."""
 
     def __init__(self, store, model="sonnet"):
@@ -458,7 +460,7 @@ async def test_the_spec_is_written_into_the_project_before_anything_spawns(
 
     written = sorted((project / builds.SPEC_DIR).glob("*-design.md"))
     assert len(written) == 1, "the agreed spec must be persisted in the project"
-    text = written[0].read_text()
+    text = written[0].read_text(encoding="utf-8")
     assert "no database" in text, "what the user agreed, verbatim"
     assert "Standard library only." in text
     assert "No authentication." in text
@@ -490,7 +492,7 @@ async def test_starting_a_build_records_the_approval_as_a_file(ready, project):
     assert specs_module.approval_of(str(project), relative)["state"] == "approved"
 
     # And the approval belongs to those words, not to the file.
-    written[0].write_text(written[0].read_text() + "\n## Late addition\n\nx\n")
+    written[0].write_text(written[0].read_text(encoding="utf-8") + "\n## Late addition\n\nx\n", encoding="utf-8")
     assert specs_module.approval_of(str(project), relative)["state"] == "superseded"
 
 
@@ -594,7 +596,7 @@ async def test_a_spec_that_cannot_be_written_starts_nothing(ready, monkeypatch):
 def _write_plan(project, text=PLAN, name="2026-09-03-plan.md"):
     plans = project / builds.PLAN_DIR
     plans.mkdir(parents=True, exist_ok=True)
-    (plans / name).write_text(text)
+    (plans / name).write_text(text, encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -739,7 +741,7 @@ async def test_run_command_stages_and_runs_nothing_from_inside_the_tool_call(
     """The read-back cannot happen inside the tool call: it would queue
     behind the very turn that is waiting on it. Same shape as steer_session."""
     server, _store, speech = speaking
-    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}')
+    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
 
     out = await server.tool_run_command({"project": "chitauri",
                                          "command": "npm run dev"})
@@ -754,7 +756,7 @@ async def test_run_command_stages_and_runs_nothing_from_inside_the_tool_call(
 async def test_performing_the_command_reads_it_back_before_running_it(
         speaking, terminal, project):
     server, store, speech = speaking
-    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}')
+    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
 
     await server.tool_run_command({"project": "chitauri", "command": "npm run dev"})
     await server._perform_staged_steers()
@@ -774,7 +776,7 @@ async def test_saying_stop_during_the_window_runs_nothing(ready, monkeypatch,
                                                           terminal, project):
     server, store, _ex = ready
     monkeypatch.setattr(server, "speech", _FakeSpeech(cancelled=True))
-    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}')
+    (project / "package.json").write_text('{"scripts": {"dev": "vite"}}', encoding="utf-8")
 
     await server.tool_run_command({"project": "chitauri", "command": "npm run dev"})
     await server._perform_staged_steers()
@@ -812,7 +814,7 @@ async def test_an_undocumented_command_is_flagged_out_loud_not_refused(
 @pytest.mark.asyncio
 async def test_a_documented_command_carries_no_caveat(speaking, terminal, project):
     server, _store, speech = speaking
-    (project / "README.md").write_text("Start it with npm run dev.")
+    (project / "README.md").write_text("Start it with npm run dev.", encoding="utf-8")
 
     await server.tool_run_command({"project": "chitauri", "command": "npm run dev"})
     await server._perform_staged_steers()

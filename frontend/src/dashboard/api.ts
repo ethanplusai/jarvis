@@ -1,4 +1,5 @@
-/** Typed client for the /api/runs and /api/sessions surfaces. */
+/** Typed client for the dashboard's API surfaces: runs, sessions, usage,
+ * memory, projects and specs. */
 
 export interface RunRow {
   id: string;
@@ -41,6 +42,9 @@ export interface RunStats {
   total_cost_usd: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_cache_read_tokens?: number;
+  total_cache_creation_tokens?: number;
+  total_tokens?: number;
 }
 
 /**
@@ -92,9 +96,32 @@ async function get<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function listRuns(limit = 50): Promise<RunRow[]> {
-  const body = await get<{ runs: RunRow[] }>(`/api/runs?limit=${limit}`);
+export async function listRuns(limit = 50, options: {
+  status?: string; project?: string; before?: number; before_id?: string;
+} = {}): Promise<RunRow[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  for (const [key, value] of Object.entries(options)) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  const body = await get<{ runs: RunRow[] }>(`/api/runs?${query}`);
   return body.runs;
+}
+
+export function runTokens(run: RunRow): number {
+  return run.input_tokens + run.output_tokens + (run.cache_read_tokens || 0)
+    + (run.cache_creation_tokens || 0);
+}
+
+export async function listActiveRuns(): Promise<RunRow[]> {
+  const rows: RunRow[] = [];
+  let cursor: { before?: number; before_id?: string } = {};
+  for (;;) {
+    const page = await listRuns(200, { status: "queued,running", ...cursor });
+    rows.push(...page);
+    if (page.length < 200) return rows;
+    const last = page[page.length - 1];
+    cursor = { before: last.created_at, before_id: last.id };
+  }
 }
 
 export async function getRun(id: string): Promise<RunRow> {
@@ -124,12 +151,19 @@ export async function getUsageLimits(): Promise<UsageSnapshot> {
 }
 
 export async function cancelRun(id: string): Promise<void> {
-  await fetch(`/api/runs/${id}`, { method: "DELETE" });
+  const url = `/api/runs/${encodeURIComponent(id)}`;
+  const res = await fetch(url, { method: "DELETE" });
+  if (!res.ok) throw new ApiError(res.status, url);
 }
 
 export async function retryRun(id: string): Promise<string> {
-  const res = await fetch(`/api/runs/${id}/retry`, { method: "POST" });
+  const url = `/api/runs/${encodeURIComponent(id)}/retry`;
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) throw new ApiError(res.status, url);
   const body = (await res.json()) as { run_id: string };
+  if (typeof body.run_id !== "string" || !body.run_id.trim()) {
+    throw new Error("The server did not return a run identifier.");
+  }
   return body.run_id;
 }
 
@@ -141,6 +175,8 @@ export interface SessionRow {
   session_id: string;
   voice_name: string;
   roster_name: string;
+  /** The thread's own name made sayable; `voice_name` when it has one. */
+  thread_name: string | null;
   project: string;
   cwd: string;
   state: SessionState;
@@ -160,7 +196,16 @@ export interface SessionRow {
    */
   started: number | null;
   since: number | null;
+  /** Who answers its prompts, from session_watch.py's closed set: terminal,
+   * desktop, editor, remote, background (a program started it), other. */
   origin: string;
+  /** The roster's own word for how it was started ("sdk-ts"). Absent from an
+   * older server. */
+  entrypoint?: string;
+  /** Set only while a program's session is paused on that program — the
+   * roster's `waitingFor`, or "" if it named none. `state` is then
+   * `working`: nothing is asked of the user. Absent from an older server. */
+  waiting_on_host?: string | null;
   steerable: boolean;
   pids: number[];
   primary_pid: number | null;
@@ -194,9 +239,9 @@ export async function listSessions(): Promise<SessionsSnapshot> {
 /**
  * JARVIS's long-term memory: a folder of plain Markdown at
  * `<JARVIS_DATA_DIR>/jarvis/` (see `data_paths.py` / `jarvis_memory.py`).
- * This client targets the contract specified for a not-yet-built backend
- * endpoint — see the Memory view report for the exact shape. A 404 on
- * either call means the endpoint hasn't shipped, not that memory is empty.
+ * Served by `GET /api/memory` and `GET /api/memory/<kind>/<slug>` in
+ * server.py; `POST /api/memory/reindex` is the one write. An empty memory is
+ * a 200 with empty lists — a 404 is a route that is not wired at all.
  */
 
 /** One line of MEMORY.md — the curated index loaded into every conversation. */
@@ -242,6 +287,17 @@ export interface MemorySnapshot {
   /** slug of the most recent journal entry (same one the brain prepends
    * on startup), or null if the journal is empty. */
   latest_journal_slug: string | null;
+  /** Files under memory/ that no line of MEMORY.md names. The brain cannot
+   * see these at boot — the index is the only thing that tells it a note
+   * exists. Optional so an older server's snapshot still renders. */
+  unindexed?: MemoryFileEntry[];
+}
+
+/** What `POST /api/memory/reindex` did. */
+export interface ReindexResult {
+  indexed: string[];
+  left_out: string[];
+  full: boolean;
 }
 
 export type MemoryKind = "memory" | "project" | "journal";
@@ -257,6 +313,16 @@ export async function getMemory(): Promise<MemorySnapshot> {
 
 export async function getMemoryDoc(kind: MemoryKind, slug: string): Promise<MemoryDoc> {
   return get<MemoryDoc>(`/api/memory/${kind}/${encodeURIComponent(slug)}`);
+}
+
+/** The one write on the memory surface: give every unindexed note a line
+ * in MEMORY.md. The user's to ask for, never automatic — a note without a
+ * line may be one they deliberately let go of while keeping the file. */
+export async function reindexMemory(): Promise<ReindexResult> {
+  const url = "/api/memory/reindex";
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) throw new ApiError(res.status, url);
+  return res.json() as Promise<ReindexResult>;
 }
 
 /**

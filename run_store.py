@@ -11,6 +11,7 @@ import uuid
 from contextlib import closing
 
 from data_paths import db_path
+import schema
 
 log = logging.getLogger("jarvis.run_store")
 
@@ -33,6 +34,7 @@ _UPDATABLE = frozenset({
     "cost_usd", "input_tokens", "output_tokens", "cache_read_tokens",
     "cache_creation_tokens", "num_turns", "model", "requested_model",
     "started_at", "ended_at", "project_path", "project_name", "is_error",
+    "timeout_sec",
 })
 
 
@@ -101,18 +103,13 @@ def init_db() -> None:
         conn.commit()
 
         # `CREATE TABLE IF NOT EXISTS` never alters a table that already
-        # exists, so a live jarvis.db predating a column needs an explicit
-        # backfill. Same PRAGMA-table_info-then-ALTER pattern as
-        # migrations/001_dispatches_to_runs.py.
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
-        if "requested_model" not in cols:
-            conn.execute(
-                "ALTER TABLE runs ADD COLUMN requested_model TEXT DEFAULT ''")
-            conn.commit()
-        if "is_error" not in cols:
-            conn.execute(
-                "ALTER TABLE runs ADD COLUMN is_error INTEGER DEFAULT 0")
-            conn.commit()
+        # exists, so a live jarvis.db predating a column needs a backfill:
+        # one place for that, `schema.ensure_columns`.
+        schema.ensure_columns(conn, "runs", {
+            "requested_model": "TEXT DEFAULT ''",
+            "is_error": "INTEGER DEFAULT 0",
+            "timeout_sec": "REAL DEFAULT 0",
+        })
 
 
 def create_run(prompt: str, project_name: str, project_path: str,
@@ -149,7 +146,8 @@ def all_run_ids() -> set[str]:
 
 
 def list_runs(status: list[str] | None = None, project: str | None = None,
-              limit: int = 50, before: float | None = None) -> list[dict]:
+              limit: int = 50, before: float | None = None,
+              before_id: str | None = None) -> list[dict]:
     sql = "SELECT * FROM runs WHERE 1=1"
     params: list = []
     if status:
@@ -159,9 +157,13 @@ def list_runs(status: list[str] | None = None, project: str | None = None,
         sql += " AND project_name LIKE ?"
         params.append(f"%{project}%")
     if before is not None:
-        sql += " AND created_at < ?"
-        params.append(before)
-    sql += " ORDER BY created_at DESC LIMIT ?"
+        if before_id:
+            sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            params.extend((before, before, before_id))
+        else:
+            sql += " AND created_at < ?"
+            params.append(before)
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
     params.append(limit)
 
     with closing(_connect()) as conn:
@@ -180,6 +182,27 @@ def update_run(run_id: str, **fields) -> None:
         conn.execute(f"UPDATE runs SET {assignments} WHERE id=?",
                      (*fields.values(), run_id))
         conn.commit()
+
+
+def transition_run(run_id: str, status: str, **fields) -> dict | None:
+    """Atomically claim a state transition and return only the winning row."""
+    if status not in RunStatus.ALL:
+        raise ValueError("unknown run status")
+    unknown = set(fields) - _UPDATABLE
+    if unknown or "status" in fields:
+        raise ValueError(f"invalid transition fields: {sorted(unknown)}")
+    allowed = (RunStatus.QUEUED,) if status == RunStatus.RUNNING else tuple(RunStatus.ACTIVE)
+    values = {**fields, "status": status}
+    assignments = ", ".join(f"{key}=?" for key in values)
+    with closing(_connect()) as conn:
+        with conn:
+            changed = conn.execute(
+                f"UPDATE runs SET {assignments} WHERE id=? AND status IN "
+                f"({','.join('?' for _ in allowed)})",
+                (*values.values(), run_id, *allowed))
+            if not changed.rowcount:
+                return None
+            return dict(conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
 
 
 def next_seq(run_id: str) -> int:
@@ -252,17 +275,22 @@ def stats(period: str = "day") -> dict:
             "SELECT status, COUNT(*) AS n, "
             "COALESCE(SUM(cost_usd),0) AS cost, "
             "COALESCE(SUM(input_tokens),0) AS inp, "
-            "COALESCE(SUM(output_tokens),0) AS out "
+            "COALESCE(SUM(output_tokens),0) AS out, "
+            "COALESCE(SUM(cache_read_tokens),0) AS cache_read, "
+            "COALESCE(SUM(cache_creation_tokens),0) AS cache_creation "
             "FROM runs WHERE created_at >= ? GROUP BY status",
             (cutoff,)).fetchall()
 
     by_status = {s: 0 for s in RunStatus.ALL}
     total_cost = total_in = total_out = 0
+    total_cache_read = total_cache_creation = 0
     for r in rows:
         by_status[r["status"]] = r["n"]
         total_cost += r["cost"]
         total_in += r["inp"]
         total_out += r["out"]
+        total_cache_read += r["cache_read"]
+        total_cache_creation += r["cache_creation"]
 
     return {
         "period": period,
@@ -271,6 +299,9 @@ def stats(period: str = "day") -> dict:
         "total_cost_usd": round(total_cost, 6),
         "total_input_tokens": total_in,
         "total_output_tokens": total_out,
+        "total_cache_read_tokens": total_cache_read,
+        "total_cache_creation_tokens": total_cache_creation,
+        "total_tokens": total_in + total_out + total_cache_read + total_cache_creation,
     }
 
 

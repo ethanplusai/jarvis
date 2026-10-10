@@ -347,7 +347,7 @@ def test_the_journal_records_the_generation_that_wrote_it(tmp_path,
     path = jarvis_memory.write_journal("we were fixing chitauri",
                                        reason="rotation",
                                        untrusted_source="a web page")
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "a web page" in text, text
     assert "we were fixing chitauri" in text
 
@@ -365,7 +365,7 @@ def test_an_untainted_generations_journal_says_nothing_extra(tmp_path,
     jarvis_memory.ensure_layout()
     path = jarvis_memory.write_journal("we were fixing chitauri",
                                        reason="rotation")
-    body = path.read_text()
+    body = path.read_text(encoding="utf-8")
     assert "read" not in body.split("\n\n", 1)[0].lower(), body
 
 
@@ -406,7 +406,7 @@ async def test_the_server_hands_the_generations_taint_to_the_journal(
                 text = "we were fixing chitauri"
             return _R()
 
-        async def rotate(self, handover=None):
+        async def rotate(self, handover=None, **_):
             return True
 
     monkeypatch.setattr(server, "brain_instance", _Brain())

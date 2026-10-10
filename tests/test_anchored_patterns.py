@@ -105,7 +105,7 @@ def _dollar_anchored_prefix_checks(path: Path) -> list:
     """[(name, method, lineno)] for every `$`-terminated pattern in this file
     used with `.match()` or `.search()` — compiled once and named, or written
     inline as `re.match(r"…$", x)`."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     known = _compiled_patterns(tree)
     out = []
     for node in ast.walk(tree):
@@ -207,7 +207,7 @@ def test_every_hand_written_separator_class_matches_the_language():
     added to a list."""
     checked = 0
     for path in MODULES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (isinstance(node, ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], ast.Name)
@@ -229,7 +229,7 @@ def test_every_hand_written_separator_class_matches_the_language():
 def _whole_value_checks(path: Path) -> list:
     """Names of compiled patterns used with `.fullmatch()` in this file —
     every "is the WHOLE value this shape" gate the module has."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     known = set(_compiled_patterns(tree))
     return sorted({node.func.value.id for node in ast.walk(tree)
                    if isinstance(node, ast.Call)
@@ -264,11 +264,38 @@ SAMPLES = {
     "_MODEL_ID_RE": "claude-sonnet-5",
     "_URL_RE": "https://github.com/owner/name",
     "_INDEX_LINE_RE": "- [a fact](a-fact.md) — the hook",
+    "_NOTE_LINE_RE": "_2026-09-21 14:05_ — Uses WordPress.",
     "_JOURNAL_NAME_RE": "2026-09-04-133912-123456-manual.md",
     "_TABLE_ROW": "|zeltar pro|99|",
     "_HEADING": "# Title",
     "_TASK_HEADING": "## Task 1: wire the executor",
     "_CHECKBOX": "- [x] done",
+    "_CARD_REF": "c0602703",
+    "_URN": "urn:li:share:7000000000000000001",
+    "_HIGH_HALF": r"\ud83d",
+    "_CARD_ID_RE": "c0602703-9906-4b97-9653-178ec9e5496e",
+    "_HANDLE_ID": "0b0b0b0b-0000-4000-8000-000000000001",
+    "_HANDLE_DUE": "2026-10-01",
+    "_HANDLE_CURRENCY": "USD",
+    # whatsapp.py: the owner's number, Meta's id for JARVIS's number, a card
+    # id and digest as a button carries them, a template language, and the
+    # two word-gates (a decision, a go-ahead) on a message from the owner.
+    "_E164": "+14155550132",
+    "_PHONE_NUMBER_ID": "123456789012345",
+    "_UUID": "c0602703-9906-4b97-9653-178ec9e5496e",
+    "_LANGUAGE": "en_US",
+    "_DECISION": "approve 3f2a9c1e",
+    "_CONFIRM": "go 2",
+    # messaging.py / telegram.py: a digest as a Telegram button carries it, a
+    # bot token, the owner's Telegram id, a pairing code.
+    "_DIGEST_PREFIX": "0" * 16,
+    "_TOKEN": "123456789:AAHfakeTokenTokenTokenTokenTokenToken00",
+    "_USER_ID": "123456789",
+    "_CODE": "483921",
+    # brain.py: a CLAUDE.md import line, as the ChatGPT fallback inlines it.
+    "_IMPORT_LINE_RE": "@MEMORY.md",
+    # chatgpt_fallback.py: one line of `codex features list`, as measured.
+    "_FEATURE_LINE_RE": "shell_tool                               under development  false",
 }
 
 ALPHABET = ("abcdefghijklmnopqrstuvwxyz0123456789"

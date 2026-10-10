@@ -85,7 +85,8 @@ def test_a_wedged_client_does_not_delay_the_frame(srv):
         return reader.got
 
     got = asyncio.run(scenario())
-    assert got == [AUDIO]
+    assert len(got) == 1 and got[0]["transcript_id"]
+    assert {k: v for k, v in got[0].items() if k != "transcript_id"} == AUDIO
 
 
 def test_a_wedged_client_does_not_delay_a_session_event(srv):
@@ -138,7 +139,8 @@ def test_a_client_whose_socket_fails_is_dropped(srv):
             _until(lambda: broken not in server.voice_clients), DEADLINE)
 
     asyncio.run(scenario())
-    assert reader.got == [AUDIO]
+    assert len(reader.got) == 1 and reader.got[0]["transcript_id"]
+    assert {k: v for k, v in reader.got[0].items() if k != "transcript_id"} == AUDIO
     assert broken not in server.voice_clients
     assert reader in server.voice_clients
 

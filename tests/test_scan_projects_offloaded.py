@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+import os
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,7 +30,7 @@ def _clear_scan_cache():
 def _make_repo(root: Path, name: str, branch: str = "main") -> None:
     git = root / name / ".git"
     git.mkdir(parents=True)
-    (git / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+    (git / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
 
 
 def test_a_slow_scan_does_not_freeze_the_event_loop(monkeypatch, tmp_path):
@@ -120,8 +121,9 @@ def test_a_complete_scan_is_served_from_cache(monkeypatch, tmp_path):
 
 def test_roots_are_overridable(monkeypatch, tmp_path):
     """A user whose Desktop is slow or cloud-backed needs an escape hatch."""
-    monkeypatch.setenv("JARVIS_PROJECT_ROOTS", f"{tmp_path}:{tmp_path / 'nope'}")
-    assert server._scan_roots() == [tmp_path, tmp_path / "nope"]
+    monkeypatch.setenv("JARVIS_PROJECT_ROOTS",
+                       os.pathsep.join([str(tmp_path), str(tmp_path / 'nope')]))
+    assert server._scan_roots() == [tmp_path, tmp_path / "nope", server.project_maker.projects_root()]
 
     monkeypatch.delenv("JARVIS_PROJECT_ROOTS", raising=False)
     assert server.DESKTOP_PATH in server._scan_roots()

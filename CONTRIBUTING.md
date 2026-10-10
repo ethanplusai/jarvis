@@ -8,14 +8,16 @@ Thanks for your interest in contributing! Here's how to get involved.
 2. Clone your fork
 3. Follow the setup instructions in the README
 4. Make your changes
-5. Test that JARVIS still works (start the server, talk to him)
+5. Run `python -m pip install -r requirements-dev.txt -c constraints.txt`,
+   `python -m playwright install chromium`, and `pytest`. In `frontend`, run
+   `npm ci`, `npm test`, and `npm run build`.
 6. Submit a PR
 
 ## What We're Looking For
 
 - **Bug fixes** — if something's broken, fix it
 - **New integrations** — Spotify, Slack, Notion, etc.
-- **Windows/Linux support** — the AppleScript integrations are macOS-only, cross-platform alternatives welcome
+- **Desktop adapters** — macOS and Windows have separate adapters; Linux desktop support is still unavailable
 - **Better error handling** — things fail silently in places
 - **Voice improvements** — alternative TTS providers, better speech recognition
 - **New actions** — extend what JARVIS can do
@@ -26,7 +28,9 @@ Yes, `server.py` is a 5,600-line monolith. It works. If you want to refactor par
 
 - Keep voice responses short (1-2 sentences max)
 - Don't add dependencies unless necessary
-- Test your changes by actually talking to JARVIS
+- Keep automated tests isolated from real Claude, microphones and desktop actions.
+  Test subprocess ownership using harmless Python child processes. Deliberate
+  manual voice/desktop checks supplement the offline suite.
 - Keep the personality consistent — British butler, dry wit, economy of language
 
 ## What NOT to Do
@@ -47,3 +51,11 @@ Open an issue with:
 ## Questions?
 
 Open an issue or start a discussion. Keep it simple.
+# Dependency and business integration changes
+
+Use [the explicit dependency upgrade workflow](docs/dependency-upgrades.md).
+New provider mutations must pass through the immutable Business approval ledger;
+never add an MCP tool that approves or executes its own proposal. Test unknown
+outcomes, concurrent approval, account/destination changes, and restore replay
+prevention using mocked HTTP transports. Do not exercise paid accounts in tests.
+See [architecture boundaries](docs/architecture-boundaries.md) for module contracts.

@@ -18,6 +18,7 @@
           <span class="dot dot--done tone-ok" aria-hidden="true"></span>
           <span id="link-state-text">Link OK</span>
         </div>
+        <button id="btn-business" type="button">Business desk</button>
         <div id="stats" class="shell-stats"></div>
       </div>
 
@@ -77,7 +78,13 @@
             <span id="history-meta" class="panel-meta"></span>
           </header>
           <div class="panel-body">
-            <div id="history-list" class="stack"></div>
+              <div id="history-list" class="stack"></div>
+              <form id="history-filter">
+                <label for="history-project">Project history</label>
+                <input id="history-project" type="search" placeholder="All projects" />
+                <button type="submit">Filter</button>
+              </form>
+              <button id="history-more" type="button">Load older runs</button>
           </div>
         </section>
       </div>

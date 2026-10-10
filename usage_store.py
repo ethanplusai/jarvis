@@ -121,7 +121,7 @@ def latest() -> Optional[dict]:
     must degrade to "not measured", never to an error or to zeroes.
     """
     try:
-        body = json.loads(data_paths.usage_path().read_text())
+        body = json.loads(data_paths.usage_path().read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
@@ -140,7 +140,7 @@ def _write(record: dict) -> None:
     try:
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".usage-", suffix=".json")
         try:
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(record, fh, indent=2, sort_keys=True)
             os.replace(tmp, path)
         except BaseException:

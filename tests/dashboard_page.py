@@ -43,6 +43,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -87,7 +88,10 @@ def build_bundle() -> Path:
     """
     target = DIST / "dashboard.html"
     if not target.is_file() or target.stat().st_mtime < _newest_source():
-        subprocess.run(["npm", "run", "build"], cwd=FRONTEND, check=True,
+        # The resolved path: on Windows `npm` is `npm.cmd`, which a bare
+        # name does not find.
+        subprocess.run([shutil.which("npm") or "npm", "run", "build"],
+                       cwd=FRONTEND, check=True,
                        capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT_SEC)
     return DIST
@@ -223,6 +227,7 @@ def _handler_for(api: Api, root: Path):
 
 def quiet_machine() -> Api:
     api = Api()
+    api.json("/api/capabilities", {"open_editor": True, "open_terminal": True, "open_browser": True})
     api.json("/api/runs", {"runs": []})
     api.json("/api/runs/stats", {
         "period": "day", "by_status": {}, "total_runs": 0,
@@ -231,7 +236,9 @@ def quiet_machine() -> Api:
     api.json("/api/usage/limits", usage_limits())
     api.json("/api/sessions", {"sessions": [], "projects": {},
                                "taken_at": 0.0})
-    api.json("/api/memory", {"documents": [], "journal": []})
+    api.json("/api/memory", {"path": "/tmp/jarvis-home", "index": [], "memories": [],
+                             "projects": [], "journal": [], "latest_journal_slug": None,
+                             "unindexed": []})
     api.json("/api/projects/view", {"projects": [], "taken_at": 0.0})
     api.json("/api/specs", {"projects": []})
     api.json("/api/usage/sessions", {
@@ -264,8 +271,21 @@ def usage_limits(*keys: str) -> dict:
     }
 
 
+def noon_today() -> float:
+    """Local noon today, to set a page's clock to with `set_system_time`.
+
+    `formatStamp` (panelstate.ts) drops the date only for an instant on the
+    page's own local day. From the wall clock, "a minute ago" is yesterday
+    just after midnight and a test of the bare clock fails for that part of
+    every day; from noon, an hour either side is today and a day back is
+    yesterday, whatever the hour the suite runs.
+    """
+    t = time.localtime()
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 12, 0, 0, 0, 0, -1))
+
+
 @asynccontextmanager
-async def dashboard(api: Api):
+async def dashboard(api: Api, setup=None, entry="dashboard.html"):
     """The built page, loaded against `api`, as a `page` to drive.
 
     The browser is launched per test rather than shared: a session-scoped
@@ -287,7 +307,9 @@ async def dashboard(api: Api):
                 context = await browser.new_context(viewport=VIEWPORT)
                 page = await context.new_page()
                 await page.clock.install()
-                await page.goto(f"{server.base}/dashboard.html",
+                if setup is not None:
+                    await setup(page)
+                await page.goto(f"{server.base}/{entry}",
                                 wait_until="load")
                 yield page
             finally:

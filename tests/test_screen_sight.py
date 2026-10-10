@@ -222,7 +222,8 @@ async def test_every_subprocess_is_time_boxed(runner):
 async def test_a_stalled_subprocess_is_killed_and_reported():
     """The real `_run`, against a real process that will not finish."""
     rc, _out, err = await asyncio.wait_for(
-        real_screen._run("/bin/sleep", "30", timeout=0.2), 5)
+        real_screen._run(sys.executable, "-c", "import time; time.sleep(30)",
+                         timeout=0.2), 5)
     assert rc == -1
     assert "timed out" in err
 

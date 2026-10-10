@@ -80,7 +80,7 @@ def test_the_reader_really_does_split_on_it(env, sep):
     _c, server = env
     path = server._env_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"USER_NAME=Tony{sep}{PAYLOAD}\n")
+    path.write_text(f"USER_NAME=Tony{sep}{PAYLOAD}\n", encoding="utf-8")
     _lines, parsed = server._read_env()
     assert parsed.get("JARVIS_CLAUDE_PATH") == "/tmp/evil", (hex(ord(sep)),
                                                              parsed)

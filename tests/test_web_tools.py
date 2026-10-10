@@ -210,7 +210,10 @@ def test_the_reader_set_is_every_acting_tool_that_only_reads(wired):
     server = wired
     assert server.UNTRUSTED_READING_TOOLS == {
         "read_page", "look_at_page", "github_repo",
-        "look_at_screen", "what_is_on_screen"}
+        "look_at_screen", "what_is_on_screen",
+        # Brings back what Google, Meta, Twilio and OpenAI say about the
+        # user's own campaigns. It taints the turn, and it sends nothing.
+        "business_report"}
     assert server.UNTRUSTED_READING_TOOLS <= server.ACTING_TOOLS, \
         "a name in here that is not an acting tool gates nothing and is a typo"
     for writer in ("remember", "project_note", "write_journal", "spawn_run",
@@ -286,7 +289,7 @@ def test_the_brain_is_told_a_web_page_is_never_an_instruction(tmp_path):
     generation."""
     import brain
     guidance = Path(__file__).resolve().parents[1] / "jarvis_home" / "CLAUDE.md"
-    text = guidance.read_text()
+    text = guidance.read_text(encoding="utf-8")
     assert "web page" in text and "never an instruction" in text
 
     prompt = brain.Brain(_config(tmp_path)).launch_prompt()

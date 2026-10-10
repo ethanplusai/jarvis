@@ -128,7 +128,7 @@ async def test_a_failed_standby_leaves_the_current_brain_serving(tmp_path, monke
         await b.turn("hello")
         gen = b.generation
         pid = b._proc.pid
-        marker.write_text("x")                    # the replacement exits 1 at startup
+        marker.write_text("x", encoding="utf-8")                    # the replacement exits 1 at startup
 
         assert await b.rotate(handover="x") is False
 
@@ -175,7 +175,7 @@ async def test_a_failed_rotation_does_not_burn_the_restart_budget(tmp_path, monk
         await b.start()
         await b.turn("hello")
         for _ in range(4):
-            marker.write_text("x")
+            marker.write_text("x", encoding="utf-8")
             assert await b.rotate(handover="x") is False
         await asyncio.sleep(1.0)                  # past any restart backoff
 
@@ -209,7 +209,7 @@ async def test_a_rotation_that_loses_both_processes_is_handed_back_to_the_restar
             return await real(*argv, **kw)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", kill_the_predecessor)
-        marker.write_text("x")                 # ...and the replacement will not start
+        marker.write_text("x", encoding="utf-8")                 # ...and the replacement will not start
 
         assert await b.rotate(handover="x") is False
 
@@ -326,39 +326,56 @@ def test_the_budget_defaults_and_reads_the_environment(tmp_path, monkeypatch):
 
 
 def test_a_cache_rebuild_is_not_counted_as_the_conversation_growing():
-    """Live: a 60k budget rotated at ~30k of actual talk, and the user asked
-    why his assistant compacted so often.
+    """The same prompt is reported as WRITTEN when it misses the cache and
+    as READ when it hits. Neither is growth: the window is all three
+    columns, and it is the same size either way.
 
-    `context_tokens` summed input + cache_read + cache_creation. But
-    cache_creation is the prompt cache being REBUILT out of the same prompt --
-    a turn that misses the cache reports the whole floor under that column
-    and again next turn under cache_read. Summing all three counted every
-    cache miss as the conversation doubling. The window is the prompt as
-    sent: input plus cache_read, and nothing else."""
-    t = brain._Turn("user", None)
-    # A cache-miss turn: everything was re-created, nothing was read.
-    t.usage = {"input_tokens": 500, "cache_read_input_tokens": 0,
-               "cache_creation_input_tokens": 29_000, "output_tokens": 40}
-    assert t.context_tokens() == 500, (
-        "29k of cache creation is the floor being rebuilt, not 29k of new "
-        "conversation")
-    # The next turn reads that cache back: THIS is the real window size.
-    t.usage = {"input_tokens": 500, "cache_read_input_tokens": 29_000,
-               "cache_creation_input_tokens": 0, "output_tokens": 40}
-    assert t.context_tokens() == 29_500
+    This test used to pin the opposite rule — the window was input plus
+    cache_read, and a cache-miss turn measured 500 tokens. That is exactly
+    what generation 1 of 2026-09-25 did on a cold boot: its warm-up missed,
+    its floor was logged as `ctx=2`, and every turn after it read the
+    99,000-token floor back as conversation. The over-count the old rule was
+    written for (a 60k budget rotating at ~30k of talk) was the CLI's sum
+    over a turn's API calls; tests/test_rotation_loop.py covers that."""
+    floor = brain._Turn("user", None)
+    # The warm-up on a cold cache: the whole floor written, none of it read.
+    floor.usage = {"input_tokens": 500, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 29_000, "output_tokens": 40}
+    assert floor.context_tokens() == 29_500, (
+        "a floor that was written to the cache is still the floor")
+    # The next turn reads that cache back, and has added nothing.
+    hit = brain._Turn("user", None)
+    hit.usage = {"input_tokens": 500, "cache_read_input_tokens": 29_000,
+                 "cache_creation_input_tokens": 0, "output_tokens": 40}
+    assert hit.context_tokens() - floor.context_tokens() == 0, (
+        "reading back what was written is not the conversation growing")
+    # A cache that lapses mid-conversation is rebuilt: the whole prompt is
+    # written again. The window is what it was plus what was said.
+    rebuilt = brain._Turn("user", None)
+    rebuilt.usage = {"input_tokens": 10, "cache_read_input_tokens": 0,
+                     "cache_creation_input_tokens": 29_490 + 1_200,
+                     "output_tokens": 40}
+    assert rebuilt.context_tokens() - floor.context_tokens() == 1_200
 
 
 @pytest.mark.asyncio
-async def test_the_budget_is_spent_on_talk_not_on_cache_churn(tmp_path):
+async def test_the_budget_is_spent_on_talk_not_on_cache_churn(tmp_path, monkeypatch):
     """End to end through the real Brain with the fake, which reports 1,000
-    tokens of cache creation on every turn. With the budget set just above
-    the warm-up floor, those 1,000 must not be what tips it over."""
+    tokens of cache creation on every turn, the warm-up included. They are
+    in the floor and in every turn alike, so they cancel: with the budget
+    set just above one turn of talk, cache churn must not tip it over.
+
+    The warm-up misses the cache, as every cold boot does: its floor is
+    reported as WRITTEN and the next turn reads it back. A measure that left
+    cache creation out took that floor as 10 tokens and the next turn's
+    19,000 as all conversation — this test rotated under it."""
+    monkeypatch.setenv("FAKE_BRAIN_COLD_WARMUP", "1")
     b = brain.Brain(_config(tmp_path, context_budget=9_500))
     try:
         await b.start()
         # The fake's window grows 9,000/turn in cache_read; the warm-up is turn 1.
-        # One conversational turn is 9,000 of real growth -- under 9,500 -- plus
-        # 1,000 of cache_creation that must not count. If it did, this rotates.
+        # One conversational turn is 9,000 of real growth -- under 9,500. The
+        # 1,000 of cache_creation is in the floor too, so it is not growth.
         await b.turn("hello")
         assert b.rotation_pending is False, (
             f"rotated on cache churn: conversation={b.conversation_tokens} "

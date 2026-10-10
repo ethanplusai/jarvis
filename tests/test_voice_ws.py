@@ -20,7 +20,8 @@ class FakeBrain:
     async def stop(self):
         pass
 
-    async def turn(self, text, origin="user", on_delta=None, on_tool=None):
+    async def turn(self, text, origin="user", on_delta=None, on_tool=None,
+                   on_switch=None):
         from brain import TurnResult
         self.turns.append((text, origin))
         out = f"Echo: {text}."
@@ -72,6 +73,27 @@ def test_connect_sends_config_and_idle(client):
     with c.websocket_connect("/ws/voice") as ws:
         assert ws.receive_json() == {"type": "config", "muteMicDuringSpeech": False}
         assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+
+def test_typed_delivery_is_deduplicated_after_reconnect(client):
+    c, server = client
+    payload = {"type": "transcript", "id": "stable-message-1", "text": "typed request",
+               "source": "typed", "isFinal": True}
+    with c.websocket_connect("/ws/voice") as ws:
+        ws.receive_json(); ws.receive_json()
+        ws.send_json(payload)
+        receipt = _drain_until(ws, lambda m: m["type"] == "receipt")[-1]
+        assert receipt["status"] == "accepted"
+        _drain_until(ws, lambda m: m["type"] == "audio")
+    with c.websocket_connect("/ws/voice") as ws:
+        ws.receive_json(); ws.receive_json()
+        ws.send_json(payload)
+        receipt = _drain_until(ws, lambda m: m["type"] == "receipt")[-1]
+        assert receipt["status"] == "accepted"
+    assert server.brain_instance.turns == [("typed request", "user")]
+    messages = c.get("/api/conversation").json()["messages"]
+    assert len([m for m in messages if m["role"] == "user"]) == 1
+    assert any(m["role"] == "assistant" for m in messages)
 
 
 def test_greeting_is_spoken_through_the_scheduler(client):
@@ -187,7 +209,8 @@ def test_lifespan_builds_brain_without_spawning_under_test(client):
 # ── failure paths (from the Task 7 review) ──────────────────────────────
 
 class ExplodingBrain(FakeBrain):
-    async def turn(self, text, origin="user", on_delta=None, on_tool=None):
+    async def turn(self, text, origin="user", on_delta=None, on_tool=None,
+                   on_switch=None):
         self.turns.append((text, origin))
         raise RuntimeError("boom")
 
@@ -280,3 +303,44 @@ def test_fmt_reset_names_the_day_when_it_is_not_today(client):
     assert far.endswith(" at 10 AM") and any(ch.isdigit() for ch in far.split(" at ")[0])
     assert server._fmt_reset(None) == "later"
     assert server._fmt_reset("not a time") == "later"
+
+
+def test_the_latency_line_decomposes_first_audio(client):
+    """brain -> first cut -> synthesis -> sent, and how much context was
+    served from cache, so a slow reply can be blamed on the right thing."""
+    c, server = client
+    from brain import TurnResult
+    from speech import Priority, Utterance
+    u = Utterance(id=1, priority=Priority.NORMAL, kind="turn", created=10.0)
+    u.first_cut_at, u.first_ready_at, u.first_sent_at = 11.5, 13.1, 13.2
+    r = TurnResult(origin="user", text="x", stop_reason="result", context_tokens=26792,
+                   cached_tokens=26000, output_tokens=25, duration_sec=1.98, first_delta_sec=1.39)
+    line = server._latency_line(r, u, t0=10.0)
+    assert line.startswith("latency: first_delta=1.39s first_cut=1.50s first_tts=1.60s "
+                           "first_audio=3.20s turn=1.98s"), line
+    assert "ctx=26792 cached=26000 out=25 tools=[]" in line, line
+    silent = Utterance(id=2, priority=Priority.NORMAL, kind="turn", created=10.0)
+    quiet = server._latency_line(r, silent, t0=10.0)
+    assert "first_cut=none first_tts=none first_audio=none" in quiet, quiet
+
+
+def test_a_final_transcript_warms_the_tts_connection_before_the_brain_answers(client, monkeypatch):
+    """The TLS handshake overlaps the brain's thinking instead of following
+    it. Once per utterance: an interim and its final within the same
+    breath warm once."""
+    c, server = client
+    warmed = []
+
+    async def fake_warm(tts_client, timeout=3.0):
+        warmed.append(tts_client)
+        return True
+
+    monkeypatch.setattr(server.tts, "warm", fake_warm)
+    server._tts_warmed_at = 0.0
+    with c.websocket_connect("/ws/voice") as ws:
+        ws.receive_json(); ws.receive_json()
+        ws.send_json({"type": "interim", "text": "what time"})
+        ws.send_json({"type": "transcript", "id": "warm-1", "text": "what time is it",
+                      "source": "spoken", "isFinal": True})
+        _drain_until(ws, lambda m: m["type"] == "audio")
+    assert len(warmed) == 1, warmed

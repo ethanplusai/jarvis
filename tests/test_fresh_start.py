@@ -45,3 +45,14 @@ def test_punctuation_and_case_do_not_matter():
 
 def test_the_line_he_hears_says_it_is_gone():
     assert "Cleared" in server.FRESH_START_LINE
+
+
+def test_the_line_he_hears_does_not_claim_the_transcript_is_gone():
+    """`_start_fresh` rotates the generation. The conversation rows in SQLite
+    and the CLI's own transcript of that generation stay on disk, and the
+    phrases that trigger it include "forget this conversation" — so the
+    spoken line must not promise a deletion nothing performs."""
+    line = server.FRESH_START_LINE
+    assert "nothing of that conversation left" not in line
+    assert "transcript" in line.lower()
+    assert line.count(".") <= 2, "two sentences is the ceiling for a spoken line"

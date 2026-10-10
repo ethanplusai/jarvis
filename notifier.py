@@ -26,6 +26,7 @@ import logging
 import shutil
 import sys
 
+_windows = sys.platform == "win32"
 log = logging.getLogger("jarvis.notifier")
 
 # A notification is a glance, not an essay -- keep it short. These bound
@@ -69,7 +70,7 @@ def available() -> bool:
     Center settings, Focus/Do Not Disturb, or per-app permissions can still
     silently drop the notification even when this returns True.
     """
-    return sys.platform == "darwin" and shutil.which("osascript") is not None
+    return _windows or (sys.platform == "darwin" and shutil.which("osascript") is not None)
 
 
 async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
@@ -83,6 +84,10 @@ async def notify(title: str, message: str, *, subtitle: str = "") -> bool:
     wedged process cannot hang the caller.
     """
     try:
+        if _windows:
+            import windows_desktop
+            await windows_desktop.notify(str(title), f"{subtitle} {message}".strip())
+            return True
         if not available():
             log.warning("notifier: notifications unavailable on this platform")
             return False

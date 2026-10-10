@@ -89,7 +89,7 @@ def test_a_line_with_no_usage_block_is_not_a_turn(tmp_path):
     a, _ = roots(tmp_path)
     p = write_transcript(a, cwd="/p/one", session_id="s1",
                          turns=[dict(when=NOW - HOUR, out=7)])
-    with open(p, "a") as fh:
+    with open(p, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "assistant", "sessionId": "s1",
                              "message": {"role": "assistant"}}) + "\n")
 
@@ -268,7 +268,7 @@ def test_a_corrupt_sidecar_is_ignored_not_raised(tmp_path):
                            turns=[dict(when=NOW - 10, out=5)])
     side = (a / "projects" / encode("/p/one") / "s1" / "subagents"
             / "agent-a1.meta.json")
-    side.write_text("{half writ")
+    side.write_text("{half writ", encoding="utf-8")
 
     agent, = one(us.report(roots=[a], now=NOW), "s1").agents
 
@@ -387,9 +387,11 @@ def test_a_replaced_file_at_the_same_path_and_size_is_read_from_the_start(tmp_pa
     cache = us.Cache()
     us.report(roots=[a], now=NOW, cache=cache)
 
-    body = p.read_text().replace('"output_tokens": 111', '"output_tokens": 222')
+    body = p.read_text(encoding="utf-8").replace('"output_tokens": 111', '"output_tokens": 222')
     p.unlink()
-    p.write_text(body)
+    # newline='' so Windows does not grow the file by one CR per line;
+    # the point is the same size with a different identity.
+    p.write_text(body, newline='', encoding="utf-8")
     assert len(body) == p.stat().st_size
 
     assert one(us.report(roots=[a], now=NOW, cache=cache), "s1").tokens.output == 222
@@ -641,9 +643,9 @@ def test_a_non_numeric_token_count_is_zero_not_a_crash(tmp_path, garbage):
     a, _ = roots(tmp_path)
     p = write_transcript(a, cwd="/p/one", session_id="s1",
                          turns=[dict(when=NOW - HOUR, out=5)])
-    body = json.loads(p.read_text().strip().splitlines()[-1])
+    body = json.loads(p.read_text(encoding="utf-8").strip().splitlines()[-1])
     body["message"]["usage"]["output_tokens"] = garbage
-    with open(p, "a") as fh:
+    with open(p, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(body) + "\n")
 
     assert one(us.report(roots=[a], now=NOW), "s1").tokens.output == 5
@@ -656,13 +658,21 @@ def test_a_non_numeric_token_count_is_zero_not_a_crash(tmp_path, garbage):
 # was COUNTED but never opened made that flag lie: "Tokens, all time: 0"
 # under "Read from 1 transcript".
 
+# `os.chmod(path, 0o000)` denies the owner nothing on Windows (it only clears
+# the read-only bit's opposite), so "a file this process cannot open" cannot
+# be staged there. `os.geteuid` does not exist there either.
+_NEEDS_POSIX_PERMISSIONS = pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="needs POSIX permission bits, and a non-root user they apply to")
+
+
 def _unreadable(path: Path) -> None:
     """A transcript this process cannot open — the shape of a machine
     without Full Disk Access, which is the normal first-run state on macOS."""
     os.chmod(path, 0o000)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read anything")
+@_NEEDS_POSIX_PERMISSIONS
 def test_a_transcript_that_could_not_be_read_is_not_measured(tmp_path):
     a, _ = roots(tmp_path)
     p = write_transcript(a, cwd="/p/one", session_id="s1",
@@ -679,7 +689,7 @@ def test_a_transcript_that_could_not_be_read_is_not_measured(tmp_path):
     assert report.files == 0
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read anything")
+@_NEEDS_POSIX_PERMISSIONS
 def test_one_unreadable_file_does_not_unmeasure_the_readable_ones(tmp_path):
     a, _ = roots(tmp_path)
     good = write_transcript(a, cwd="/p/one", session_id="good",
@@ -719,7 +729,7 @@ def _turn_stamped(path: Path, session_id: str, cwd: str, stamp: str,
     line = json.loads(assistant_line(session_id=session_id, cwd=cwd,
                                      when=NOW, out=out))
     line["timestamp"] = stamp
-    with open(path, "a") as fh:
+    with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(line) + "\n")
 
 

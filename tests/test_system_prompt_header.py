@@ -60,7 +60,7 @@ def _system_prompt_sites() -> dict[str, list[int]]:
     repository that hands text to a Claude Code child as its system prompt."""
     sites: dict[str, list[int]] = {}
     for path in MODULES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         owner: dict[int, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -158,13 +158,62 @@ def _with_hostile_user_name(brain_module, b):
     b.config.user_name = HOSTILE
 
 
+def _with_hostile_noted_projects(brain_module, b):
+    # The titles of the files in `projects/` — the brain's own earlier
+    # `project_note` argument, which is to say a string a model chose out
+    # of whatever it had read.
+    b.noted_projects = lambda: [HOSTILE, "hammer"]
+
+
+def _with_hostile_approval_cards(brain_module, b):
+    # JARVIS's own ledger, but the tool and server names in a card came from
+    # a model's tool call and the user's connections.json, and the request
+    # is a model's words outright. The payload goes in every field in turn,
+    # beside one ordinary card, so a wall that dropped everything would not
+    # pass for one that works.
+    import time
+    now = time.time()
+    good = {"id": "c0602703-9906-4b97-9653-178ec9e5496e",
+            "provider": "connector:paperclip",
+            "operation": "mcp__paperclip__paperclipAddComment",
+            "state": "approved", "created": now - 60, "updated": now - 30,
+            "expires": now + 3600, "payload": {"body": HOSTILE},
+            "result": {"message": HOSTILE}}
+    hostile = [dict(good, id=HOSTILE),
+               dict(good, provider="connector:" + HOSTILE),
+               # A server name and a tool name that AGREE, so only the wall
+               # on the server name stands between the payload and the line.
+               dict(good, provider="connector:" + HOSTILE,
+                    operation="mcp__" + HOSTILE + "__post"),
+               dict(good, operation="mcp__paperclip__" + HOSTILE),
+               dict(good, operation=HOSTILE),
+               dict(good, provider=HOSTILE, operation=HOSTILE),
+               dict(good, state=HOSTILE),
+               dict(good, created=HOSTILE),
+               dict(good, updated=HOSTILE),
+               dict(good, expires=HOSTILE)]
+    b.approval_cards = lambda: hostile + [good]
+
+
 HOSTILE_INPUTS = {
     "active_projects": _with_hostile_projects,
     "_handover": _with_hostile_handover,
     "_boot_handover": _with_hostile_journal,
     "_handover_untrusted": _with_hostile_taint_label,
     "user_name": _with_hostile_user_name,
+    "noted_projects": _with_hostile_noted_projects,
+    "approval_cards": _with_hostile_approval_cards,
 }
+
+
+def test_the_hostile_card_driver_still_lets_an_ordinary_card_through(tmp_path):
+    """The approval-card driver above is only evidence if the wall it is
+    driving lets the ordinary card beside the hostile ones through."""
+    brain_module, b = _brain(tmp_path)
+    _with_hostile_approval_cards(brain_module, b)
+    prompt = b.launch_prompt()
+    assert "c0602703-9906-4b97-9653-178ec9e5496e (paperclipAddComment on paperclip)" in prompt
+    assert prompt.count("c0602703") == 1, "only the ordinary card is named"
 
 
 @pytest.mark.parametrize("which", sorted(HOSTILE_INPUTS))
@@ -179,7 +228,7 @@ def test_the_hostile_input_list_covers_every_input_the_prompt_reads():
     `self.config.<x>` it reads is either driven above or is this process's
     own bookkeeping."""
     import brain as brain_module
-    src = Path(brain_module.__file__).read_text()
+    src = Path(brain_module.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "launch_prompt")
@@ -195,11 +244,15 @@ def test_the_hostile_input_list_covers_every_input_the_prompt_reads():
                 and isinstance(sub.func.value, ast.Name) \
                 and sub.func.value.id == "self":
             read.add(sub.func.attr)
-    # This process's own values: an integer counter, the two private helpers
-    # whose RESULTS are what `HOSTILE_INPUTS` poisons, and `self.config`
-    # itself — the walk above already reduces `self.config.<x>` to `<x>`, so
-    # the dataclass's own fields are enumerated one by one.
-    ours = {"generation", "_boot_projects", "config"}
+    # This process's own values: an integer counter, the three private
+    # helpers whose RESULTS are what `HOSTILE_INPUTS` poisons, and
+    # `self.config` itself — the walk above already reduces `self.config.<x>`
+    # to `<x>`, so the dataclass's own fields are enumerated one by one.
+    # `_handover_none` is a boolean of the brain's own bookkeeping (a fresh
+    # start carries no handover, not even from disk): it selects, never
+    # supplies, text.
+    ours = {"generation", "_boot_projects", "_boot_noted_projects",
+            "_boot_approval_cards", "config", "_handover_none"}
     undecided = sorted(read - set(HOSTILE_INPUTS) - ours)
     assert not undecided, (
         f"launch_prompt reads these and no hostile value is driven through "
@@ -290,3 +343,49 @@ def test_the_server_supplies_names_that_are_already_ordinary(monkeypatch,
         assert MARKER not in name, names
         assert "\n" not in name, names
         assert "<" not in name and ">" not in name, names
+
+
+# --- projects with notes are named at boot ---------------------------------
+
+def test_projects_with_notes_are_named_at_boot(tmp_path):
+    """The persona promised `project_note` would leave the next conversation
+    informed. Nothing read the notes. Now the boot prompt names which
+    projects have them, and the tool that reads them."""
+    _brain_module, b = _brain(tmp_path)
+    b.noted_projects = lambda: ["chitauri", "hammer"]
+
+    prompt = b.launch_prompt()
+
+    assert "Projects you have notes on: chitauri, hammer." in prompt
+    assert "project_history" in prompt
+    assert_prompt_is_jarviss_own(prompt)
+
+
+def test_no_notes_means_no_line(tmp_path):
+    _brain_module, b = _brain(tmp_path)
+    b.noted_projects = lambda: []
+    assert "notes on" not in b.launch_prompt()
+
+
+def test_the_noted_project_line_is_bounded_and_ordinary(tmp_path):
+    brain_module, b = _brain(tmp_path)
+    b.noted_projects = lambda: [f"p{i}" for i in range(40)] + [HOSTILE]
+
+    prompt = b.launch_prompt()
+
+    line = next(l for l in prompt.splitlines() if l.startswith("Projects you have notes on"))
+    assert line.count(",") + 1 <= brain_module.MAX_BOOT_PROJECTS
+    assert_prompt_is_jarviss_own(prompt)
+
+
+def test_the_default_reads_the_note_files_and_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    import jarvis_memory
+    jarvis_memory.write_project_note("chitauri", "Uses WordPress.")
+    _brain_module, b = _brain(tmp_path)
+
+    assert b.noted_projects() == ["chitauri"]
+
+    monkeypatch.setattr(jarvis_memory, "project_names",
+                        lambda: (_ for _ in ()).throw(OSError("disk gone")))
+    assert "notes on" not in b.launch_prompt(), "a broken folder must not stop the brain"

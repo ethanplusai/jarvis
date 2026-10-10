@@ -1,3 +1,7 @@
+import { SpeechLevelDetector } from "./speechlevel";
+import { DeafWatch } from "./deafwatch";
+import { planLocalRecognition, shouldAbandonLocal, type Availability } from "./ondevice";
+
 /**
  * Voice input (Web Speech API) and audio output (AudioContext) for JARVIS.
  *
@@ -18,6 +22,10 @@ export interface VoiceInput {
   /** Tear the recogniser down and build a new one, now. For when it is
    *  provably deaf: capturing audio and returning nothing. */
   restart(reason: string): void;
+  /** Ask the browser for on-device recognition (Chrome 139+) and install
+   *  its language pack if it is only downloadable. Safe to call again; call
+   *  it from a user gesture too, since an install may need one. */
+  prepareLocal(): Promise<void>;
 }
 
 const INTERIM_THROTTLE_MS = 200;
@@ -67,13 +75,13 @@ const DEDUPE_WINDOW_MS = 2500;
 // silence it needs.
 const QUIET_BEFORE_ROTATE_MS = 1500;
 
-// RMS above this is someone talking rather than room tone. Measured on a
-// laptop microphone at normal speaking distance; background hum sits an order
-// of magnitude below it.
-const SPEECH_LEVEL = 0.02;
+// Whether a level is someone talking is decided against the room's own noise
+// floor, not a fixed number: see speechlevel.ts for why the fixed one restarted
+// the recogniser every fifteen seconds on a noisier microphone.
 
 // Sound going in with nothing coming out for this long is the recogniser
-// failing, not the user being quiet.
+// failing, not the user being quiet. Judged by DeafWatch (deafwatch.ts),
+// which is HELD while JARVIS speaks: his own voice is not evidence.
 const DEAF_AFTER_MS = 3000;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,10 +104,9 @@ declare const webkitSpeechRecognition: any;
 export function createMicMonitor(
   onLevel: (level: number) => void,
   onEvent: (event: string) => void
-): { sawSpeech(): void } {
-  let lastLoudAt = 0;
-  let lastResultAt = Date.now();
-  let complainedAt = 0;
+): { sawSpeech(): void; hold(): void; release(): void } {
+  const detector = new SpeechLevelDetector();
+  const watch = new DeafWatch(Date.now(), { deafAfterMs: DEAF_AFTER_MS });
 
   navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
     const ctx = new AudioContext();
@@ -121,16 +128,14 @@ export function createMicMonitor(
       onLevel(rms);
 
       const now = Date.now();
-      if (rms > SPEECH_LEVEL) lastLoudAt = now;
+      if (detector.sample(rms)) watch.loud(now);
 
       // Sound went into the microphone and nothing came back out of the
       // recogniser. This is the report that could not be made before.
-      if (lastLoudAt && now - lastLoudAt < 500 &&
-          now - lastResultAt > DEAF_AFTER_MS &&
-          now - complainedAt > 15000) {
-        complainedAt = now;
-        onEvent(`DEAF: mic is hearing sound (level ${rms.toFixed(3)}) but the ` +
-                `recogniser has returned nothing for ${Math.round((now - lastResultAt) / 1000)}s`);
+      if (watch.check(now)) {
+        onEvent(`DEAF: mic is hearing speech-level sound (level ${rms.toFixed(3)}, room ` +
+                `${detector.noiseFloor.toFixed(3)}, threshold ${detector.threshold.toFixed(3)}) ` +
+                `but the recogniser has returned nothing for ${Math.round(watch.silentFor(now) / 1000)}s`);
       }
     }, 200);
   }).catch((e) => {
@@ -138,7 +143,12 @@ export function createMicMonitor(
   });
 
   return {
-    sawSpeech() { lastResultAt = Date.now(); },
+    sawSpeech() { watch.result(Date.now()); },
+    // While JARVIS speaks (or the recogniser is deliberately paused) the
+    // microphone hears him, not the user: hold the verdict, and start the
+    // clock fresh when he stops.
+    hold() { watch.hold(); },
+    release() { watch.release(Date.now()); },
   };
 }
 
@@ -153,7 +163,7 @@ export function createVoiceInput(
   if (!SR) {
     onError("Speech recognition not supported in this browser");
     onMicEvent("no SpeechRecognition in this browser");
-    return { start() {}, stop() {}, pause() {}, resume() {}, restart() {} };
+    return { start() {}, stop() {}, pause() {}, resume() {}, restart() {}, async prepareLocal() {} };
   }
 
   let shouldListen = false;
@@ -167,6 +177,34 @@ export function createVoiceInput(
   let stallNoticeAt = 0;
   // Any sign the user is mid-sentence. A rotation during one loses it.
   let lastHeardAt = 0;
+  // Recognise on this machine rather than in Google's cloud, once the
+  // browser says it can (see ondevice.ts). Decided by prepareLocal().
+  let useLocal = false;
+  let localProbe: Promise<void> | null = null;
+  let lastProbeAt = 0;
+
+  const LANGS = ["en-US"];
+  async function probeLocal(): Promise<void> {
+    if (typeof SR.available !== "function") { mark(planLocalRecognition("unsupported").say); return; }
+    let status: Availability;
+    try { status = await SR.available({ langs: LANGS, processLocally: true }); }
+    catch (err) { mark(`on-device recognition: available() failed (${(err as Error).message}); using the cloud`); return; }
+    const plan = planLocalRecognition(status);
+    mark(plan.say);
+    let local = plan.useLocal;
+    if (plan.install && typeof SR.install === "function") {
+      try {
+        local = await SR.install({ langs: LANGS, processLocally: true, quality: "dictation" }) === true;
+        mark(local ? "on-device recognition: language pack installed" : "on-device recognition: install refused; using the cloud");
+      } catch (err) {
+        mark(`on-device recognition: install failed (${(err as Error).message}); using the cloud`);
+      }
+    }
+    if (local && !useLocal) {
+      useLocal = true;
+      if (shouldListen && !paused && anyoneListening()) api.restart("switching to on-device recognition");
+    }
+  }
 
   const mark = (what: string) => {
     console.info(`[voice] ${new Date().toLocaleTimeString()} ${what}`);
@@ -185,6 +223,7 @@ export function createVoiceInput(
     startedAt: number;
     stoppedAt: number;
     retired: boolean;                // handed over; its results are stale
+    local: boolean;                  // processLocally: on-device, not the cloud
   }
 
   const engines: Engine[] = [];
@@ -230,13 +269,14 @@ export function createVoiceInput(
     sr.continuous = true;
     sr.interimResults = true;
     sr.lang = "en-US";
-    const e: Engine = { sr, running: false, audio: false, startedAt: 0, stoppedAt: 0, retired: false };
+    if (useLocal) sr.processLocally = true;
+    const e: Engine = { sr, running: false, audio: false, startedAt: 0, stoppedAt: 0, retired: false, local: useLocal };
 
     sr.onstart = () => {
       e.running = true;
       e.startedAt = Date.now();
       retryDelay = 1000;
-      mark("listening");
+      mark(e.local ? "listening (on-device)" : "listening");
     };
     sr.onaudiostart = () => {
       e.audio = true;
@@ -356,6 +396,13 @@ export function createVoiceInput(
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function handleError(event: any, e: Engine) {
+    if (e.local && shouldAbandonLocal(String(event.error))) {
+      // A restart will not fix this one; the cloud is the fallback.
+      useLocal = false;
+      mark(`on-device recognition failed (${event.error}); back to the cloud`);
+      api.restart("on-device recognition failed");
+      return;
+    }
     if (event.error === "not-allowed") {
       onError("Microphone blocked — retrying. Check this origin's mic permission.");
       waitingForRetry = true;
@@ -427,11 +474,26 @@ export function createVoiceInput(
     }
   }
 
-  return {
+  const api: VoiceInput = {
+    prepareLocal() {
+      // Once local is on, there is nothing to ask. Until then every call is
+      // a fresh attempt (throttled): the first runs at start() with no user
+      // gesture, and an install the browser refused there may be allowed
+      // from the click that follows.
+      if (useLocal) return Promise.resolve();
+      if (localProbe) return localProbe;
+      if (Date.now() - lastProbeAt < 5000) return Promise.resolve();
+      lastProbeAt = Date.now();
+      localProbe = probeLocal()
+        .catch((err) => mark(`on-device recognition: ${(err as Error).message}`))
+        .finally(() => { localProbe = null; });
+      return localProbe;
+    },
     start() {
       shouldListen = true;
       paused = false;
       cancelRetry();
+      api.prepareLocal();
       if (!anyoneListening()) startSpare();
       scheduleRotate();
     },
@@ -468,6 +530,7 @@ export function createVoiceInput(
       }, RESTART_DELAY_MS);
     },
   };
+  return api;
 }
 
 // ---------------------------------------------------------------------------

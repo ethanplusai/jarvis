@@ -113,3 +113,44 @@ def test_the_brain_allowlist_matches_the_registered_tools(wired):
 def test_the_mcp_server_advertises_every_registered_tool(wired):
     import jarvis_mcp
     assert {t["name"] for t in jarvis_mcp.TOOL_SPECS} == set(wired.TOOL_HANDLERS)
+
+
+# --- project notes are read back, not only written --------------------------
+#
+# `read_project_note` had no caller outside the tests for five days while
+# the persona promised "so the next conversation starts informed". Nothing
+# was informed: a note was reachable only through `recall`'s substring scan.
+
+def test_project_history_reads_back_what_project_note_wrote(wired):
+    server = wired
+    server.tool_project_note({"project": "chitauri", "text": "Uses WordPress."})
+    server.tool_project_note({"project": "chitauri", "text": "301 fixed."})
+
+    out = server.tool_project_history({"project": "chitauri"})
+
+    assert "WordPress" in out and "301 fixed" in out
+    assert out.index("WordPress") < out.index("301 fixed")
+
+
+def test_project_history_comes_back_inside_a_block(wired):
+    """It is the brain's own earlier output, written out of whatever that
+    turn had read — the same reason `recall` wraps what it returns."""
+    server = wired
+    server.tool_project_note({"project": "chitauri", "text": "Uses WordPress."})
+    out = server.tool_project_history({"project": "chitauri"})
+    assert f'<session-output name="{server._MEMORY_WRAP_NAME}"' in out
+
+
+def test_project_history_for_a_project_never_noted_says_so_plainly(wired):
+    out = wired.tool_project_history({"project": "kestrel"})
+    assert "nothing" in out.lower() or "no notes" in out.lower()
+    assert "<session-output" not in out
+
+
+def test_project_history_without_a_project_asks_for_one(wired):
+    assert "project" in wired.tool_project_history({}).lower()
+
+
+def test_project_history_is_a_reader_and_not_gated(wired):
+    assert "project_history" not in wired.ACTING_TOOLS
+    assert "project_history" in wired.TOOL_HANDLERS

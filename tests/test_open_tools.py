@@ -20,6 +20,10 @@ import pytest
 
 
 class _Actions:
+    @staticmethod
+    def directory_command(path):
+        import shlex
+        return f"cd {shlex.quote(path)}"
     """Stands in for actions.py. Records, never launches."""
 
     def __init__(self, success=True):
@@ -60,8 +64,8 @@ def ready(monkeypatch, tmp_path):
 
     project = tmp_path / "tony-starks-website"
     project.mkdir()
-    (project / "index.html").write_text("<h1>Stark</h1>")
-    (project / "styles.css").write_text("body{}")
+    (project / "index.html").write_text("<h1>Stark</h1>", encoding="utf-8")
+    (project / "styles.css").write_text("body{}", encoding="utf-8")
 
     fake = _Actions()
     monkeypatch.setattr(server_module, "actions", fake)
@@ -196,7 +200,7 @@ async def test_an_absolute_path_outside_every_project_is_refused(ready,
                                                                 tmp_path):
     server, fake, _project = ready
     outside = tmp_path / "secrets.html"
-    outside.write_text("<h1>not yours</h1>")
+    outside.write_text("<h1>not yours</h1>", encoding="utf-8")
 
     out = await server.tool_open_in_browser({"target": str(outside)})
 
@@ -207,7 +211,7 @@ async def test_an_absolute_path_outside_every_project_is_refused(ready,
 @pytest.mark.asyncio
 async def test_a_traversal_out_of_a_project_is_refused(ready, tmp_path):
     server, fake, _project = ready
-    (tmp_path / "elsewhere.html").write_text("x")
+    (tmp_path / "elsewhere.html").write_text("x", encoding="utf-8")
 
     out = await server.tool_open_in_browser(
         {"target": "../elsewhere.html", "project": "tony-starks-website"})
@@ -223,7 +227,7 @@ async def test_a_symlink_pointing_out_of_the_project_is_refused(ready,
     has never been enough."""
     server, fake, project = ready
     secret = tmp_path / "secret.html"
-    secret.write_text("x")
+    secret.write_text("x", encoding="utf-8")
     (project / "innocent.html").symlink_to(secret)
 
     out = await server.tool_open_in_browser(

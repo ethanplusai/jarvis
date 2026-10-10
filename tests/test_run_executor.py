@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import procs
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stream_success.jsonl"
@@ -25,7 +27,7 @@ def _fake_claude(tmp_path: Path, fixture: Path, exit_code: int = 0,
         f"sys.stdout.write(open({str(fixture)!r}).read())\n"
         "sys.stdout.flush()\n"
         f"sys.exit({exit_code})\n"
-    )
+    , encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return f"{sys.executable} {script}"
 
@@ -35,7 +37,7 @@ def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> 
     then exits. Used to drive oversized-line handling through the real
     asyncio subprocess reading path (no mocks)."""
     payload = tmp_path / f"fake_claude_payload_{len(lines)}_{id(lines)}.txt"
-    payload.write_text("\n".join(lines) + "\n")
+    payload.write_text("\n".join(lines) + "\n", encoding="utf-8")
     script = tmp_path / f"fake_claude_lines_{len(lines)}_{id(lines)}.py"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -43,7 +45,7 @@ def _fake_claude_lines(tmp_path: Path, lines: list[str], exit_code: int = 0) -> 
         f"sys.stdout.write(open({str(payload)!r}).read())\n"
         "sys.stdout.flush()\n"
         f"sys.exit({exit_code})\n"
-    )
+    , encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return f"{sys.executable} {script}"
 
@@ -236,9 +238,11 @@ async def test_missing_binary_marks_failed(env):
 def _script(tmp_path: Path, name: str, body: str) -> str:
     """Write a stand-in `claude` binary with an arbitrary body."""
     script = tmp_path / name
-    script.write_text("#!/usr/bin/env python3\nimport sys, time\n" + body)
+    script.write_text("#!/usr/bin/env python3\nimport sys, time\n" + body, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    return f"{sys.executable} {script}"
+    # Windows venv python.exe is a launcher that itself holds the child's
+    # pipes open. These fixtures need the actual interpreter to model EOF.
+    return f"{getattr(sys, '_base_executable', sys.executable)} {script}"
 
 
 def _slow_claude(tmp_path: Path, name: str = "slow_claude.py",
@@ -355,8 +359,7 @@ async def test_store_failure_still_reaches_terminal_state(env):
 
     # ...and no child left behind.
     assert ex._procs == {}
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not _alive(pid)
 
 
 # -- IMPORTANT 4: stderr must be drained concurrently ----------------------
@@ -489,7 +492,7 @@ async def test_timeout_keeps_the_collected_stderr(env, tmp_path):
         "sys.stderr.write('ENOSPC: no space left on device\\n')\n"
         "sys.stderr.flush()\n"
         "time.sleep(30)\n"
-    )
+    , encoding="utf-8")
     ex = mod.RunExecutor(store, claude_path=f"{sys.executable} {script}",
                          grace_sec=1.0)
     run_id = await ex.spawn("hang", "proj", str(tmp), "api", timeout_sec=1)
@@ -604,7 +607,7 @@ async def test_explicit_model_reaches_the_child_argv(env):
     run = await ex.wait_for(run_id)
 
     assert run["status"] == store.RunStatus.SUCCEEDED
-    argv = json.loads(marker.read_text())
+    argv = json.loads(marker.read_text(encoding="utf-8"))
     assert argv[argv.index("--model") + 1] == "haiku"
 
 
@@ -617,7 +620,7 @@ async def test_spawn_without_model_falls_back_to_env(env, monkeypatch):
     run_id = await ex.spawn("do a thing", "proj", str(tmp), "api")
     await ex.wait_for(run_id)
 
-    argv = json.loads(marker.read_text())
+    argv = json.loads(marker.read_text(encoding="utf-8"))
     assert argv[argv.index("--model") + 1] == "opus"
 
 
@@ -631,7 +634,7 @@ async def test_spawn_with_neither_falls_back_to_sonnet_and_flag_always_present(
     run_id = await ex.spawn("do a thing", "proj", str(tmp), "api")
     await ex.wait_for(run_id)
 
-    argv = json.loads(marker.read_text())
+    argv = json.loads(marker.read_text(encoding="utf-8"))
     assert "--model" in argv, "--model must never be omitted"
     assert argv[argv.index("--model") + 1] == "sonnet"
 
@@ -744,7 +747,7 @@ async def test_prompt_is_delivered_via_stdin(env):
     run = await ex.wait_for(run_id)
 
     assert run["status"] == store.RunStatus.SUCCEEDED
-    assert marker.read_text() == "the secret prompt text"
+    assert marker.read_text(encoding="utf-8") == "the secret prompt text"
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +786,7 @@ async def test_a_run_never_inherits_api_credentials(env, monkeypatch):
     run = await ex.wait_for(run_id)
 
     assert run["status"] == store.RunStatus.SUCCEEDED
-    child = json.loads(marker.read_text())
+    child = json.loads(marker.read_text(encoding="utf-8"))
     leaked = [k for k in child
               if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
               or k == "CLAUDECODE"]
@@ -793,13 +796,54 @@ async def test_a_run_never_inherits_api_credentials(env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_run_never_inherits_the_session_that_started_jarvis(env, monkeypatch):
+    """Measured 2026-09-26: JARVIS started by an agent inside Claude Code
+    carried that session's own variables, and the scrub passed on all but
+    CLAUDE_CODE_* and ANTHROPIC_*. A run is an unattended agent with
+    permissions skipped; it gets JARVIS's choices, not the launcher's."""
+    store, mod, tmp = env
+    marker = tmp / "child_env_session.json"
+    leaked = {
+        "CLAUDE_EFFORT": "xhigh", "CLAUDE_PID": "4242",
+        "AI_AGENT": "claude-code_2-1-280_agent",
+        "CLAUDE_AGENT_SDK_VERSION": "0.3.280",
+        "MCP_CONNECTION_NONBLOCKING": "true", "MCP_SERVER_CONNECTION_BATCH_SIZE": "8",
+        "API_TIMEOUT_MS": "900000", "USE_STAGING_OAUTH": "1",
+        "TRACEPARENT": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example",
+        "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer collector-secret",
+    }
+    for name, value in leaked.items():
+        monkeypatch.setenv(name, value)
+
+    claude = _script(
+        tmp, "env_dumping_claude_3.py",
+        "import json, os\n"
+        f"open({str(marker)!r}, 'w').write(json.dumps(dict(os.environ)))\n"
+        f"sys.stdout.write(open({str(FIXTURE)!r}).read())\n"
+        "sys.stdout.flush()\n",
+    )
+    ex = mod.RunExecutor(store, claude_path=claude)
+    run_id = await ex.spawn("do a thing", "proj", str(tmp), "voice")
+    run = await ex.wait_for(run_id)
+
+    assert run["status"] == store.RunStatus.SUCCEEDED
+    child = json.loads(marker.read_text(encoding="utf-8"))
+    assert sorted(set(child) & set(leaked)) == []
+
+
+@pytest.mark.asyncio
 async def test_a_run_still_gets_the_ordinary_environment(env, monkeypatch):
     """The scrub is a scalpel, not a bucket: a child with no PATH or HOME
     cannot find git, node, or the user's own Claude configuration."""
     store, mod, tmp = env
     marker = tmp / "child_env_ordinary.json"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/keep/me")
+    # Without it a Windows run whose git is not where the CLI looks has no
+    # Bash tool at all; the old CLAUDE_CODE_* scrub removed it.
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", "/keep/bash.exe")
     monkeypatch.setenv("JARVIS_MARKER", "kept")
+    monkeypatch.setenv("HOME", str(tmp))
 
     claude = _script(
         tmp, "env_dumping_claude_2.py",
@@ -812,10 +856,11 @@ async def test_a_run_still_gets_the_ordinary_environment(env, monkeypatch):
     run_id = await ex.spawn("do a thing", "proj", str(tmp), "voice")
     await ex.wait_for(run_id)
 
-    child = json.loads(marker.read_text())
+    child = json.loads(marker.read_text(encoding="utf-8"))
     assert child.get("PATH") == os.environ["PATH"]
     assert child.get("HOME") == os.environ["HOME"]
     assert child.get("CLAUDE_CONFIG_DIR") == "/keep/me"
+    assert child.get("CLAUDE_CODE_GIT_BASH_PATH") == "/keep/bash.exe"
     assert child.get("JARVIS_MARKER") == "kept"
 
 
@@ -946,6 +991,12 @@ def _eof_then_hang(tmp_path: Path, name: str = "eof_hang.py",
                    "sys.stdout.write(open(%r).readline())\n"
                    "sys.stdout.flush()\n"
                    "os.close(1)\n"
+                   "if os.name == 'nt':\n"
+                   "    import ctypes\n"
+                   "    k = ctypes.WinDLL('kernel32', use_last_error=True)\n"
+                   "    k.GetStdHandle.restype = ctypes.c_void_p\n"
+                   "    k.CloseHandle.argtypes = [ctypes.c_void_p]\n"
+                   "    k.CloseHandle(k.GetStdHandle(-11))\n"
                    "time.sleep(%r)\n" % (str(FIXTURE), sleep_sec))
 
 
@@ -960,11 +1011,8 @@ async def _await_pid(store, run_id: str, timeout: float = 10.0) -> int:
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+    # Not `os.kill(pid, 0)`: on Windows that is a Ctrl+C, not a probe.
+    return procs.pid_alive(pid)
 
 
 @pytest.mark.asyncio
@@ -1311,28 +1359,84 @@ def test_extract_assistant_usage_has_a_caller():
 
 
 class _LoopTicker:
-    """Counts how many times the event loop got a turn."""
+    """Whether the event loop kept turning: the LONGEST GAP between two of
+    its turns, in `max_gap`.
+
+    It used to count turns of `asyncio.sleep(0.005)` and demand more than 30
+    in a 0.4 s write. On Windows the loop's timers fire at the system clock's
+    15.6 ms resolution, so a loop that never blocked got about 25, and all
+    three tests below failed on every Windows run. The property they state
+    is "the loop was not blocked through the write", and the longest stall
+    between turns IS that property on any clock: blocked, it stalls for the
+    whole write; free, for about one timer tick. `ticks` is kept for the
+    failure message.
+
+    The gap still OPEN at exit counts too. A terminal write is the last
+    thing a run does, so a block there ends the window, and the ticker is
+    cancelled before it wakes to close that gap — which is how the
+    terminal-write test passed with every store call moved onto the loop.
+    """
 
     def __init__(self):
         self.ticks = 0
+        self.max_gap = 0.0
+        self._last = 0.0
         self._task = None
 
     async def __aenter__(self):
         async def tick():
+            self._last = time.monotonic()
             while True:
                 self.ticks += 1
                 await asyncio.sleep(0.005)
+                now = time.monotonic()
+                self.max_gap = max(self.max_gap, now - self._last)
+                self._last = now
         self._task = asyncio.create_task(tick())
         await asyncio.sleep(0.05)
         self.ticks = 0
+        self.max_gap = 0.0
         return self
 
     async def __aexit__(self, *exc):
+        self.max_gap = max(self.max_gap, time.monotonic() - self._last)
         self._task.cancel()
         try:
             await self._task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_the_ticker_sees_a_loop_that_is_blocked():
+    """The instrument first: a measure that cannot see a blocked loop would
+    pass the three tests below vacuously."""
+    async with _LoopTicker() as ticker:
+        time.sleep(0.4)                  # the loop thread, blocked outright
+        await asyncio.sleep(0.05)
+    assert ticker.max_gap >= 0.35, ticker.max_gap
+
+
+@pytest.mark.asyncio
+async def test_the_ticker_sees_a_block_at_the_very_end_of_its_window():
+    """A terminal write is the LAST thing a run does, so a block there ends
+    the window: the ticker is cancelled before it ever wakes to measure the
+    gap. Measured by mutation — every store call moved onto the loop thread —
+    and the terminal-write test still passed."""
+    async with _LoopTicker() as ticker:
+        await asyncio.sleep(0.02)
+        time.sleep(0.4)
+    assert ticker.max_gap >= 0.35, ticker.max_gap
+
+
+@pytest.mark.asyncio
+async def test_the_ticker_does_not_mistake_a_coarse_clock_for_a_block():
+    """Windows fires asyncio timers at the system clock's 15.6 ms, so a loop
+    that never blocked got ~25 turns of `sleep(0.005)` in 0.4 s — under the
+    old bar of 30. Measured on every Windows run, 2026-09-28."""
+    async with _LoopTicker() as ticker:
+        await asyncio.sleep(0.4)
+    assert ticker.max_gap < 0.2, ticker.max_gap
 
 
 @pytest.mark.asyncio
@@ -1344,48 +1448,59 @@ async def test_the_terminal_write_does_not_freeze_the_loop(env, monkeypatch):
     run_id = await ex.spawn("do a thing", "proj", str(tmp), "api")
     await ex.wait_for(run_id, timeout=20)
 
-    # A second run whose terminal write is slow.
-    real_update = store.update_run
+    # A second run whose terminal write is slow. `transition_run` is the
+    # write: since 45b7aba the status transitions are claimed through it, and
+    # this test slowed `update_run` — which a transition no longer calls — so
+    # it slowed nothing and could not fail. `slowed` is the proof it bites.
+    real_transition = store.transition_run
+    slowed = []
 
-    def slow_update(rid, **fields):
-        if fields.get("status") in store.RunStatus.TERMINAL:
+    def slow_transition(rid, status, **fields):
+        if status in store.RunStatus.TERMINAL:
+            slowed.append(status)
             time.sleep(0.4)
-        return real_update(rid, **fields)
+        return real_transition(rid, status, **fields)
 
-    monkeypatch.setattr(store, "update_run", slow_update)
+    monkeypatch.setattr(store, "transition_run", slow_transition)
 
     async with _LoopTicker() as ticker:
         second = await ex.spawn("again", "proj", str(tmp), "api")
         await ex.wait_for(second, timeout=20)
 
     assert store.get_run(second)["status"] == store.RunStatus.SUCCEEDED
-    # 0.4s of blocking would cost ~80 ticks. Anything above a couple of dozen
-    # means the loop kept turning through the write.
-    assert ticker.ticks > 30, (
-        f"the loop only got {ticker.ticks} turns during a 0.4s store write — "
-        "it was blocked on the loop thread")
+    assert slowed, "the slow write never happened, so this measured nothing"
+    # Blocked, the loop would stall for the whole 0.4s write; turning, it
+    # stalls for about one timer tick. Half the write separates the two.
+    assert ticker.max_gap < 0.2, (
+        f"the loop stalled {ticker.max_gap:.3f}s during a 0.4s store write "
+        f"({ticker.ticks} turns) — it was blocked on the loop thread")
 
 
 @pytest.mark.asyncio
 async def test_the_running_transition_does_not_freeze_the_loop(env, monkeypatch):
     store, mod, tmp = env
     ex = mod.RunExecutor(store, claude_path=_fake_claude(tmp, FIXTURE))
-    real_update = store.update_run
+    # Slowed where the transition is written — see the test above.
+    real_transition = store.transition_run
+    slowed = []
 
-    def slow_update(rid, **fields):
-        if fields.get("status") == store.RunStatus.RUNNING:
+    def slow_transition(rid, status, **fields):
+        if status == store.RunStatus.RUNNING:
+            slowed.append(status)
             time.sleep(0.4)
-        return real_update(rid, **fields)
+        return real_transition(rid, status, **fields)
 
-    monkeypatch.setattr(store, "update_run", slow_update)
+    monkeypatch.setattr(store, "transition_run", slow_transition)
 
     async with _LoopTicker() as ticker:
         run_id = await ex.spawn("do a thing", "proj", str(tmp), "api")
         await ex.wait_for(run_id, timeout=20)
 
     assert store.get_run(run_id)["status"] == store.RunStatus.SUCCEEDED
-    assert ticker.ticks > 30, (
-        f"the loop only got {ticker.ticks} turns during a 0.4s store write")
+    assert slowed, "the slow write never happened, so this measured nothing"
+    assert ticker.max_gap < 0.2, (
+        f"the loop stalled {ticker.max_gap:.3f}s during a 0.4s store write "
+        f"({ticker.ticks} turns)")
 
 
 @pytest.mark.asyncio
@@ -1411,8 +1526,9 @@ async def test_cancelling_does_not_freeze_the_loop(env, monkeypatch):
 
     slow = False
     assert store.get_run(run_id)["status"] == store.RunStatus.CANCELLED
-    assert ticker.ticks > 30, (
-        f"the loop only got {ticker.ticks} turns during cancel()")
+    assert ticker.max_gap < 0.2, (
+        f"the loop stalled {ticker.max_gap:.3f}s during cancel() "
+        f"({ticker.ticks} turns)")
 
 
 @pytest.mark.asyncio
@@ -1489,8 +1605,14 @@ async def test_an_ordinary_event_is_still_stored_verbatim(env):
 
 def _write_lines(tmp_path: Path, name: str, lines: list[str]) -> Path:
     path = tmp_path / name
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+# Suspending a process is a POSIX signal; Windows has no SIGSTOP, so that one
+# way of going quiet cannot be staged there. The other three are portable.
+_SIGSTOP = pytest.param("sigstop", marks=pytest.mark.skipif(
+    sys.platform == "win32", reason="SIGSTOP does not exist on Windows"))
 
 
 def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
@@ -1512,7 +1634,7 @@ def _stops_talking(tmp_path: Path, how: str, sleep_sec: float = 120) -> str:
                    "sys.stdout.flush()\n" % str(FIXTURE) + bodies[how])
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
         env, how):
@@ -1531,7 +1653,7 @@ async def test_every_way_of_going_quiet_still_reaches_a_terminal_state(
     assert not _alive(pid), f"the {how} child was left running"
 
 
-@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", "sigstop"])
+@pytest.mark.parametrize("how", ["close_fd", "close_py", "silent", _SIGSTOP])
 @pytest.mark.asyncio
 async def test_no_way_of_going_quiet_leaks_the_concurrency_permit(env, how):
     store, mod, tmp = env
@@ -1576,7 +1698,7 @@ def _exits_leaving_a_grandchild(tmp_path: Path, name: str,
         "sys.stdout.write(open(%r).readline())\n"
         "sys.stdout.write(%r + '\\n')\n"
         "sys.stdout.flush()\n"
-        "subprocess.Popen(['sleep', '10']%s)\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)']%s)\n"
         "sys.exit(0)\n" % (str(FIXTURE), _result_line(), stderr))
 
 
@@ -1742,10 +1864,13 @@ async def test_the_wait_after_sigkill_is_bounded(env):
     store, mod, tmp = env
     ex = mod.RunExecutor(store, claude_path="claude", grace_sec=0.2)
     proc = _NeverReaped()
-    await asyncio.wait_for(ex._terminate(proc), timeout=5)
+    with pytest.raises(mod._TerminationUnconfirmed, match="Could not confirm termination"):
+        await asyncio.wait_for(ex._terminate(proc), timeout=5)
     assert proc.terminated and proc.killed
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="terminate() is TerminateProcess on Windows; it cannot be ignored")
 @pytest.mark.asyncio
 async def test_terminate_still_reaps_a_child_that_ignores_sigterm(env):
     """The bound must not turn `_terminate` into "signal and hope". A real

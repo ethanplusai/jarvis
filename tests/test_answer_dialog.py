@@ -748,7 +748,9 @@ class _Ticker:
         async def tick():
             while True:
                 self.ticks += 1
-                await asyncio.sleep(0.005)
+                # One loop turn, not a timer: a 5 ms timer is ~16 ms on
+                # Windows and 0.4 s of them is not 30 ticks.
+                await asyncio.sleep(0)
         self._task = asyncio.create_task(tick())
         await asyncio.sleep(0.05)
         self.ticks = 0

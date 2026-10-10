@@ -239,11 +239,14 @@ def detect_bind(argv: Sequence[str] | None = None,
     because both spell it the same way. Then the defaults of whichever
     launcher this looks like.
     """
+    original = list(getattr(sys, "orig_argv", [])) if argv is None else list(argv)
     argv = list(sys.argv if argv is None else argv)
     environ = os.environ if environ is None else environ
 
-    launcher = (argv[0] if argv else "").rsplit("/", 1)[-1].lower()
-    uvicorn_cli = launcher.startswith("uvicorn")
+    launcher = (argv[0] if argv else "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    uvicorn_cli = launcher.startswith("uvicorn") or any(
+        arg == "-m" and index + 1 < len(original) and original[index + 1] == "uvicorn"
+        for index, arg in enumerate(original))
     default_host = UVICORN_DEFAULT_HOST if uvicorn_cli else JARVIS_DEFAULT_HOST
     default_port = UVICORN_DEFAULT_PORT if uvicorn_cli else JARVIS_DEFAULT_PORT
 

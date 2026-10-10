@@ -30,6 +30,8 @@ def wired(monkeypatch, tmp_path):
 
 
 class _Executor:
+    async def shutdown(self):
+        pass
     """Records what was spawned. Never starts a process."""
 
     def __init__(self, store, model="sonnet", boom=False):

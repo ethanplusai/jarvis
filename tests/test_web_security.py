@@ -397,7 +397,7 @@ def test_an_env_value_with_a_newline_is_refused(env):
                headers={"Origin": DASHBOARD_ORIGIN})
     assert r.status_code == 400, r.text
     dotenv = server._env_file_path()
-    assert not dotenv.exists() or "JARVIS_CLAUDE_PATH" not in dotenv.read_text()
+    assert not dotenv.exists() or "JARVIS_CLAUDE_PATH" not in dotenv.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("bad", ["a\nb", "a\rb", "a\x00b"])
@@ -411,7 +411,7 @@ def test_a_name_with_a_space_in_it_is_still_a_name(env):
     """The gate is line breaks, not punctuation — Tony Stark must save."""
     c, server, _ = env
     server._write_env_key("USER_NAME", "Tony Stark")
-    assert "USER_NAME=Tony Stark" in server._env_file_path().read_text()
+    assert "USER_NAME=Tony Stark" in server._env_file_path().read_text(encoding="utf-8")
 
 
 def test_write_env_key_refuses_a_key_nobody_is_allowed_to_set(env):
@@ -493,7 +493,7 @@ def test_settings_status_is_a_read_and_creates_nothing(env, monkeypatch,
     fake_env = tmp_path / "dotenv" / ".env"
     fake_env.parent.mkdir()
     example = tmp_path / "dotenv" / ".env.example"
-    example.write_text("FISH_API_KEY=your-fish-audio-api-key-here\n")
+    example.write_text("FISH_API_KEY=your-fish-audio-api-key-here\n", encoding="utf-8")
     monkeypatch.setattr(server, "_env_file_path", lambda: fake_env)
     monkeypatch.setattr(server, "_env_example_path", lambda: example)
 

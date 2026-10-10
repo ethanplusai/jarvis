@@ -48,7 +48,7 @@ def wired(monkeypatch, tmp_path, settings):
 
 def _write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 # --- reading it -----------------------------------------------------------
@@ -69,7 +69,7 @@ def test_accept_means_it_lands_as_a_turn(settings):
 
 def test_unreadable_json_means_it_will_need_approving(settings):
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text("{ not json")
+    settings.write_text("{ not json", encoding="utf-8")
     assert preflight.cross_session_inbound_accepted() is False
 
 
@@ -89,7 +89,7 @@ def test_everything_else_in_the_file_survives(settings):
     ok, _detail = preflight.enable_cross_session_inbound()
 
     assert ok
-    after = json.loads(settings.read_text())
+    after = json.loads(settings.read_text(encoding="utf-8"))
     assert after["crossSessionInbound"] == "accept"
     for key, value in original.items():
         assert after[key] == value, f"{key} was disturbed"
@@ -97,26 +97,26 @@ def test_everything_else_in_the_file_survives(settings):
 
 def test_a_file_that_will_not_parse_is_never_clobbered(settings):
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text("{ hooks: this is broken JSON but it is theirs")
+    settings.write_text("{ hooks: this is broken JSON but it is theirs", encoding="utf-8")
 
     ok, detail = preflight.enable_cross_session_inbound()
 
     assert ok is False
     assert "readable JSON" in detail
-    assert settings.read_text().startswith("{ hooks:"), "left exactly as it was"
+    assert settings.read_text(encoding="utf-8").startswith("{ hooks:"), "left exactly as it was"
 
 
 def test_a_missing_file_is_created_with_just_the_one_setting(settings):
     ok, _detail = preflight.enable_cross_session_inbound()
     assert ok
-    assert json.loads(settings.read_text()) == {"crossSessionInbound": "accept"}
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"crossSessionInbound": "accept"}
 
 
 def test_it_is_idempotent(settings):
     _write(settings, {"crossSessionInbound": "accept", "model": "sonnet"})
     ok, detail = preflight.enable_cross_session_inbound()
     assert ok and detail == "already set"
-    assert json.loads(settings.read_text())["model"] == "sonnet"
+    assert json.loads(settings.read_text(encoding="utf-8"))["model"] == "sonnet"
 
 
 # --- what JARVIS says -----------------------------------------------------
@@ -146,6 +146,7 @@ def test_the_brain_is_told_before_it_says_sent(wired, monkeypatch):
         needs_a_human_hand = False
         steerable = True
         socket_path = "/tmp/x.sock"
+        thread_part = None          # named by its folder, as SessionState says
 
     class _Speech:
         async def say(self, *a, **k):
@@ -235,7 +236,7 @@ def test_it_is_an_acting_tool(wired):
 async def test_the_tool_writes_it_and_says_so(wired):
     server, settings = wired
     out = await server.tool_enable_session_inbox({})
-    assert json.loads(settings.read_text())["crossSessionInbound"] == "accept"
+    assert json.loads(settings.read_text(encoding="utf-8"))["crossSessionInbound"] == "accept"
     assert "Done, sir" in out
 
 
@@ -243,12 +244,12 @@ async def test_the_tool_writes_it_and_says_so(wired):
 async def test_the_tool_refuses_rather_than_wrecking_a_broken_file(wired):
     server, settings = wired
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text("{ broken")
+    settings.write_text("{ broken", encoding="utf-8")
 
     out = await server.tool_enable_session_inbox({})
 
     assert "couldn't" in out.lower()
-    assert settings.read_text() == "{ broken"
+    assert settings.read_text(encoding="utf-8") == "{ broken"
 
 
 @pytest.mark.asyncio

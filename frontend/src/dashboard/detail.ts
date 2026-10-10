@@ -15,6 +15,8 @@ const MAX_RENDERED = 200;
 
 let currentRunId: string | null = null;
 let lastSeq = 0;
+let generation = 0;
+let loadingTranscript = false;
 
 // Serializes gap backfills so overlapping fetches can never both append.
 let backfillInFlight = false;
@@ -55,12 +57,35 @@ function bindAction(btn: HTMLButtonElement, run: RunRow): void {
   if (isActive(run)) {
     btn.textContent = "Cancel";
     setTone(btn, "bad");
-    actionHandler = () => void cancelRun(run.id);
   } else {
     btn.textContent = "Retry";
     setTone(btn, "accent");
-    actionHandler = () => void retryRun(run.id);
   }
+  const opened = generation;
+  actionHandler = async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const message = document.getElementById("run-action-message");
+    if (message) message.textContent = "";
+    try {
+      if (isActive(run)) {
+        await cancelRun(run.id);
+        if (opened !== generation) return;
+        if (message) message.textContent = "Cancellation requested.";
+        const fresh = await getRun(run.id);
+        if (opened === generation) notifyRunChanged(fresh);
+      } else {
+        const id = await retryRun(run.id);
+        if (opened === generation) await openDetail(id);
+      }
+    } catch {
+      if (opened === generation && message) {
+        message.textContent = `Could not ${isActive(run) ? "cancel" : "retry"} this run. Check the connection and try again.`;
+      }
+    } finally {
+      if (opened === generation) btn.disabled = false;
+    }
+  };
   btn.addEventListener("click", actionHandler);
 }
 
@@ -86,6 +111,8 @@ export function notifyRunChanged(run: RunRow): void {
 }
 
 export function closeDetail(): void {
+  generation++;
+  loadingTranscript = false;
   currentRunId = null;
   lastSeq = 0;
   backfillInFlight = false;
@@ -124,27 +151,32 @@ function eventLine(ev: RunEvent): HTMLElement {
  * up mid-fetch just sets backfillPending so we take one more pass once the
  * in-flight fetch settles, instead of racing a second fetch against it. */
 function backfill(runId: string): void {
-  if (backfillInFlight) {
+  if (backfillInFlight || loadingTranscript) {
     backfillPending = true;
     return;
   }
   backfillInFlight = true;
+  const opened = generation;
   getEvents(runId, lastSeq)
     .then(({ events }) => {
-      if (runId !== currentRunId) return;
+      if (opened !== generation) return;
       const transcript = document.getElementById("transcript");
       if (!transcript) return;
+      const before = lastSeq;
+      if (events.length) transcript.querySelectorAll(".empty").forEach((e) => e.remove());
       for (const ev of events) {
         if (ev.seq <= lastSeq) continue; // already rendered — never duplicate
         transcript.append(eventLine(ev));
         lastSeq = Math.max(lastSeq, ev.seq);
       }
       trimAndScroll(transcript);
+      if (events.length === MAX_RENDERED && lastSeq > before) backfillPending = true;
     })
     .catch((e) => {
       console.error("[detail] backfill failed", e);
     })
     .finally(() => {
+      if (opened !== generation) return;
       backfillInFlight = false;
       if (backfillPending) {
         backfillPending = false;
@@ -153,10 +185,17 @@ function backfill(runId: string): void {
     });
 }
 
+/** Recover an open transcript even if the final socket event was lost. */
+export function refreshTranscript(): void {
+  if (currentRunId) backfill(currentRunId);
+}
+
 export function appendEvent(
   runId: string, seq: number, kind: string, payload: unknown,
 ): void {
   if (runId !== currentRunId) return;
+  if (loadingTranscript) { backfillPending = true; return; }
+  if (seq <= lastSeq) return;
   const transcript = document.getElementById("transcript");
   if (!transcript) return;
 
@@ -166,6 +205,7 @@ export function appendEvent(
     return;
   }
 
+  transcript.querySelectorAll(".empty").forEach((e) => e.remove());
   transcript.append(eventLine({
     id: 0, run_id: runId, seq, ts: 0, kind,
     payload: JSON.stringify(payload),
@@ -192,6 +232,8 @@ function field(term: string, value: string): [HTMLElement, HTMLElement] {
 }
 
 export async function openDetail(runId: string): Promise<void> {
+  const opened = ++generation;
+  loadingTranscript = true;
   currentRunId = runId;
   lastSeq = 0;
   backfillInFlight = false;
@@ -211,13 +253,15 @@ export async function openDetail(runId: string): Promise<void> {
   try {
     run = await getRun(runId);
   } catch {
+    if (opened !== generation) return;
+    loadingTranscript = false;
     host.append(emptyState("Could not load this run."));
     return;
   }
 
   // openDetail is async — bail if the user switched (or closed) before the
   // getRun above resolved, so a stale response can't repopulate the pane.
-  if (runId !== currentRunId) return;
+  if (opened !== generation) return;
 
   const head = el("header", "pane-head");
   dotSlot = statusDot(run.status);
@@ -237,7 +281,7 @@ export async function openDetail(runId: string): Promise<void> {
   dl.append(
     elapsedDt, elapsedDdEl,
     costDt, costDdEl,
-    ...field("tokens", `in ${run.input_tokens} / out ${run.output_tokens} / cache ${run.cache_read_tokens}`),
+    ...field("tokens", `in ${run.input_tokens} / out ${run.output_tokens} / cache read ${run.cache_read_tokens} / cache write ${run.cache_creation_tokens}`),
     ...field("model", run.model || "—"),
     ...field("session", run.id),
   );
@@ -248,7 +292,10 @@ export async function openDetail(runId: string): Promise<void> {
   bindAction(action, run);
   actionButton = action;
   const actions = el("div", "pane-actions");
-  actions.append(action);
+  const actionMessage = el("span");
+  actionMessage.id = "run-action-message";
+  actionMessage.setAttribute("role", "status");
+  actions.append(action, actionMessage);
 
   const transcript = el("div", "transcript");
   transcript.id = "transcript";
@@ -268,14 +315,15 @@ export async function openDetail(runId: string): Promise<void> {
   let events: RunEvent[];
   try {
     ({ total } = await getEvents(runId, 0, 1));
-    if (runId !== currentRunId) return;
+    if (opened !== generation) return;
     const from = Math.max(0, total - MAX_RENDERED);
     ({ events } = await getEvents(runId, from, MAX_RENDERED));
-    if (runId !== currentRunId) return;
+    if (opened !== generation) return;
     if (from > 0) transcript.append(loadEarlierButton(runId, from));
   } catch (e) {
     console.error("[detail] transcript fetch failed", e);
-    if (runId !== currentRunId) return;
+    if (opened !== generation) return;
+    loadingTranscript = false;
     transcript.replaceChildren(
       emptyState("Could not load this run's transcript."));
     return;
@@ -283,6 +331,7 @@ export async function openDetail(runId: string): Promise<void> {
 
   for (const ev of events) transcript.append(eventLine(ev));
   lastSeq = events.length ? events[events.length - 1].seq : 0;
+  loadingTranscript = false;
   transcript.scrollTop = transcript.scrollHeight;
 
   if (total === 0) {
@@ -293,9 +342,14 @@ export async function openDetail(runId: string): Promise<void> {
       true,
     ));
   }
+  if (backfillPending) {
+    backfillPending = false;
+    backfill(runId);
+  }
 }
 
 function loadEarlierButton(runId: string, before: number): HTMLElement {
+  const opened = generation;
   const idleLabel = `Load earlier (${before} more)`;
   const btn = button(idleLabel, () => {
     // Disable before anything async so a double-click can't fire this twice.
@@ -304,6 +358,7 @@ function loadEarlierButton(runId: string, before: number): HTMLElement {
     const from = Math.max(0, before - MAX_RENDERED);
     getEvents(runId, from, before - from)
       .then(({ events }) => {
+        if (opened !== generation) return;
         const transcript = document.getElementById("transcript");
         if (!transcript) return;
         const anchor = btn.nextSibling;

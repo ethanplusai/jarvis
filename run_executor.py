@@ -12,6 +12,7 @@ exists to eliminate.
 """
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -21,9 +22,22 @@ import time
 from typing import Callable
 
 import claude_env
+
+
+def _tool_url_base() -> str:
+    """Where a run's PreToolUse hook calls back. Same expression server.py
+    uses for the brain's, so the two can never dial different servers."""
+    return (f'{os.getenv("JARVIS_SCHEME", "http")}://'
+            f'{os.getenv("JARVIS_TOOL_HOST", "127.0.0.1")}:'
+            f'{int(os.getenv("JARVIS_PORT", "8340"))}')
 import stream_parser
+import process_tree
 
 log = logging.getLogger("jarvis.run_executor")
+
+
+class _TerminationUnconfirmed(RuntimeError):
+    pass
 
 # Same default and env var as work_mode.py and server.py.
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() \
@@ -226,6 +240,7 @@ class RunExecutor:
         # signal is sent, so whichever coroutine reaches the terminal write
         # first still records CANCELLED and not "failed, exit -15".
         self._cancelling: set[str] = set()
+        self._closing = False
 
     # -- pub/sub ----------------------------------------------------------
 
@@ -282,15 +297,16 @@ class RunExecutor:
         # about, with this module as the offender.
         coro = None
         try:
+            if self._closing:
+                raise RuntimeError("Run executor is shutting down")
             resolved_model = self._resolve_model(model)
             # A caller that names no bound (every production caller does not)
             # gets the default one. See _resolve_default_timeout.
-            bound = timeout_sec if timeout_sec and timeout_sec > 0 \
-                else self._default_timeout
+            bound = _wall_clock(timeout_sec) or self._default_timeout
             # Persisted immediately — before the process even spawns — so a
             # still-queued run already shows what it will run on.
             await asyncio.to_thread(self._store.update_run, run_id,
-                                    requested_model=resolved_model)
+                                    requested_model=resolved_model, timeout_sec=bound)
             coro = self._drive(run_id, prompt, project_path, resume_from,
                                bound, resolved_model)
             task = asyncio.create_task(coro)
@@ -324,6 +340,8 @@ class RunExecutor:
     async def spawn(self, prompt: str, project_name: str, project_path: str,
                     origin: str, resume_from: str | None = None,
                     timeout_sec: float = 0, model: str | None = None) -> str:
+        if self._closing:
+            raise RuntimeError("Run executor is shutting down")
         run_id = await asyncio.to_thread(
             self._store.create_run, prompt, project_name, project_path,
             origin, resume_from)
@@ -341,10 +359,7 @@ class RunExecutor:
         bug in the post-EOF window, where `_procs` had already been emptied
         and this method cheerfully reported a kill it had not performed.
 
-        The one exception is a child that SIGKILL did not visibly reap
-        within `_terminate`'s second grace period. That is logged at ERROR
-        by `_terminate` and reported as cancelled anyway; see its docstring
-        for why waiting for ever is the worse of the two.
+        Unconfirmed termination is recorded as a failure and returns False.
         """
         run = await asyncio.to_thread(self._store.get_run, run_id)
         if run is None or run["status"] in self._store.RunStatus.TERMINAL:
@@ -357,8 +372,12 @@ class RunExecutor:
 
         proc = self._procs.get(run_id)
         if proc is not None:
-            if proc.returncode is None:
+            try:
                 await self._terminate(proc)
+            except _TerminationUnconfirmed as error:
+                self._cancelling.discard(run_id)
+                await self._finish(run_id, self._store.RunStatus.FAILED, error=str(error))
+                return False
             # Either way the child is now reaped: `_terminate` does not return
             # until `proc.wait()` has (or has demonstrably stopped being able
             # to), and a non-None returncode already means it is gone.
@@ -381,47 +400,50 @@ class RunExecutor:
                 self._cancelling.discard(run_id)
         return True
 
+    async def shutdown(self) -> None:
+        """Close admission, cancel queued/running work and join every driver."""
+        self._closing = True
+        ids = list(self._tasks)
+        if ids:
+            results = await asyncio.gather(*(self.cancel(run_id) for run_id in ids),
+                                           return_exceptions=True)
+            for run_id, result in zip(ids, results):
+                if isinstance(result, BaseException):
+                    log.error("shutdown: run %s cancellation failed: %s", run_id, result)
+        tasks = list(self._tasks.values())
+        # Database availability must never decide whether children stop.
+        # Drivers own final process cleanup even when the status read failed.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _terminate(self, proc) -> None:
-        """SIGTERM, then SIGKILL after the grace period.
-
-        Returns once the child has been reaped, or once a second grace period
-        has passed without it being reaped — whichever comes first.
-
-        That second bound is new and it is a real trade. The wait after
-        SIGKILL used to have no ceiling at all, which is fine as long as
-        `proc.wait()` is guaranteed to resolve, and it is not: it resolves
-        when asyncio's child watcher sees the process, so anything that
-        reaps the pid first (a stray `os.waitpid`, a watcher torn down
-        mid-flight) leaves that future pending for good. Unbounded, that
-        parks `cancel()` and `_drive` forever and the permit never comes
-        back — the exact failure this module exists to prevent, reached by a
-        different road. Bounded, the caller may in principle be told a child
-        is gone that is not; that is logged at ERROR, and it is strictly
-        better than wedging the pipeline over it.
-        """
+        """Terminate the owned tree, bound reaping, and report uncertainty."""
         if proc.returncode is not None:
+            process_tree.release(proc)
             return
+        waiter = asyncio.create_task(proc.wait())
         try:
-            proc.terminate()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            await asyncio.wait_for(asyncio.shield(proc.wait()),
-                                   timeout=self._grace_sec)
-            return
-        except asyncio.TimeoutError:
-            pass
-        try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            await asyncio.wait_for(asyncio.shield(proc.wait()),
-                                   timeout=self._grace_sec)
-        except asyncio.TimeoutError:
-            log.error("run child %s was not reaped within %ss of SIGKILL; "
-                      "giving up the wait rather than holding its permit",
-                      getattr(proc, "pid", "?"), self._grace_sec)
+            for force in (False, True):
+                try:
+                    process_tree.kill(proc, force=force)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    await asyncio.wait_for(asyncio.shield(waiter), self._grace_sec)
+                    return
+                except asyncio.TimeoutError:
+                    if proc.returncode is not None:
+                        return
+            raise _TerminationUnconfirmed(
+                f"Could not confirm termination of process {getattr(proc, 'pid', '?')}; inspect the process before retrying")
+        finally:
+            process_tree.release(proc)
+            if not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
 
     async def wait_for(self, run_id: str, timeout: float = 30) -> dict:
         task = self._tasks.get(run_id)
@@ -441,7 +463,7 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
+        base = claude_env.split_command(self._claude_path)
         cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
                       "--session-id", run_id]
         if resume_from:
@@ -456,6 +478,28 @@ class RunExecutor:
             # Matches the five existing call sites. Without this a run blocks on
             # a permission prompt it has no TTY to answer, and hangs forever.
             cmd.append("--dangerously-skip-permissions")
+        # ...which is exactly why the next two lines exist.
+        #
+        # A run is an unattended agent with permissions skipped, and
+        # `claude_env.child_env()` deliberately keeps HOME and
+        # CLAUDE_CONFIG_DIR, so without `--strict-mcp-config` it loads the
+        # USER'S OWN `~/.claude.json` MCP servers. Verified live against CLI
+        # 2.1.270: a process launched with exactly these flags reported
+        # `mcp__linkedin__send_message` in its own tool list about a minute
+        # in, once the servers finished connecting. "Start the build in that
+        # repo" is a tool the brain may legitimately call, and the agent it
+        # spawned could then post to LinkedIn on its own initiative — past
+        # every gate, with nothing staged, spoken or recorded.
+        #
+        # Strict with NO config means no servers at all: verified, the CLI
+        # answers "NONE" when asked what MCP tools it has. A run builds
+        # software in a repository; it has no business holding the user's
+        # signed-in sessions.
+        cmd.append("--strict-mcp-config")
+        # And the same gate the brain is held to, in case a config is ever
+        # handed to runs. The flag above is a policy; this is the wall.
+        cmd += ["--settings", json.dumps(
+            {"hooks": claude_env.pretool_hook_settings(_tool_url_base())})]
         return cmd
 
     async def _publish_run_updated(self, run_id: str) -> None:
@@ -476,10 +520,8 @@ class RunExecutor:
 
     def _start_write(self, run_id: str, pid: int) -> dict | None:
         """The RUNNING transition, as one unit on a worker thread."""
-        self._store.update_run(run_id,
-                               status=self._store.RunStatus.RUNNING,
-                               pid=pid, started_at=time.time())
-        return self._store.get_run(run_id)
+        return self._store.transition_run(run_id, self._store.RunStatus.RUNNING,
+                                          pid=pid, started_at=time.time())
 
     def _finish_write(self, run_id: str, status: str, **fields) -> dict | None:
         """The three store calls behind a terminal transition, as one unit.
@@ -488,12 +530,7 @@ class RunExecutor:
         run was already terminal and nothing was written — the first writer
         wins, which is what keeps a cancel racing `_drive` to a single status.
         """
-        run = self._store.get_run(run_id)
-        if run and run["status"] in self._store.RunStatus.TERMINAL:
-            return None
-        self._store.update_run(run_id, status=status, ended_at=time.time(),
-                               **fields)
-        return self._store.get_run(run_id)
+        return self._store.transition_run(run_id, status, ended_at=time.time(), **fields)
 
     async def _finish(self, run_id: str, status: str, **fields) -> None:
         """Terminal transition: written off the loop, published on it.
@@ -575,7 +612,7 @@ class RunExecutor:
                 return
 
             try:
-                proc = await asyncio.create_subprocess_exec(
+                proc = await process_tree.spawn(
                     *self._command(run_id, resume_from, model),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -612,6 +649,10 @@ class RunExecutor:
             # same database from a worker thread.
             started = await asyncio.to_thread(
                 self._start_write, run_id, proc.pid)
+            if started is None or run_id in self._cancelling:
+                await self._terminate(proc)
+                await self._finish(run_id, self._store.RunStatus.CANCELLED)
+                return
             self._publish({"type": "run_started", "run": started})
 
             try:
@@ -677,6 +718,7 @@ class RunExecutor:
                 await self._terminate(proc)
             stderr = await self._collect_stderr(stderr_task, stderr_sink)
 
+            process_tree.release(proc)
             run = await asyncio.to_thread(self._store.get_run, run_id)
             if run and run["status"] in self._store.RunStatus.TERMINAL:
                 return
@@ -721,7 +763,7 @@ class RunExecutor:
             # locked", a decode error, CancelledError on shutdown — must
             # still leave the run terminal and the child reaped, and must be
             # logged rather than swallowed as "never retrieved".
-            cancelled = run_id in self._cancelling
+            cancelled = run_id in self._cancelling and not isinstance(e, _TerminationUnconfirmed)
             if cancelled and isinstance(e, asyncio.CancelledError):
                 # cancel() cancels the queued driver task on purpose. That
                 # arrives here as CancelledError; it is a normal user action,
@@ -739,7 +781,7 @@ class RunExecutor:
                 log.exception("run %s could not be marked terminal", run_id)
             if proc is not None and proc.returncode is None:
                 try:
-                    proc.kill()
+                    process_tree.kill(proc)
                 except (ProcessLookupError, OSError):
                     pass
                 try:
@@ -754,10 +796,17 @@ class RunExecutor:
                 # shutdown and cancellation must still propagate.
                 raise
         finally:
+            process_tree.release(proc)
             self._procs.pop(run_id, None)
             self._cancelling.discard(run_id)
             if stderr_task is not None and not stderr_task.done():
                 stderr_task.cancel()
+            # Descendants can keep pipes open after the recorded child exits.
+            # We stop consuming at that point, so release our pipe transports
+            # while the loop is alive instead of leaking handles until GC.
+            transport = getattr(proc, "_transport", None)
+            if transport is not None and proc.returncode is not None:
+                transport.close()
             if slot_held:
                 # Released only after the child has been reaped, and on every
                 # exit path: a leaked permit permanently shrinks capacity.
@@ -772,6 +821,7 @@ class RunExecutor:
         """
         seq = await asyncio.to_thread(self._store.next_seq, run_id)
         pending: list[tuple[int, str, str]] = []
+        notifications: list[dict] = []
         last_flush = time.monotonic()
         # Tokens accumulated from the per-turn usage on `assistant` events, so
         # the dashboard can watch them climb. Dollars are NOT derived from
@@ -788,10 +838,13 @@ class RunExecutor:
         saw_error = False
 
         async def flush():
-            nonlocal pending, last_flush
+            nonlocal pending, notifications, last_flush
             if pending:
                 batch, pending = pending, []
                 await asyncio.to_thread(self._store.append_events, run_id, batch)
+                ready, notifications = notifications, []
+                for message in ready:
+                    self._publish(message)
             last_flush = time.monotonic()
 
         # The reader is never simply awaited. EOF is only one of the ways a
@@ -817,6 +870,8 @@ class RunExecutor:
                 done, _pending = await asyncio.wait({line_task},
                                                     timeout=self._poll_sec)
                 if not done:
+                    if pending and time.monotonic() - last_flush >= _EVENT_FLUSH_SEC:
+                        await flush()
                     if proc.returncode is not None:
                         # The child is GONE — its exit status is known — and
                         # the pipe is still open, so a descendant inherited
@@ -872,6 +927,8 @@ class RunExecutor:
                 # tool names `assess_outcome` reads.
                 pending.append((seq, kind,
                                 stream_parser.cap_payload(line.strip(), event)))
+                notifications.append({"type": "run_event", "run_id": run_id,
+                                      "seq": seq, "kind": kind, "payload": event})
 
                 if kind == "system" and event.get("subtype") == "init":
                     meta = stream_parser.extract_init_metadata(event)
@@ -925,8 +982,6 @@ class RunExecutor:
                         or time.monotonic() - last_flush >= _EVENT_FLUSH_SEC):
                     await flush()
 
-                self._publish({"type": "run_event", "run_id": run_id, "seq": seq,
-                               "kind": kind, "payload": event})
                 seq += 1
         finally:
             if line_task is not None:

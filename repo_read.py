@@ -32,6 +32,8 @@ Two rules govern every function:
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import re
 import shutil
@@ -276,7 +278,7 @@ def _private_roots() -> tuple[tuple[Path, ...], tuple]:
     comparisons below still stand in that case.
     """
     global _PRIVATE_ROOTS_CACHE
-    key = os.getenv("JARVIS_DATA_DIR")
+    key = (os.getenv("JARVIS_DATA_DIR"), os.getenv("JARVIS_CLAUDE_CONFIG_DIRS"))
     cached_key, cached, ids = _PRIVATE_ROOTS_CACHE
     if cached and cached_key == key:
         return cached, ids
@@ -285,6 +287,22 @@ def _private_roots() -> tuple[tuple[Path, ...], tuple]:
         cached = (Path(os.path.realpath(str(data_paths.data_dir()))),)
     except Exception:                                # pragma: no cover
         cached = ()
+    # The brain's own transcripts. The brain is a Claude Code child with
+    # `cwd=brain_home`, so the CLI writes every one of its conversations,
+    # verbatim, to `<config root>/projects/<encoded brain home>/*.jsonl` —
+    # OUTSIDE the data directory, because CLAUDE_CONFIG_DIR is passed
+    # through on purpose (the login lives there). Measured live: 66 files,
+    # 25 MB, and none of it behind this wall. One directory per config
+    # root, not the roots themselves: another project's transcript is the
+    # user's own work and `session_detail` reading it is a feature.
+    try:
+        import session_watch
+        encoded = session_watch.encode_cwd(session_watch.brain_cwd())
+        cached += tuple(
+            Path(os.path.realpath(str(root / "projects" / encoded)))
+            for root in session_watch.config_roots())
+    except Exception:                                # pragma: no cover
+        pass
     ids = tuple(_identity(str(r)) for r in cached)
     _PRIVATE_ROOTS_CACHE = (key, cached, ids)
     return cached, ids
@@ -507,7 +525,7 @@ def git_branch(root: Path) -> str | None:
     dot = root / ".git"
     try:
         if dot.is_file():
-            pointer = dot.read_text(errors="replace").strip()
+            pointer = dot.read_text(encoding="utf-8", errors="replace").strip()
             if not pointer.startswith("gitdir:"):
                 return None
             head = Path(pointer.split(":", 1)[1].strip()) / "HEAD"
@@ -515,7 +533,7 @@ def git_branch(root: Path) -> str | None:
             head = dot / "HEAD"
         else:
             return None
-        text = head.read_text(errors="replace").strip()
+        text = head.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return None
     if text.startswith("ref: refs/heads/"):
@@ -550,7 +568,7 @@ def readme_opening(root: Path, limit: int = README_CHARS) -> str:
     if path is None:
         return ""
     try:
-        raw = path.read_text(errors="replace")[:20_000]
+        raw = path.read_text(encoding="utf-8", errors="replace")[:20_000]
     except OSError:
         return ""
 
@@ -697,7 +715,7 @@ def _clip(text: str) -> str:
 async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
     """ripgrep, when it is installed. None if it could not be used at all."""
     args = [
-        binary, "--fixed-strings", "--ignore-case", "--line-number",
+        binary, "--json", "--fixed-strings", "--ignore-case", "--line-number",
         "--no-heading", "--color", "never", "--no-messages",
         "--max-filesize", str(SEARCH_MAX_FILE_BYTES),
         "--max-count", "3", "--threads", "4",
@@ -725,14 +743,20 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
     hits = Hits()
     hits.tool = "rg"
     for raw in stdout.decode("utf-8", "replace").splitlines():
-        parts = raw.split(":", 2)
-        if len(parts) < 3:
-            continue
-        path_text, number, body = parts
         try:
+            item = json.loads(raw)
+            if item.get("type") != "match":
+                continue
+            data = item["data"]
+            path_value, lines = data["path"], data["lines"]
+            path_text = (path_value["text"] if "text" in path_value else
+                         os.fsdecode(base64.b64decode(path_value["bytes"])))
+            body = (lines["text"] if "text" in lines else
+                    base64.b64decode(lines["bytes"]).decode("utf-8", "replace"))
+            number = int(data["line_number"])
             real = Path(path_text).resolve()
             relative = real.relative_to(Path(os.path.realpath(str(root))))
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError, TypeError):
             continue
         if sensitive_reason(relative) or private_reason(real):
             continue
@@ -741,7 +765,7 @@ async def _search_rg(root: Path, query: str, binary: str) -> Hits | None:
             hits.capped = True
             break
         if len(hits.lines) < SEARCH_MAX_HITS:
-            hits.lines.append(f"{relative}:{number}: {_clip(body)}")
+            hits.lines.append(f"{relative.as_posix()}:{number}: {_clip(body)}")
     return hits
 
 

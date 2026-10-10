@@ -346,6 +346,108 @@ async def test_an_uncapped_active_agent_count_renders_exactly():
         assert "12 agents" in text and "12+ agents" not in text
 
 
+# ── whose prompt it is, and where ──────────────────────────────────────────
+#
+# Measured live, 2026-09-28: Paperclip drove a session through the Agent SDK,
+# and every blocked session wore one badge — "your keystroke / it wants a key
+# pressed in that terminal". That session had no terminal, and Paperclip
+# answered its prompts itself. tests/test_prompt_owner.py holds the rule;
+# these hold what the page draws from it.
+
+async def _open_session(page) -> str:
+    await page.locator("#tab-sessions").click()
+    await page.wait_for_selector("#sessions-view .row", timeout=WAIT_MS)
+    await page.locator("#sessions-view .sess-row").first.click()
+    await page.wait_for_selector("#sessions-view .sd-name", timeout=WAIT_MS)
+    return await page.locator("#sessions-view").inner_text()
+
+
+async def test_a_program_s_held_prompt_is_drawn_as_the_program_s():
+    api = quiet_machine()
+    api.json("/api/sessions", _roster([_session_row(
+        state="needs_you", needs="permission prompt", needs_a_human_hand=True,
+        origin="background", entrypoint="sdk-ts")]))
+    async with dashboard(api) as page:
+        text = await _open_session(page)
+        assert "The program that started this session shows that prompt" in text
+        assert "its program's" in text.lower()
+        assert "your keystroke" not in text.lower()
+        assert "key pressed" not in text
+        assert "background · sdk-ts" in text, "started as: origin beside the roster's word"
+
+
+async def test_a_desktop_prompt_says_it_is_in_the_desktop_app():
+    api = quiet_machine()
+    api.json("/api/sessions", _roster([_session_row(
+        state="needs_you", needs="permission prompt", needs_a_human_hand=True,
+        origin="desktop", entrypoint="claude-desktop")]))
+    async with dashboard(api) as page:
+        text = await _open_session(page)
+        assert "waiting in the Claude desktop app" in text
+        assert "your keystroke" not in text.lower()
+
+
+async def test_a_terminal_prompt_still_wants_a_keystroke():
+    api = quiet_machine()
+    api.json("/api/sessions", _roster([_session_row(
+        state="needs_you", needs="permission prompt", needs_a_human_hand=True,
+        origin="terminal", entrypoint="cli")]))
+    async with dashboard(api) as page:
+        text = await _open_session(page)
+        assert "your keystroke" in text.lower()
+        assert "key pressed in its terminal" in text
+
+
+async def test_a_session_its_host_is_answering_says_so_and_asks_nothing():
+    api = quiet_machine()
+    api.json("/api/sessions", _roster([_session_row(
+        state="working", origin="background", entrypoint="sdk-ts",
+        waiting_on_host="permission prompt")]))
+    async with dashboard(api) as page:
+        text = await _open_session(page)
+        assert "paused on “permission prompt”" in text
+        assert "the program that started it answers itself" in text
+        assert "Nothing is asked of you" in text
+
+
+async def test_a_row_from_an_older_server_still_renders():
+    """No `entrypoint`, no `waiting_on_host`: a server from before these
+    fields must not break the page it is still serving."""
+    api = quiet_machine()
+    row = _session_row(state="needs_you", needs="permission prompt",
+                       needs_a_human_hand=True)
+    api.json("/api/sessions", _roster([row]))
+    async with dashboard(api) as page:
+        text = await _open_session(page)
+        assert "your keystroke" in text.lower()
+        assert "started as" in text.lower()
+
+
+async def test_the_projects_tab_draws_a_program_s_prompt_as_the_program_s():
+    api = quiet_machine()
+    item = _project_item()
+    item["needs_you_count"] = 1
+    api.json("/api/projects/view", {"projects": [item], "taken_at": 0.0})
+    api.json("/api/projects/view/chitauri", {"project": {
+        **item,
+        "sessions": [_session_row(
+            state="needs_you", needs="permission prompt",
+            needs_a_human_hand=True, origin="background", entrypoint="sdk-ts")],
+        "runs": [], "repo": {"exists": False, "headline": "", "body": ""},
+        "build": {"has_spec": False, "has_plan": False, "progress": None},
+    }})
+    async with dashboard(api) as page:
+        await page.locator("#tab-projects").click()
+        await page.wait_for_selector("#proj-list .row", timeout=WAIT_MS)
+        await page.locator("#proj-list .row").first.click()
+        await page.wait_for_function(
+            "document.getElementById('proj-detail')"
+            "?.innerText.includes('permission prompt')", timeout=WAIT_MS)
+        text = await page.locator("#proj-detail").inner_text()
+        assert "its program's" in text.lower()
+        assert "your keystroke" not in text.lower()
+
+
 # ── a frozen roster reading says so ────────────────────────────────────────
 
 async def test_a_stale_roster_reading_is_visible():
@@ -425,3 +527,55 @@ async def test_the_caption_says_other_when_it_cannot_prove_smaller():
         text = await page.locator(".usage-more").inner_text()
         assert "other conversations not listed" in text
         assert "smaller" not in text
+
+
+# ── the Memory tab says when the index and the folder disagree ─────────────
+
+def _memory_snapshot(**over) -> dict:
+    snap = {
+        "path": "/tmp/jarvis-home", "index": [], "memories": [], "projects": [],
+        "journal": [], "latest_journal_slug": None, "unindexed": [],
+    }
+    snap.update(over)
+    return snap
+
+
+async def test_unindexed_memories_are_named_and_can_be_indexed_from_the_page():
+    """Four notes sat in memory/ for five days with an empty MEMORY.md and
+    the page showed "Nothing indexed yet." beside four files — a fact stated
+    twice and a problem stated nowhere."""
+    api = quiet_machine()
+    orphan = {"slug": "starnet-station", "title": "StarNet station", "modified": 1788404000.0}
+    api.json("/api/memory", _memory_snapshot(memories=[orphan], unindexed=[orphan]))
+    api.json("/api/memory/reindex", {"indexed": ["starnet-station"], "left_out": [], "full": False})
+    async with dashboard(api) as page:
+        await page.locator("#tab-memory").click()
+        await page.wait_for_selector("#memory-index-list .callout", timeout=WAIT_MS)
+
+        # `inner_text` reflects the stylesheet's uppercase callout label.
+        text = (await page.locator("#memory-index-list").inner_text()).lower()
+        assert "starnet station" in text
+        assert "not in the index" in text
+
+        api.json("/api/memory", _memory_snapshot(
+            memories=[orphan],
+            index=[{"title": "StarNet station", "slug": "starnet-station", "hook": "the crew"}]))
+        await page.locator("#memory-index-list button").click()
+        await page.wait_for_selector("#memory-index-list .row", timeout=WAIT_MS)
+
+        assert "/api/memory/reindex" in api.calls
+        text = (await page.locator("#memory-index-list").inner_text()).lower()
+        assert "not in the index" not in text
+        assert "the crew" in text
+
+
+async def test_an_index_that_matches_the_folder_shows_no_notice():
+    api = quiet_machine()
+    entry = {"slug": "starnet-station", "title": "StarNet station", "modified": 1788404000.0}
+    api.json("/api/memory", _memory_snapshot(
+        memories=[entry],
+        index=[{"title": "StarNet station", "slug": "starnet-station", "hook": "the crew"}]))
+    async with dashboard(api) as page:
+        await page.locator("#tab-memory").click()
+        await page.wait_for_selector("#memory-index-list .row", timeout=WAIT_MS)
+        assert await page.locator("#memory-index-list .callout").count() == 0

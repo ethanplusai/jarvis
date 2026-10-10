@@ -1,6 +1,8 @@
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
 
 # Dependencies
 node_modules/
@@ -18,6 +20,11 @@ __pycache__/
 data/*.jsonl
 data/active_session.json
 data/.jarvis_output.txt
+# Runtime lock held by maintenance.py while the server owns the data dir
+*.runtime.lock
+# Local launcher logs
+.jarvis-open.stdout.log
+.jarvis-open.stderr.log
 
 # Certificates
 *.pem

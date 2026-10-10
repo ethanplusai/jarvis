@@ -13,7 +13,8 @@ keeping a stale line.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import threading
 from pathlib import Path
 
 import data_paths
@@ -117,7 +118,7 @@ def _title_of(path: Path) -> str | None:
     """The `# Title` header of an existing memory file, or None if it
     cannot be read/found (a file the user emptied or rewrote by hand)."""
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return None
     for line in text.splitlines():
@@ -160,14 +161,15 @@ def write_memory(title: str, body: str) -> Path:
         n += 1
 
     stamp = datetime.now().strftime("%Y-%m-%d")
-    path.write_text(f"# {title.strip()}\n\n_{stamp}_\n\n{body.strip()}\n")
+    path.write_text(f"# {title.strip()}\n\n_{stamp}_\n\n{body.strip()}\n",
+                    encoding="utf-8")
     return path
 
 
 def read_memory(name: str) -> str | None:
     path = data_paths.memory_dir() / f"{slugify(name)}.md"
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except OSError:
         return None
 
@@ -203,13 +205,13 @@ def ensure_layout() -> Path:
     home = data_paths.ensure_memory_layout()
     index = _index_path()
     if not index.exists():
-        index.write_text(INDEX_HEADER)
+        index.write_text(INDEX_HEADER, encoding="utf-8")
     return home
 
 
 def index_lines() -> list[str]:
     try:
-        text = _index_path().read_text()
+        text = _index_path().read_text(encoding="utf-8")
     except OSError:
         return []
     return [ln for ln in text.splitlines() if ln.startswith("- [")]
@@ -278,7 +280,7 @@ def add_to_index(title: str, hook: str) -> None:
     line = _index_line(title, slug, hook)
 
     try:
-        existing = path.read_text()
+        existing = path.read_text(encoding="utf-8")
     except OSError:
         existing = INDEX_HEADER
 
@@ -294,12 +296,88 @@ def add_to_index(title: str, hook: str) -> None:
             raise IndexFull(
                 f"MEMORY.md already holds {MEMORY_INDEX_MAX} memories")
         kept.append(line)
-    path.write_text("\n".join(kept).rstrip("\n") + "\n")
+    path.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8")
 
 
 def index_is_full() -> bool:
     """True when the index has outgrown what belongs in every conversation."""
     return len(index_lines()) >= MEMORY_INDEX_MAX
+
+
+# --- the index and the folder can disagree ---------------------------------
+#
+# `tool_remember` writes the index line and the file together, so a note in
+# `memory/` with no line in MEMORY.md was written some other way — by hand,
+# by a setup script, by a restore of a partial archive. Measured live on
+# 2026-09-22: four such notes, five days old, and the index still at its
+# seeded header. The index is the ONLY thing that tells the brain a note
+# exists at boot, so those four did not exist to it.
+#
+# Nothing here runs on its own. A user who deleted an index line by hand to
+# "let a memory go" while keeping the file has made a choice, and a repair
+# that ran at startup would undo it every morning. So: `unindexed_memories`
+# is the report (preflight, the dashboard), and `reindex` is the repair the
+# user asks for (the dashboard's button, `maintenance.py reindex`).
+
+HOOK_MAX_CHARS = 100        # an index hook is a phrase, not the note
+
+
+def unindexed_memories() -> list[dict]:
+    """The `memory/` files no index line names, newest first."""
+    named = {e["slug"] for e in index_entries()}
+    return [e for e in memory_entries() if e["slug"] not in named]
+
+
+def _hook_for(path: Path, title: str) -> str:
+    """A hook for a note nobody wrote one for: its first substantive body
+    line, cut to a phrase. The title is never the hook — an index line that
+    says the same thing twice tells the brain nothing the title did not."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return title
+    for raw in text.splitlines():
+        if raw.startswith("# "):
+            continue                              # the title
+        line = _clean_line(raw)
+        if not line:
+            continue                              # the stamp, blank furniture
+        line = one_line(line)
+        if len(line) > HOOK_MAX_CHARS:
+            cut = line[:HOOK_MAX_CHARS].rsplit(" ", 1)[0] or line[:HOOK_MAX_CHARS]
+            line = cut.rstrip(",;:—-") + "…"
+        return line
+    return title
+
+
+def reindex() -> dict:
+    """Give every unindexed note an index line, oldest first.
+
+    Returns {"indexed": [slug, ...], "left_out": [slug, ...], "full": bool}.
+    A note is left out when the index cannot name its file — a collision
+    file (`<slug>-2.md`), or a title whose index form slugifies differently
+    — or when the index is full; a line that names the wrong file would be
+    worse than no line, and the cap is the cap (see `IndexFull`).
+    """
+    indexed: list[str] = []
+    left_out: list[str] = []
+    full = False
+    directory = data_paths.memory_dir()
+    for entry in sorted(unindexed_memories(), key=lambda e: e["modified"]):
+        slug, title = entry["slug"], entry["title"]
+        if full or slugify(_INDEX_STRUCTURAL.sub("", one_line(title))) != slug:
+            left_out.append(slug)
+            continue
+        try:
+            add_to_index(title, _hook_for(directory / f"{slug}.md", title))
+        except IndexFull:
+            full = True
+            left_out.append(slug)
+        except UnwritableValue:
+            left_out.append(slug)
+        else:
+            indexed.append(slug)
+    return {"indexed": indexed, "left_out": left_out, "full": full}
 
 
 def write_project_note(project: str, text: str) -> Path:
@@ -320,8 +398,8 @@ def write_project_note(project: str, text: str) -> Path:
     path = data_paths.projects_dir() / f"{slugify(project)}.md"
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     if not path.exists():
-        path.write_text(f"# {project}\n\n")
-    with path.open("a") as fh:
+        path.write_text(f"# {project}\n\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as fh:
         fh.write(f"_{stamp}_ — {text}\n")
     return path
 
@@ -329,9 +407,52 @@ def write_project_note(project: str, text: str) -> Path:
 def read_project_note(project: str) -> str | None:
     path = data_paths.projects_dir() / f"{slugify(project)}.md"
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except OSError:
         return None
+
+
+# No `^`/`$`, used with `fullmatch`, and built from the same ten-separator
+# class as `_INDEX_LINE_RE` — see tests/test_anchored_patterns.py.
+_NOTE_LINE_RE = re.compile(
+    rf"_(?P<stamp>[^_{_SEPARATORS}]+)_[ \t]*[—-][ \t]*(?P<text>{_ON_ONE_LINE}*)")
+
+
+def project_history(project: str, limit: int = 1100) -> str | None:
+    """What has been noted about one project, oldest first, as lines the
+    brain can read: "2026-09-21 14:05 — Uses WordPress." Returns None when
+    nothing has ever been noted.
+
+    Bounded from the END: when the notes outgrow `limit`, the newest lines
+    are the ones kept, because the newest are what a conversation about the
+    project needs and the oldest are what `recall` can still find.
+    """
+    text = read_project_note(project)
+    if text is None:
+        return None
+    lines: list[str] = []
+    for raw in text.splitlines():
+        m = _NOTE_LINE_RE.fullmatch(raw.strip())
+        if m:
+            lines.append(f"{m.group('stamp').strip()} — {m.group('text').strip()}")
+        elif raw.strip() and not raw.startswith("# "):
+            lines.append(_clean_line(raw) or "")       # a line the user wrote by hand
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return None
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if kept and used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(reversed(kept))[:limit]
+
+
+def project_names() -> list[str]:
+    """The projects that have notes, by the name the note file carries."""
+    return [e["title"] for e in project_entries()]
 
 
 _JOURNAL_STAMP_FMT = "%Y-%m-%d-%H%M%S-%f"   # fixed-width: lexicographic == chronological
@@ -350,11 +471,15 @@ _JOURNAL_NAME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{6}-\d{6})-(.+)\.md")
 # hand-edit (this folder is the user's to edit) away from being lost or
 # copy-pasted onto a real entry; and a filename a person can read is
 # self-documenting where a frontmatter key would not be.
-PLACEHOLDER_REASONS = frozenset({"rotation-silent", "shutdown-silent"})
+# A "start fresh" (`brain.Brain.rotate`): a tombstone, and a wall as well —
+# `latest_journal` carries nothing written before it.
+FRESH_START_REASON = "fresh-start"
+PLACEHOLDER_REASONS = frozenset({"rotation-silent", "shutdown-silent", FRESH_START_REASON})
 
 # `write_journal` appends "-2", "-3"… to break a filename collision, so the
 # reason parsed back out of a name may carry that suffix.
 _COLLISION_SUFFIX = re.compile(r"-\d+$")
+_journal_write_lock = threading.Lock()
 
 
 def write_journal(text: str, reason: str = "shutdown",
@@ -382,22 +507,39 @@ def write_journal(text: str, reason: str = "shutdown",
     off disk at boot. The note itself is free prose: `brain.wrap_handover`
     puts it inside an untrusted block either way.
     """
-    data_paths.ensure_memory_layout()
-    reason = one_line(reason) or "shutdown"
-    untrusted_source = one_line(untrusted_source) or None
-    stamp = datetime.now().strftime(_JOURNAL_STAMP_FMT)
-    path = data_paths.journal_dir() / f"{stamp}-{slugify(reason)}.md"
-    n = 2
-    while path.exists():
-        path = data_paths.journal_dir() / f"{stamp}-{slugify(reason)}-{n}.md"
-        n += 1
-    header_stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    provenance = (f"\n\nThe generation that wrote this had read "
-                  f"{untrusted_source} that day."
-                  if untrusted_source else "")
-    path.write_text(
-        f"# {header_stamp} ({reason}){provenance}\n\n{text.strip()}\n")
-    return path
+    with _journal_write_lock:
+        data_paths.ensure_memory_layout()
+        reason = one_line(reason) or "shutdown"
+        untrusted_source = one_line(untrusted_source) or None
+        now = datetime.now()
+        entries = journal_entries()
+        if entries:
+            previous = datetime.strptime(entries[-1][0], _JOURNAL_STAMP_FMT)
+            now = max(now, previous + timedelta(microseconds=1))
+        stamp = now.strftime(_JOURNAL_STAMP_FMT)
+        path = data_paths.journal_dir() / f"{stamp}-{slugify(reason)}.md"
+        n = 2
+        while path.exists():
+            path = data_paths.journal_dir() / f"{stamp}-{slugify(reason)}-{n}.md"
+            n += 1
+        header_stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        provenance = (f"\n\nThe generation that wrote this had read "
+                      f"{untrusted_source} that day."
+                      if untrusted_source else "")
+        path.write_text(
+            f"# {header_stamp} ({reason}){provenance}\n\n{text.strip()}\n",
+            encoding="utf-8")
+        return path
+
+
+def unreserved_reason(reason: str) -> str:
+    """The reason a note the brain asked for is filed under: its own, unless
+    the name `write_journal` would file it under is one of JARVIS's own — a
+    placeholder, or a fresh-start wall hiding everything before it
+    (`latest_journal`) — then "manual". Judged on that very name: cut to one
+    line as `write_journal` cuts it (`one_line` gives the same again)."""
+    filed = one_line(reason) or "shutdown"
+    return "manual" if is_placeholder_reason(slugify(filed)) else filed
 
 
 def _journal_stamp(path: Path) -> str | None:
@@ -443,6 +585,15 @@ def journal_entries() -> list[tuple[str, str, Path]]:
     return entries
 
 
+def _carried_entries() -> list[tuple[str, str, Path]]:
+    """The entries after the newest fresh-start wall — all of them, if
+    there is none."""
+    entries = journal_entries()
+    walls = [i for i, e in enumerate(entries)
+             if _COLLISION_SUFFIX.sub("", e[1]) == FRESH_START_REASON]
+    return entries[walls[-1] + 1:] if walls else entries
+
+
 def latest_journal(limit: int = 1200, include_placeholders: bool = False) -> str | None:
     """The most recent real handover, bounded — it is prepended to every new
     brain, at rotation AND at a cold start.
@@ -452,14 +603,18 @@ def latest_journal(limit: int = 1200, include_placeholders: bool = False) -> str
     restart after a silent shutdown handing the next generation a note that
     says only that the last one said nothing. They stay on disk; they are
     just never the thing that gets carried.
+
+    Nothing from before the newest `FRESH_START_REASON` entry is carried:
+    the user asked for that conversation to be forgotten, and a note it
+    left must not come back with the next restart.
     """
-    entries = journal_entries()
+    entries = _carried_entries()
     if not include_placeholders:
         entries = [e for e in entries if not is_placeholder_reason(e[1])]
     if not entries:
         return None
     try:
-        text = entries[-1][2].read_text()
+        text = entries[-1][2].read_text(encoding="utf-8")
     except OSError:
         return None
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -618,7 +773,7 @@ def search(query: str, limit: int = 5) -> list[dict]:
     hits = []
     for kind, path in _sources():
         try:
-            body = path.read_text()
+            body = path.read_text(encoding="utf-8")
         except OSError:
             continue
         score = _score(words, path.stem, body)
@@ -708,8 +863,9 @@ def journal_entries_meta() -> list[dict]:
 
 def latest_journal_slug() -> str | None:
     """The entry a new brain will actually carry — so the dashboard marks the
-    same one, placeholders skipped, rather than merely the newest file."""
-    entries = [e for e in journal_entries() if not is_placeholder_reason(e[1])]
+    same one, placeholders skipped and nothing from before a fresh start,
+    rather than merely the newest file."""
+    entries = [e for e in _carried_entries() if not is_placeholder_reason(e[1])]
     return entries[-1][2].stem if entries else None
 
 

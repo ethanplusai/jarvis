@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import procs
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,20 +42,13 @@ def config_roots() -> list[Path]:
 
 
 def pid_alive(pid) -> bool:
-    """True if the process exists. Signal 0 checks without touching it.
+    """True if the process exists, without touching it. See `procs.pid_alive`
+    for why this is not `os.kill(pid, 0)` — on Windows that sends Ctrl+C.
 
-    `pid` must be a positive integer: 0 means "this process's group" and a
-    negative pid means "that group" to `os.kill`, neither of which is a real
-    process, so both are rejected before the syscall.
+    Kept as a name on this module (rather than imported straight into the
+    callers) so tests can stub the roster's view of liveness in one place.
     """
-    try:
-        pid = int(pid)
-        if pid <= 0:
-            return False
-        os.kill(pid, 0)
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
+    return procs.pid_alive(pid)
 
 
 def encode_cwd(cwd: str) -> str:
@@ -89,6 +84,9 @@ class RosterEntry:
     status_updated_at: float | None = None
     socket_path: str | None = None
     version: str = ""
+    # The roster's `name`, raw, when it may be the thread's own — None when
+    # there is none or the CLI says it derived it. `_thread_name` decides.
+    given_name: str | None = None
 
     @property
     def steerable(self) -> bool:
@@ -96,13 +94,24 @@ class RosterEntry:
 
         Measured: 4 of 17 live entries had none. `ListAgents` cannot see those
         at all, which is why this watcher exists.
+
+        Never raises. On Windows the inbox is a named pipe, and `stat()` on a
+        pipe another client currently holds open answers ERROR_PIPE_BUSY
+        (231) instead of "exists" — measured live: it took every watcher
+        tick down for as long as the pipe was busy. A busy pipe is a bound
+        pipe; anything else that fails is unknown, and unknown is "no".
         """
-        return bool(self.socket_path) and Path(self.socket_path).exists()
+        if not self.socket_path:
+            return False
+        try:
+            return Path(self.socket_path).exists()
+        except OSError as e:
+            return getattr(e, "winerror", None) == 231
 
 
 def _parse_entry(path: Path, root: Path) -> RosterEntry | None:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None            # unreadable, empty, or caught mid-write
     if not isinstance(data, dict):
@@ -130,6 +139,8 @@ def _parse_entry(path: Path, root: Path) -> RosterEntry | None:
         socket_path=(str(data["messagingSocketPath"])
                      if isinstance(data.get("messagingSocketPath"), str) else None),
         version=str(data.get("version") or ""),
+        given_name=(data["name"] if isinstance(data.get("name"), str)
+                    and data.get("nameSource") != "derived" else None),
     )
 
 
@@ -312,6 +323,15 @@ IDLE = "idle"
 GONE = "gone"
 UNKNOWN = "unknown"      # alive, but the roster carries no status for it
 
+# Who is at the other end of a conversation — its ORIGIN. Derived from the
+# roster's `entrypoint` by `_origin`, whose table and history are below.
+TERMINAL = "terminal"        # `claude` in a terminal
+DESKTOP = "desktop"          # the Claude desktop app, Cowork included
+EDITOR = "editor"            # the VS Code extension (and its forks)
+REMOTE = "remote"            # claude.ai, the mobile app, Slack, Teams, ssh
+BACKGROUND = "background"    # a program started it and answers for it
+OTHER = "other"              # an entrypoint the table does not know
+
 # Keywords matched against a lowercased `waitingFor` reason to flag one that
 # a peer message cannot clear. The reason set itself is OPEN — "input needed"
 # turned up after only "permission prompt" and "dialog open" had been seen,
@@ -364,6 +384,16 @@ class SessionState:
     primary_pid: int | None = None
     roster_name: str = ""
     voice_name: str = ""
+    # The thread's own name — what the Claude app's sidebar calls it — made
+    # sayable, or None when the roster carries only a name the CLI derived
+    # from the folder. See `_thread_name`; it wins over the folder in
+    # `_assign_voice_names`.
+    thread_name: str | None = None
+    # The words of `voice_name` that ARE the thread's own name — all of it,
+    # or the base `_name_group` composed round it — so a sentence can say
+    # them as a thread's name (`server._said_name`). None for a session
+    # named by its folder. Set, and cleared, by `_assign_voice_names`.
+    thread_part: str | None = None
     needs: str | None = None
     title: str | None = None
     last_prompt: str | None = None
@@ -380,7 +410,12 @@ class SessionState:
     # `started` and `since` are NOT interchangeable and must stay two fields.
     # Do not "simplify" these back into one.
     since: float | None = None
-    origin: str = "terminal"
+    # Who answers its prompts: one of the origin constants above, derived
+    # from `entrypoint` through a closed table — so it is safe to branch on
+    # and never needs saying raw. `entrypoint` IS the roster's own string,
+    # kept for the dashboard to show; nothing that speaks prints it.
+    origin: str = TERMINAL
+    entrypoint: str = ""
     steerable: bool = False
     socket_path: str | None = None
     # Is this the conversation the user is actually sitting at, in this
@@ -396,6 +431,11 @@ class SessionState:
     agents_active: int = 0
     # `agents_seen` hit MAX_AGENT_FILES: it is a floor, not a total.
     agents_capped: bool = False
+    # What a PROGRAM's session is paused on while that program answers it —
+    # a `waitingFor` reason, or "" when the roster named none. None when it
+    # is not waiting on its host. Never set together with `needs`: see
+    # `_derive_state`, and tests/test_prompt_owner.py for why it exists.
+    waiting_on_host: str | None = None
 
     @property
     def announceable(self) -> bool:
@@ -420,9 +460,17 @@ class SessionState:
 #
 #   Primary is decided PER PROJECT. A conversation is ELIGIBLE if it is
 #   alive, has been prompted at least once (a `fresh` session has no
-#   transcript and is nobody's main session), and was started interactively
-#   — `entrypoint: cli`, i.e. origin "terminal". A background/SDK session is
-#   never the main one: nobody is typing into it.
+#   transcript and is nobody's main session), and a PERSON is at the other
+#   end of it — an origin in `ATTENDED_ORIGINS`: a terminal, the desktop app,
+#   an editor, a remote app. A program's session is never the main one:
+#   nobody is typing into it. Nor is one whose entrypoint is not in the
+#   table — nothing is claimed about who is typing into that.
+#
+#   (Eligibility used to be "origin is terminal", with every unknown
+#   entrypoint defaulted TO terminal. So on a machine run from the desktop
+#   app every real conversation was "a background conversation", and the one
+#   Paperclip was driving through the SDK was "the only live conversation
+#   here" — measured, 2026-09-28.)
 #
 #   Among the eligible, the most recently active wins, measured by `since`
 #   (the roster's `statusUpdatedAt`).
@@ -442,6 +490,7 @@ PRIMARY_ONLY = "the only live conversation here"
 PRIMARY_RECENT = "most recently active"
 PRIMARY_TIED = "equally live as another here"
 NOT_PRIMARY_BACKGROUND = "a background conversation"
+NOT_PRIMARY_UNPLACED = "started by something I can't place"
 NOT_PRIMARY_FRESH = "never prompted"
 NOT_PRIMARY_GONE = "finished"
 
@@ -454,8 +503,10 @@ def _mark_primary(sessions: list[SessionState]) -> None:
             s.primary, s.primary_reason = False, NOT_PRIMARY_GONE
         elif s.state == FRESH:
             s.primary, s.primary_reason = False, NOT_PRIMARY_FRESH
-        elif s.origin != "terminal":
+        elif s.origin in PROGRAM_ORIGINS:
             s.primary, s.primary_reason = False, NOT_PRIMARY_BACKGROUND
+        elif s.origin not in ATTENDED_ORIGINS:
+            s.primary, s.primary_reason = False, NOT_PRIMARY_UNPLACED
         else:
             s.primary, s.primary_reason = False, NOT_PRIMARY_BACKGROUND
             by_project.setdefault(s.project, []).append(s)
@@ -596,16 +647,73 @@ def worktree_branch(cwd: str) -> str:
     return ""
 
 
+# ── who is at the other end ─────────────────────────────────────────────────
+#
+# Every roster entry carries the `entrypoint` the CLI was started with
+# (`CLAUDE_CODE_ENTRYPOINT`), and that is the one thing on disk that says who
+# answers the session's prompts: a person at a terminal, a person in the
+# desktop app or an editor, or a PROGRAM — the Agent SDK, `claude -p`, an MCP
+# client, a CI action — that started it and takes its prompts over stdio.
+#
+# This table used to hold four entries and call everything else a terminal.
+# Measured live, 2026-09-28: Paperclip drove a session in stark-armory-next
+# through the TypeScript Agent SDK (`sdk-ts`, launched by `claude-agent-acp`
+# with `--permission-prompt-tool stdio`). Paperclip approved each of its
+# permission prompts itself, in 0.06 to 2.34 seconds; JARVIS, reading
+# "terminal", announced six of them in seven minutes as needing the user's
+# own keystroke, and crowned the session "the only live conversation here".
+#
+# The keys are the CLI's own list (`Vin` in the 2.1.270 binary), every one
+# placed. A value the list does not have is `OTHER` — neither a person's
+# session nor a program's is claimed for it. A missing `entrypoint` is
+# already `cli` by the time it gets here (`_parse_entry`): older CLIs wrote
+# none, and they were terminals.
 _ORIGIN_BY_ENTRYPOINT = {
-    "cli": "terminal",
-    "sdk-cli": "background",
-    "claude-desktop": "desktop",
-    "desktop": "desktop",
+    "cli": TERMINAL,
+    "claude-desktop": DESKTOP,
+    "claude-desktop-3p": DESKTOP,
+    "local-agent": DESKTOP,
+    "local_agent": DESKTOP,
+    "claude-vscode": EDITOR,
+    "remote": REMOTE,
+    "remote_baku": REMOTE,
+    "remote_cowork": REMOTE,
+    "remote_desktop": REMOTE,
+    "remote_mobile": REMOTE,
+    "ssh-remote": REMOTE,
+    "claude_in_slack": REMOTE,
+    "claude-in-slack": REMOTE,
+    "claude-in-teams": REMOTE,
+    "sdk-cli": BACKGROUND,
+    "sdk-ts": BACKGROUND,
+    "sdk-py": BACKGROUND,
+    "mcp": BACKGROUND,
+    "claude-code-github-action": BACKGROUND,
+    "bench": BACKGROUND,
+    "remote_trigger": BACKGROUND,
+    "remote_cowork_trigger": BACKGROUND,
+    # Not in the CLI's list; the previous table carried it, and a desktop
+    # session is what it would mean.
+    "desktop": DESKTOP,
 }
+
+# A person answers these sessions' prompts, wherever they are shown.
+ATTENDED_ORIGINS = frozenset({TERMINAL, DESKTOP, EDITOR, REMOTE})
+# The program that started these answers them — over stdio, by its own policy
+# or its own UI. Nothing JARVIS or the user can press reaches them.
+PROGRAM_ORIGINS = frozenset({BACKGROUND})
+
+# How long a program may sit on one of its session's prompts before it is the
+# user's business. The longest answer measured from a real host was 2.34 s;
+# past a minute the host is either waiting on a person in its own UI (an
+# editor speaking ACP asks there) or has hung, and either way the user is the
+# only one left who can move it — so the user is told, once, as the program's
+# prompt. Short enough that a hung host does not hide its session for long.
+HOST_ANSWER_GRACE_SEC = 60.0
 
 
 def _origin(entry: RosterEntry) -> str:
-    return _ORIGIN_BY_ENTRYPOINT.get(entry.entrypoint, "terminal")
+    return _ORIGIN_BY_ENTRYPOINT.get(entry.entrypoint, OTHER)
 
 
 def brain_cwd() -> str:
@@ -672,42 +780,176 @@ def _pick_primary(entries: list[RosterEntry]) -> RosterEntry:
     )[0]
 
 
-def _derive_state(entries: list[RosterEntry], recap: Recap) -> tuple[str, str | None]:
-    """The conversation's state and the reason it needs you, if it does."""
+def _host_holds(entry: RosterEntry, now: float) -> bool:
+    """Is this wait still its host program's to answer?
+
+    Only a program's session has a host, and only inside the grace. With no
+    `statusUpdatedAt` there is no telling how long the host has had it, and
+    absence of evidence is not a long wait: the user is not interrupted on
+    a guess.
+    """
+    if _origin(entry) not in PROGRAM_ORIGINS:
+        return False
+    began = entry.status_updated_at
+    return began is None or now - began < HOST_ANSWER_GRACE_SEC
+
+
+def _derive_state(entries: list[RosterEntry], recap: Recap,
+                  now: float) -> tuple[str, str | None, str | None]:
+    """The conversation's state, the reason it needs you if it does, and the
+    reason it is waiting on its host program if it is doing that instead.
+
+    At most one of the two reasons is set. A wait in a PROGRAM's session is
+    the program's: the session reads `working` — the program is driving it,
+    nothing is asked of the user — and `waiting_on_host` says what it paused
+    on (`""` when the roster named nothing). Past `HOST_ANSWER_GRACE_SEC` it
+    is the user's, as any other wait is.
+    """
     if not any(pid_alive(e.pid) for e in entries):
-        return GONE, None
+        return GONE, None, None
     if not recap.exists:
         # Nobody has ever prompted it. True even when it sits at a startup
         # dialog — measured on chitauri-67, which was `waiting`/`dialog open`.
-        return FRESH, None
+        return FRESH, None, None
 
     live = [e for e in entries if pid_alive(e.pid)]
-    waiting = next((e for e in live if e.waiting_for), None)
+    waiting = next((e for e in live if e.waiting_for), None) or \
+        next((e for e in live if e.status == "waiting"), None)
     if waiting is not None:
-        return NEEDS_YOU, waiting.waiting_for
-    if any(e.status == "waiting" for e in live):
-        return NEEDS_YOU, None
+        if _host_holds(waiting, now):
+            return WORKING, None, waiting.waiting_for or ""
+        return NEEDS_YOU, waiting.waiting_for, None
     if any(e.status == "busy" for e in live):
-        return WORKING, None
+        return WORKING, None, None
     if any(e.status == "shell" for e in live):
-        return SHELL, None
+        return SHELL, None, None
     if all(e.status is None for e in live):
-        return UNKNOWN, None
-    # Idle, but it may have stopped to ask something.
+        return UNKNOWN, None, None
+    # Idle, but it may have stopped to ask something. A program's session
+    # asked its PROGRAM, which is what reads its result: that is not the
+    # user being wanted, however the sentence ends.
+    if all(_origin(e) in PROGRAM_ORIGINS for e in live):
+        return IDLE, None, None
     if any(t in _QUESTION_TOOLS for t in recap.recent_tools) or \
             _looks_like_a_question(recap.last_text):
-        return NEEDS_YOU, None
-    return IDLE, None
+        return NEEDS_YOU, None, None
+    return IDLE, None, None
+
+
+# A thread's own name, as the one wall every voice name meets downstream
+# (`server._VOICE_NAME_RE`) will admit it: word characters, spaces and light
+# punctuation, beginning and ending on a word character, at most sixty-four
+# characters. Cut to that HERE, where the name is made, rather than left for
+# the wall to refuse — a refused name is said as "that session", which is the
+# very thing this name exists to fix. tests/test_header_lines.py drives what
+# this produces through the real wall.
+_SAYABLE_MAX = 64
+_UNSAYABLE_RE = re.compile(r"[^\w ,.\-/+']+")
+_APOSTROPHES = str.maketrans({"‘": "'", "’": "'", "ʼ": "'"})
+# Room left for the connective tissue `_name_group` puts round a name two
+# threads share: "the {name} in an unclear state" is 24 characters of it.
+_SHARED_NAME_MAX = 40
+
+
+def _clip_words(text: str, limit: int) -> str:
+    """`text` without leading or trailing punctuation, cut to `limit` at a
+    space — or hard, when one word is longer than the whole limit."""
+    text = re.sub(r"\A\W+|\W+\Z", "", text)
+    if len(text) <= limit:
+        return text
+    head = text[:limit + 1]
+    cut = head.rsplit(" ", 1)[0] if " " in head else text[:limit]
+    return re.sub(r"\W+\Z", "", cut)
+
+
+def _sayable_name(text) -> str | None:
+    """A thread's name as a sentence can hold it, or None if nothing of it
+    survives. "Fix: the login redirect" is said "Fix the login redirect";
+    quotes, brackets, colons and every line separator become spaces."""
+    if not isinstance(text, str):
+        return None
+    text = text.translate(_APOSTROPHES).replace("&", " and ")
+    text = " ".join(_UNSAYABLE_RE.sub(" ", text).split())
+    return _clip_words(text, _SAYABLE_MAX) or None
+
+
+def _thread_name(entry: RosterEntry) -> str | None:
+    """The name the user knows this thread by, or None.
+
+    Measured live, 2026-09-30: the Claude desktop app writes the thread's
+    sidebar name into the roster's `name` — "Tell brain turns apart from
+    cross-session wakes", `nameSource: "user"`, and one with no `nameSource`
+    at all — while every thread it starts without a folder runs in a scratch
+    folder named like `scratch-2026-09-24-1a3f1e`. Named by that folder, two
+    threads were announced as "the newest" and "the second"
+    scratch-2026-09-24-1a3f1e, and the user could tell neither apart nor say
+    either back.
+
+    A terminal session's `name` is the CLI's own ("chitauri-67",
+    `nameSource: "derived"`): not chosen by anyone and not sayable, so it is
+    never used — and a name with no source that is just the folder, or the
+    folder plus a short suffix, is taken for one of those too.
+    """
+    name = _sayable_name(entry.given_name)
+    if name is None:
+        return None
+    lowered = name.casefold()
+    for folder in {Path(entry.cwd).name.casefold(),
+                   project_name(entry.cwd).casefold()}:
+        if folder and (lowered == folder or re.fullmatch(
+                re.escape(folder) + r"-[a-z0-9]{1,8}", lowered)):
+            return None
+    return name
 
 
 def _assign_voice_names(sessions: list[SessionState]) -> None:
     """Give every conversation a name a person can say and hear.
+
+    A thread with a name of its own is called by it (`_thread_name`) — that
+    is what the user sees in the Claude app and what he will say back. Only
+    the rest are named by their folder.
 
     Collisions measured on the live machine: `hammer` had two conversations in
     ONE directory (so the folder cannot disambiguate) and `chitauri` had three
     across TWO directories (so the folder can). Roster suffixes like `-4b` are
     never used: they are neither sayable nor hearable.
     """
+    # A thread named exactly what some project here is called would share
+    # that project's spoken name, and "which one?" would have no answer the
+    # user could give. Such a thread is named by its folder instead.
+    projects = {s.project.casefold() for s in sessions}
+    by_thread: dict[str, list[SessionState]] = {}
+    by_folder: list[SessionState] = []
+    for s in sessions:
+        # Named afresh: a session carried forward, or re-named once runs are
+        # excluded, may be named by its folder this time.
+        s.thread_part = None
+        key = s.thread_name.casefold() if s.thread_name else None
+        if key and key not in projects:
+            by_thread.setdefault(key, []).append(s)
+        else:
+            by_folder.append(s)
+
+    for group in by_thread.values():
+        if len(group) == 1:
+            group[0].voice_name = group[0].thread_part = group[0].thread_name
+            continue
+        # Two threads given one name ("New conversation"): that name is the
+        # base, and the chain below tells them apart as it does a folder.
+        # The oldest thread's spelling, so the name does not flip with the
+        # order the roster happened to be listed in.
+        eldest = min(group, key=lambda s: (s.started or 0.0, s.session_id))
+        base = _clip_words(eldest.thread_name, _SHARED_NAME_MAX)
+        _name_group(group, base)
+        for s in group:
+            s.thread_part = base
+
+    _name_by_folder(by_folder)
+
+
+def _name_by_folder(sessions: list[SessionState]) -> None:
+    """Name conversations after their project folder: alone it is the bare
+    project name, and several share it in the ways `_name_group` says."""
     by_project: dict[str, list[SessionState]] = {}
     for s in sessions:
         by_project.setdefault(s.project, []).append(s)
@@ -800,8 +1042,14 @@ def _name_by_topic(group: list[SessionState], base: str) -> bool:
         phrases[s.session_id] = phrase
     if len(set(phrases.values())) != len(phrases):
         return False
+    names = {sid: f"{base}, the {phrase} one" for sid, phrase in phrases.items()}
+    # Two title words have no length of their own; a name longer than the
+    # wall admits is said as "that session", which tells the group apart by
+    # nothing. State or age can still do it.
+    if any(len(name) > _SAYABLE_MAX for name in names.values()):
+        return False
     for s in group:
-        s.voice_name = f"{base}, the {phrases[s.session_id]} one"
+        s.voice_name = names[s.session_id]
     return True
 
 
@@ -857,6 +1105,9 @@ _FILLER = frozenset({
     "the", "a", "an", "one", "ones", "session", "sessions", "conversation",
     "conversations", "project", "in", "on", "at", "my", "please", "that",
     "this", "it", "s", "lets", "let", "go", "with", "use", "about",
+    # JARVIS says a thread as "the thread “…”" (`server._said_name`), and
+    # whoever says it back says it the same way.
+    "thread", "threads",
 })
 
 
@@ -1034,7 +1285,7 @@ def build_snapshot(entries: list[RosterEntry] | None = None,
         # "not started" — which is the one state JARVIS never announces.
         roots_here = _roots_of(group, primary)
         recap = _first_recap(roots_here, primary.cwd, session_id)
-        state, needs = _derive_state(group, recap)
+        state, needs, waiting_on_host = _derive_state(group, recap, at)
         agents_seen, agents_active, agents_capped = count_agents(
             roots_here, primary.cwd, session_id, at)
         live = [e for e in group if pid_alive(e.pid)]
@@ -1047,6 +1298,7 @@ def build_snapshot(entries: list[RosterEntry] | None = None,
             pids=[e.pid for e in group],
             primary_pid=primary.pid,
             roster_name=primary.name,
+            thread_name=_thread_name(primary),
             needs=needs,
             title=recap.title,
             last_prompt=recap.last_prompt,
@@ -1055,6 +1307,8 @@ def build_snapshot(entries: list[RosterEntry] | None = None,
             started=(primary.started_at or primary.status_updated_at),
             since=(primary.status_updated_at or primary.started_at),
             origin=_origin(primary),
+            entrypoint=primary.entrypoint,
+            waiting_on_host=waiting_on_host,
             steerable=steerable_entry is not None,
             socket_path=steerable_entry.socket_path if steerable_entry else None,
             agents_seen=agents_seen,
@@ -1256,6 +1510,8 @@ def session_to_dict(s: SessionState) -> dict:
         "session_id": s.session_id,
         "voice_name": s.voice_name,
         "roster_name": s.roster_name,
+        "thread_name": s.thread_name,
+        "thread_part": s.thread_part,
         "project": s.project,
         "cwd": s.cwd,
         "state": s.state,
@@ -1275,6 +1531,13 @@ def session_to_dict(s: SessionState) -> dict:
         "started": s.started,
         "since": s.since,
         "origin": s.origin,
+        # The roster's own word for how it was started ("sdk-ts"), beside
+        # the origin JARVIS derived from it, so a reader can check the one
+        # against the other.
+        "entrypoint": s.entrypoint,
+        # Set only while a program's session waits on that program — a
+        # `working` session, paused on something it is not asking the user.
+        "waiting_on_host": s.waiting_on_host,
         "steerable": s.steerable,
         "pids": list(s.pids),
         "primary_pid": s.primary_pid,

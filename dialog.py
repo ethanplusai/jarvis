@@ -37,9 +37,23 @@ import asyncio
 import logging
 import re
 import shutil
+import sys
+import json
+from pathlib import Path
 from dataclasses import dataclass
 
 log = logging.getLogger("jarvis.dialog")
+_windows = sys.platform == "win32"
+
+
+def _windows_console(pid, key=None):
+    import subprocess
+    args = [sys.executable, str(Path(__file__).with_name("windows_console.py")), str(pid)]
+    if key is not None:
+        args.append(key)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=5,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return json.loads(result.stdout) if result.returncode == 0 else {"status": "failed"}
 
 # --- outcomes ---------------------------------------------------------------
 SENT = "sent"
@@ -154,6 +168,11 @@ def tty_for_pid(pid) -> str | None:
         return None
     if pid <= 0:
         return None
+    if _windows:
+        try:
+            return _windows_console(pid).get("tty")
+        except Exception:
+            return None
     try:
         import subprocess
         out = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)],
@@ -361,6 +380,8 @@ async def answer(pid: int, key: str) -> str:
         log.warning(f"refusing a key outside the vocabulary: {key!r}")
         return BAD_KEY
     try:
+        if _windows:
+            return (await asyncio.to_thread(_windows_console, pid, normalized))["status"]
         tty = await tty_for_pid_async(pid)
         if tty is None:
             return NO_TTY

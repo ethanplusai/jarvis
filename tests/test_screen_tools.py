@@ -168,7 +168,7 @@ def test_nothing_captures_the_screen_on_a_timer(ready):
     caller of `capture_screen` is the tool the user's own words reach."""
     import ast
     server, _fake = ready
-    tree = ast.parse(Path(server.__file__).read_text())
+    tree = ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
     # What the code REACHES for, not the prose about it: the comment beside
     # the tools names the old always-on helper in order to say it is banned.
     called = [n.func.attr for n in ast.walk(tree)
@@ -379,7 +379,7 @@ async def test_the_window_list_fits_the_brains_budget(ready):
 
 def test_the_brain_is_told_the_screen_is_not_the_session_list():
     home = Path(__file__).parent.parent / "jarvis_home" / "CLAUDE.md"
-    text = home.read_text()
+    text = home.read_text(encoding="utf-8")
     assert "look_at_screen" in text
     assert "what_is_on_screen" in text
     assert "You cannot read the user's screen" not in text, \
