@@ -13,8 +13,8 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -74,6 +74,14 @@ ALLOWED_TOOLS = [
     "mcp__jarvis__recall",
     "mcp__jarvis__project_note",
     "mcp__jarvis__write_journal",
+    "mcp__jarvis__learning_status",
+    "mcp__jarvis__approve_learning",
+    "mcp__jarvis__retire_learning",
+    "mcp__jarvis__teach",
+    "mcp__jarvis__evaluate_code",
+    "mcp__jarvis__learn_skill",
+    "mcp__jarvis__run_skill",
+    "mcp__jarvis__improve_now",
     # The CLI's own two, and the only non-JARVIS tools here. JARVIS could read
     # a page he was handed the address of and nothing else — "look it up" had
     # no answer at all. Both were verified inside this exact flag set
@@ -115,9 +123,20 @@ ALLOWED_TOOLS = [
 # the intent in the one place a reader will look, and if the CLI ever enforces
 # `--tools` over MCP names again, a user's declared server keeps working
 # instead of going silently dead.
+_WINDOWS = sys.platform == "win32"
+# Mirrors jarvis_mcp.UNAVAILABLE_ON_WINDOWS (not imported: brain.py does not
+# load the MCP child's module). Empty since answer_dialog was ported.
+_UNAVAILABLE_ON_WINDOWS: set[str] = set()
+
+
 def granted_tools(connections: list[str]) -> list[str]:
     """ALLOWED_TOOLS plus one whole-server grant per declared connection."""
-    return ALLOWED_TOOLS + [f"mcp__{name}" for name in connections]
+    allowed = ALLOWED_TOOLS
+    if _WINDOWS:
+        # See jarvis_mcp.UNAVAILABLE_ON_WINDOWS: not offered, so not granted.
+        allowed = [t for t in allowed
+                   if t.removeprefix("mcp__jarvis__") not in _UNAVAILABLE_ON_WINDOWS]
+    return allowed + [f"mcp__{name}" for name in connections]
 
 # Tools whose results put text from the open web into the brain's context. A
 # turn that has used one may not also act unsupervised (server.py gates it);
@@ -742,7 +761,7 @@ class Brain:
 
     def command(self) -> list[str]:
         c = self.config
-        cmd = shlex.split(self._claude) + [
+        cmd = claude_env.split_command(self._claude) + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages",
             "--model", c.model, "--effort", c.effort, "--name", "jarvis",
@@ -890,7 +909,7 @@ class Brain:
     @staticmethod
     def _kill(proc: asyncio.subprocess.Process) -> None:
         try:
-            proc.kill()
+            claude_env.kill(proc)
         except ProcessLookupError:
             pass
 

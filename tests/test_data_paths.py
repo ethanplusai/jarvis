@@ -224,10 +224,10 @@ def test_every_template_this_project_has_shipped_is_listed(monkeypatch, tmp_path
     for commit in commits:
         blob = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{rel}"],
                               capture_output=True, timeout=60).stdout
-        digest = hashlib.sha256(blob).hexdigest()
+        digest = dp._sha256(blob)
         if digest not in dp.KNOWN_TEMPLATE_HASHES:
             missing[digest] = commit[:8]
-    here = hashlib.sha256(dp.persona_template_path().read_bytes()).hexdigest()
+    here = dp._sha256(dp.persona_template_path().read_bytes())
     if here not in dp.KNOWN_TEMPLATE_HASHES:
         missing[here] = "the working tree"
     assert not missing, (

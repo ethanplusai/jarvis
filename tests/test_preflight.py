@@ -335,6 +335,7 @@ async def test_accessibility_skipped_off_darwin(monkeypatch):
 # it is worth saying at startup rather than at the moment he asks.
 
 def test_screen_recording_granted(monkeypatch):
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     monkeypatch.setattr(preflight.screen, "screen_recording_granted", lambda: True)
     check = preflight._check_screen_recording_sync()
     assert check.status == STATUS_OK
@@ -342,6 +343,7 @@ def test_screen_recording_granted(monkeypatch):
 
 
 def test_screen_recording_not_granted_is_fail_with_the_launching_app_remedy(monkeypatch):
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     monkeypatch.setattr(preflight.screen, "screen_recording_granted", lambda: False)
     check = preflight._check_screen_recording_sync()
     assert check.status == STATUS_FAIL
@@ -354,12 +356,14 @@ def test_screen_recording_undeterminable_is_warn_not_fail(monkeypatch):
     """None means the probe could not run -- off macOS, or a macOS that moved
     the symbol. Reporting that as a missing permission would send the user to
     a settings pane over nothing."""
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     monkeypatch.setattr(preflight.screen, "screen_recording_granted", lambda: None)
     check = preflight._check_screen_recording_sync()
     assert check.status == STATUS_WARN
 
 
 def test_screen_recording_check_never_raises(monkeypatch):
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     def boom():
         raise RuntimeError("CoreGraphics went sideways")
 
@@ -391,9 +395,32 @@ def test_fish_api_key_present(monkeypatch):
 
 def test_fish_api_key_absent(monkeypatch):
     monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
     check = preflight._check_fish_api_key_sync()
     assert check.status == STATUS_FAIL
     assert check.remedy
+
+
+def test_fish_api_key_placeholder_counts_as_absent(monkeypatch):
+    monkeypatch.setenv("FISH_API_KEY", "your-fish-audio-api-key-here")
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    assert preflight._check_fish_api_key_sync().status == STATUS_FAIL
+
+
+def test_fish_api_key_absent_on_windows_warns_of_the_system_voice(monkeypatch):
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("JARVIS_WINDOWS_TTS", raising=False)
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    check = preflight._check_fish_api_key_sync()
+    assert check.status == STATUS_WARN
+    assert "Windows" in check.message and check.remedy
+
+
+def test_fish_api_key_absent_on_windows_with_the_fallback_off_fails(monkeypatch):
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.setenv("JARVIS_WINDOWS_TTS", "false")
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    assert preflight._check_fish_api_key_sync().status == STATUS_FAIL
 
 
 # --- leftover ANTHROPIC_* ------------------------------------------------------
@@ -524,6 +551,7 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     assert names == {
         "claude_cli", "claude_login", "accessibility", "screen_recording",
         "fish_api_key", "anthropic_key_leftover", "cross_session_inbound",
+        "utf8_mode",
     }
 
 
@@ -596,3 +624,24 @@ def test_spoken_summary_warn_counts_as_something_wrong():
     summary = preflight.spoken_summary(checks)
     assert summary != ""
     assert "One thing needs attention" in summary
+
+
+def test_the_macos_permissions_are_not_asked_about_on_windows(monkeypatch):
+    """Neither applies there, and a warning read aloud at every start over a
+    permission that does not exist would teach the user to ignore warnings."""
+    import asyncio
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(preflight.screen, "screen_recording_granted",
+                        lambda: pytest.fail("asked CoreGraphics on Windows"))
+    assert preflight._check_screen_recording_sync().status == STATUS_OK
+    assert asyncio.run(preflight._check_accessibility()).status == STATUS_OK
+
+
+def test_windows_without_utf8_mode_is_a_warning_with_a_remedy(monkeypatch):
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(preflight.sys, "flags",
+                        type("F", (), {"utf8_mode": 0})())
+    check = preflight._check_utf8_mode_sync()
+    assert check.status == STATUS_WARN and "PYTHONUTF8" in check.remedy
+    monkeypatch.setattr(preflight.sys, "platform", "darwin")
+    assert preflight._check_utf8_mode_sync().status == STATUS_OK

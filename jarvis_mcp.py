@@ -696,7 +696,158 @@ TOOL_SPECS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "learning_status",
+        "description": (
+            "What you have learned from past work: lessons in use and how reliable "
+            "each has proved, lessons waiting for the user's approval, skills you "
+            "have written, and whether the local model that does the learning is "
+            "up. Use it for 'what have you learned', 'what's waiting for me', and "
+            "before approving or retiring anything — the user approves by number."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "approve_learning",
+        "description": (
+            "Put a learned lesson or skill into use, once the user has said so. "
+            "`ref` is 'lesson 12', a skill's name, or 'all pending'. Only when he "
+            "has heard what he is approving — read him the whole lesson, not just "
+            "its title. 'all pending' never covers brain lessons or ones that read "
+            "like instructions; those are approved by number."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ref": {"type": "string",
+                                   "description": "'lesson 12', a skill name, or 'all pending'."}},
+            "required": ["ref"],
+        },
+    },
+    {
+        "name": "retire_learning",
+        "description": (
+            "Stop using a lesson or a skill: 'lesson 12' or a skill's name. Use it "
+            "when the user says a lesson is wrong or a skill is no longer wanted."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ref": {"type": "string"}},
+            "required": ["ref"],
+        },
+    },
+    {
+        "name": "teach",
+        "description": (
+            "Learn a lesson the user states — how he wants you to work, or what to "
+            "do differently after a mistake. In use at once. scope 'brain' is for "
+            "how YOU behave (it is loaded into every conversation); scope 'runs' is "
+            "advice handed to Claude Code runs whose task matches applies_to. A fact "
+            "about the user or a project is `remember`, not this."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lesson": {"type": "string", "description": "The lesson, as advice."},
+                "scope": {"type": "string", "description": "brain (default) or runs."},
+                "applies_to": {"type": "string",
+                               "description": "For runs: comma-separated keywords, e.g. "
+                                              "'python, tests, myproject'."},
+            },
+            "required": ["lesson"],
+        },
+    },
+    {
+        "name": "evaluate_code",
+        "description": (
+            "Run a short Python program (standard library only) in a sandboxed "
+            "child process and report its output and errors. For checking a "
+            "calculation, trying an idea, or testing a snippet the user dictated. "
+            "Times out after 10 seconds by default (15 at most)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string"},
+                "timeout": {"type": "number"},
+            },
+            "required": ["code"],
+        },
+    },
+    {
+        "name": "learn_skill",
+        "description": (
+            "Teach yourself a new reusable Python skill: the local model writes it "
+            "with tests and rewrites it until every test passes. Runs in the "
+            "background — say you are on it and end your turn. A new skill waits "
+            "for the user's approval before run_skill can use it."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "snake_case, e.g. parse_durations."},
+                "description": {"type": "string",
+                                "description": "What it takes, what it returns, edge cases."},
+            },
+            "required": ["name", "description"],
+        },
+    },
+    {
+        "name": "run_skill",
+        "description": (
+            "Use one of your approved skills. `arguments` is a JSON object of "
+            "keyword arguments. If it fails, the failing input is kept and you "
+            "repair the skill against it in the background."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "improve_now",
+        "description": (
+            "Reflect now instead of waiting: turn recent failures into lessons and "
+            "merge lessons that say the same thing into strategies — or, with "
+            "`skill`, rewrite that skill against every input it has failed on. "
+            "Background work; say you are on it and end your turn."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"skill": {"type": "string"}},
+        },
+    },
 ]
+
+# Tools this machine cannot perform on Windows, left out of what the brain is
+# offered (brain.granted_tools must agree). Empty since answer_dialog was
+# ported: there it attaches to the session's own console (dialog_windows.py).
+# TOOL_SPECS stays the whole set: it is what every handler is checked against.
+UNAVAILABLE_ON_WINDOWS: set[str] = set()
+
+# answer_dialog's description, as true on Windows: the key goes into the
+# session's console rather than to Terminal.app, and no window comes forward.
+_ANSWER_DIALOG_WHERE_MAC = (
+    "Only works when that session is running in Terminal.app; sessions hosted "
+    "by another application cannot be reached and the user is told so. This "
+    "BRINGS THAT WINDOW TO THE FRONT, so only use it when the user has just "
+    "asked for it.")
+_ANSWER_DIALOG_WHERE_WINDOWS = (
+    "Only works when that session is running in a console window of its own; "
+    "sessions hosted by another application (the desktop app, an editor) "
+    "cannot be reached and the user is told so. Nothing comes to the front, "
+    "but only use it when the user has just asked for it.")
+
+
+def _for_windows(spec: dict) -> dict:
+    if spec["name"] != "answer_dialog":
+        return spec
+    return {**spec, "description": spec["description"].replace(
+        _ANSWER_DIALOG_WHERE_MAC, _ANSWER_DIALOG_WHERE_WINDOWS)}
+
+
+def offered_tool_specs() -> list[dict]:
+    """The tools this machine can actually perform, described as it does them."""
+    if sys.platform == "win32":
+        return [_for_windows(t) for t in TOOL_SPECS
+                if t["name"] not in UNAVAILABLE_ON_WINDOWS]
+    return TOOL_SPECS
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -839,7 +990,8 @@ def handle(msg: dict) -> dict | None:
     elif method == "ping":
         reply = {"jsonrpc": "2.0", "id": rid, "result": {}}
     elif method == "tools/list":
-        reply = {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOL_SPECS}}
+        reply = {"jsonrpc": "2.0", "id": rid,
+                 "result": {"tools": offered_tool_specs()}}
     elif method == "tools/call":
         params = msg.get("params") or {}
         name = params.get("name", "")

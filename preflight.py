@@ -356,6 +356,12 @@ async def _check_accessibility(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
     macOS version, this comes back as a WARN (unrecognised error) rather
     than mis-reporting OK, so it fails safe.
     """
+    if sys.platform == "win32":
+        # Nothing to grant: answer_dialog, the one thing that needs it, is
+        # not offered on Windows at all (server._keypress_supported).
+        return Check(name="accessibility", status=STATUS_OK,
+                     message="Not needed on Windows: JARVIS does not press keys "
+                             "in other terminals here.")
     if sys.platform != "darwin" or not shutil.which("osascript"):
         return Check(
             name="accessibility",
@@ -411,6 +417,11 @@ def _check_screen_recording_sync() -> Check:
     one) and NEVER captures anything to find out -- a screenshot the user did
     not ask for, at every boot, is precisely what this capability must not do.
     """
+    if sys.platform == "win32":
+        # Windows asks no permission for this. A locked desk still captures
+        # as black, which screen_windows refuses at capture time.
+        return Check(name="screen_recording", status=STATUS_OK,
+                     message="No permission to grant on Windows.")
     try:
         granted = screen.screen_recording_granted()
     except Exception as e:  # the module must never take startup down
@@ -440,15 +451,42 @@ def _check_screen_recording_sync() -> Check:
 
 
 def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
+    """FISH_API_KEY must be set or JARVIS has no voice -- except on Windows,
+    where the system voice stands in (a warning: it works, but not as him)."""
+    key = os.environ.get("FISH_API_KEY", "").strip()
+    if key and key != "your-fish-audio-api-key-here":
         return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+    if sys.platform == "win32" and os.environ.get("JARVIS_WINDOWS_TTS", "true").lower() not in ("0", "false", "no"):
+        return Check(
+            name="fish_api_key",
+            status=STATUS_WARN,
+            message="FISH_API_KEY is not set; speaking with the Windows system voice.",
+            remedy="For the JARVIS voice, get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
+        )
     return Check(
         name="fish_api_key",
         status=STATUS_FAIL,
         message="FISH_API_KEY is not set.",
         remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
     )
+
+
+def _check_utf8_mode_sync() -> Check:
+    """Windows only: text files must be read as UTF-8.
+
+    `python server.py` turns UTF-8 mode on by itself; any other way of
+    starting the server (`uvicorn server:app`) has to be told. Without it,
+    any memory note, transcript or spec holding a character outside the
+    ANSI code page is misread — or makes the read fail outright."""
+    if sys.platform != "win32" or sys.flags.utf8_mode:
+        return Check(name="utf8_mode", status=STATUS_OK,
+                     message="Text files are read as UTF-8.")
+    return Check(
+        name="utf8_mode", status=STATUS_WARN,
+        message="Python is not in UTF-8 mode, so text files are read in the "
+                "Windows ANSI code page.",
+        remedy="Start JARVIS with `python server.py`, or set PYTHONUTF8=1 "
+               "before starting it another way.")
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
@@ -628,7 +666,8 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
 
 _ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
 _SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
-                _check_cross_session_inbound_sync, _check_screen_recording_sync)
+                _check_cross_session_inbound_sync, _check_screen_recording_sync,
+                _check_utf8_mode_sync)
 
 
 async def _run_one(fn, *, is_async: bool, timeout: float) -> Check:
@@ -695,6 +734,8 @@ def _phrase_for(check: Check) -> str:
         return "Screen Recording couldn't be checked"
     if name == "fish_api_key":
         return "I have no Fish Audio key"
+    if name == "utf8_mode":
+        return "I wasn't started in UTF-8 mode"
     if name == "anthropic_key_leftover":
         return "there's a leftover Anthropic API key in the environment"
     if name == "cross_session_inbound":

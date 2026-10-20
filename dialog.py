@@ -29,6 +29,11 @@ would slot in at `find_terminal_tab`, but it is not installed here, so it is
 not claimed and not built. TIOCSTI — the host-independent way to do this — is
 refused by macOS 26.2 with PermissionError even on a pty the process owns;
 do not go looking for it again.
+
+On Windows the same three rules hold, with the console in the tty's place:
+the session's pid names its console exactly (`AttachConsole`), a session
+with no console of its own gets nothing, and the key is written into that
+console's input buffer rather than sent to a window. See `dialog_windows.py`.
 """
 
 from __future__ import annotations
@@ -37,7 +42,10 @@ import asyncio
 import logging
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 log = logging.getLogger("jarvis.dialog")
 
@@ -141,8 +149,58 @@ def normalize_tty(tty: str | None) -> str | None:
     return t if re.fullmatch(r"/dev/tty[a-zA-Z0-9]+", t) else None
 
 
+# --- Windows: the console stands in for the tty -----------------------------
+#
+# The same identity rule, with the console in the tty's place: a session's
+# pid -> the console that pid is attached to, named by its window handle.
+# `dialog_windows.py` does the attaching, in a child process of its own (a
+# process has at most one console, and the server must keep the one it was
+# started in), and the press goes into that console's input buffer, not to a
+# window: nothing comes to the front and focus is never consulted.
+
+_WINDOWS = sys.platform == "win32"
+_HELPER = str(Path(__file__).with_name("dialog_windows.py"))
+_HELPER_TIMEOUT = 5.0          # python's own startup is most of it
+_CONSOLE_RE = re.compile(r"console:0x[0-9a-f]+")
+
+
+def _helper(*args: str, timeout: float = _HELPER_TIMEOUT) -> str:
+    """One `dialog_windows.py` run; its single-line answer, or "" on any failure."""
+    try:
+        out = subprocess.run([sys.executable, "-I", _HELPER, *args],
+                             capture_output=True, text=True, timeout=timeout,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        log.warning(f"console helper {args[0]} failed: {e}")
+        return ""
+    return out.stdout.strip()
+
+
+def console_for_pid(pid: int) -> str | None:
+    """`console:0x...` for a pid with a console of its own, else None."""
+    answer = _helper("identify", str(pid))
+    return answer if _CONSOLE_RE.fullmatch(answer) else None
+
+
+async def _press_in_console(pid: int, console: str, normalized: str) -> str:
+    result = await asyncio.to_thread(_helper, "press", str(pid), normalized, console,
+                                     timeout=SEND_TIMEOUT)
+    if result == "ok":
+        return SENT
+    if result in ("gone", "moved"):
+        # The console closed, or the pid is on another one since the lookup.
+        # Nothing was pressed, which from the user's side is not_found.
+        log.warning(f"console {console} for pid {pid} was {result} at press time")
+        return NOT_FOUND
+    if result == "refused":
+        return BAD_KEY
+    log.warning(f"unexpected console helper result: {result!r}")
+    return FAILED
+
+
 def tty_for_pid(pid) -> str | None:
     """`/dev/ttysNNN` for a live pid with a controlling terminal, else None.
+    On Windows, the pid's console (`console:0x...`) in the tty's place.
 
     None covers all three of: a dead pid, a pid `ps` reports as `??` (a
     session started without a terminal — the `sdk-cli` entrypoint on this
@@ -154,8 +212,9 @@ def tty_for_pid(pid) -> str | None:
         return None
     if pid <= 0:
         return None
+    if _WINDOWS:
+        return console_for_pid(pid)
     try:
-        import subprocess
         out = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)],
                              capture_output=True, text=True,
                              timeout=_PS_TIMEOUT)
@@ -364,6 +423,8 @@ async def answer(pid: int, key: str) -> str:
         tty = await tty_for_pid_async(pid)
         if tty is None:
             return NO_TTY
+        if _WINDOWS:
+            return await _press_in_console(pid, tty, normalized)
         tab = await find_terminal_tab(tty)
         if tab is None:
             # Another application hosts this tty. Press nothing.

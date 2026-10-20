@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import session_steer
 
 # Both roots must be read: the CLI's default and the one Orcha sets via
 # CLAUDE_CONFIG_DIR. On the dev machine `~/.claude/sessions` was empty and
@@ -50,6 +53,12 @@ def pid_alive(pid) -> bool:
         pid = int(pid)
         if pid <= 0:
             return False
+        if sys.platform == "win32":
+            # NEVER os.kill(pid, 0) here: on Windows signal 0 is
+            # CTRL_C_EVENT, so the "harmless probe" would send Ctrl+C to the
+            # session it is checking on.
+            import psutil
+            return psutil.pid_exists(pid)
         os.kill(pid, 0)
     except (OSError, TypeError, ValueError):
         return False
@@ -95,9 +104,10 @@ class RosterEntry:
         """A process can only be steered if it bound an inbox socket.
 
         Measured: 4 of 17 live entries had none. `ListAgents` cannot see those
-        at all, which is why this watcher exists.
+        at all, which is why this watcher exists. On Windows the inbox is a
+        named pipe, which `endpoint_exists` finds without opening it.
         """
-        return bool(self.socket_path) and Path(self.socket_path).exists()
+        return session_steer.endpoint_exists(self.socket_path)
 
 
 def _parse_entry(path: Path, root: Path) -> RosterEntry | None:

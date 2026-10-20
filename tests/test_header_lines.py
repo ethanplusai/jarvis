@@ -380,10 +380,64 @@ def _functions_that_print_a_foreign_field() -> dict:
 PRINTERS = _functions_that_print_a_foreign_field()
 
 
+# The learning system's reasons, shared because the same argument covers
+# several of its functions. Held to the same rule as every other exemption.
+_LEARNING_ROW = (
+    "it reads a learning-store row — a lesson's or a skill's id, status and "
+    "title — not a session or a run; the column names merely coincide. Any "
+    "title it puts in a string is flattened by `jarvis_memory.one_line` and "
+    "lands only in a log line or the engine's activity list")
+_FOR_THE_LOCAL_MODEL = (
+    "it builds text for the local model, which only ever PROPOSES: the foreign "
+    "text sits inside a `_fence`d data block, and nothing the model answers is "
+    "used until learning.py's own checks pass — approval, `looks_risky`, the "
+    "sandboxed test suite, `capabilities`")
+
 # Not driven, each with the reason. An entry here is a decision, not a
 # to-do: every one of them is a place where a session's own words DO reach a
 # string, and the argument is why that string is safe.
 EXEMPT = {
+    "learning._activate": _LEARNING_ROW,
+    "learning._lesson_summary": _LEARNING_ROW,
+    "learning._may_trial": _LEARNING_ROW,
+    "learning._store_merge": _LEARNING_ROW,
+    "learning._store_reflected": _LEARNING_ROW,
+    "learning.approve": _LEARNING_ROW,
+    "learning.reevaluate": _LEARNING_ROW,
+    "learning.lessons_for_run": _LEARNING_ROW,
+    "learning.run_skill": _LEARNING_ROW,
+    "learning.reflect": _FOR_THE_LOCAL_MODEL,
+    "learning.consolidate": _FOR_THE_LOCAL_MODEL,
+    "learning._write_until_green": _FOR_THE_LOCAL_MODEL,
+    "learning.improve_skill": _FOR_THE_LOCAL_MODEL,
+    "learning.observe_run": (
+        "it does read a run's prompt, error and result — that is the whole "
+        "point of learning from a failure — but only into an experience row, "
+        "which reaches nothing but the local model, and that inside a fence; "
+        + _FOR_THE_LOCAL_MODEL),
+    "learning.format_for_run": (
+        "a lesson's title and body go into a spawned run's prompt, flattened to "
+        "one line each and AFTER the user's verbatim request; only lessons the "
+        "user approved, or that are on trial under auto-apply having passed "
+        "`looks_risky`, are ever chosen (test_learning.py pins both)"),
+    "learning.export_brain_lessons": (
+        "LESSONS.md is trusted system text, so it holds only ACTIVE brain "
+        "lessons — which no reflection can make active without the user, "
+        "auto-apply or not — each flattened to one `- ` line by `one_line`, "
+        "so no title can open a heading of its own (test_learning.py)"),
+    "server.tool_learning_status": (
+        "the head line carries counts and the model name through `_plain_name`; "
+        "every lesson title and skill note is inside a `_wrap_untrusted` block, "
+        "and the tool is in TAINTING_TOOLS, so nothing it returns can drive an "
+        "acting tool in the same turn"),
+    "server._ref_arg": (
+        "`id` here is the brain's own argument key, read to pass straight to "
+        "learning.parse_ref, which only ever yields an integer or a "
+        "SKILL_NAME_RE-shaped name — no string is built from it"),
+    "local_llm.health": (
+        "it reads `id` off the local model server's /models listing into a "
+        "list for the dashboard; no sentence is built from it and the brain "
+        "never sees it"),
     "server._session_line": (
         "it prints `summary()` — another session's own words — with no "
         "escaping at all, and that is correct only because every caller puts "
@@ -1316,7 +1370,7 @@ def test_open_in_terminal_never_speaks_a_hostile_directory_name(server, monkeypa
 
     async def _opened(*a, **k):
         return {"success": True}
-    monkeypatch.setattr(server.actions, "open_terminal", _opened)
+    monkeypatch.setattr(server.actions, "open_terminal_at", _opened)
     out = asyncio.run(server.tool_open_in_terminal({"project": "notes"}))
     assert_header_is_jarviss_own(out)
     assert MARKER not in out

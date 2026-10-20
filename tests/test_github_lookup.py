@@ -107,6 +107,9 @@ def gh(monkeypatch):
 
     fake = _Gh()
     monkeypatch.setattr(gh_lookup, "_run_gh", fake.run)
+    # And `gh` counts as installed whether or not this machine has it: the
+    # fake above is the only `gh` these tests ever talk to.
+    monkeypatch.setattr(gh_lookup, "gh_path", lambda: "gh")
     # The login is looked up once and cached; never let a test hit the real one.
     fake.when(lambda a: a[:2] == ["api", "user"], out="tonystark\n")
     return gh_lookup, fake
@@ -291,6 +294,7 @@ def _fake_gh(tmp_path, body="print('[]')"):
     return script
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable #! script; on Windows that would be a .bat run through cmd.exe, which is the shell this test proves is absent")
 @pytest.mark.asyncio
 async def test_the_repository_name_is_an_argument_and_never_a_shell_string(
         tmp_path, monkeypatch):
@@ -317,6 +321,7 @@ async def test_the_repository_name_is_an_argument_and_never_a_shell_string(
     assert not any(";" in arg and "&&" in arg and arg != nasty for arg in flat)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs an executable #! script; on Windows that would be a .bat run through cmd.exe, which is the shell this test proves is absent")
 @pytest.mark.asyncio
 async def test_a_search_query_can_never_be_read_as_a_flag(tmp_path, monkeypatch):
     """`--` before the positional.

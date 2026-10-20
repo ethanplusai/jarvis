@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from tests import STANDIN_PYTHON
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -32,7 +34,7 @@ FAKE = Path(__file__).parent / "fixtures" / "fake_brain.py"
 def _config(tmp_path, **kw):
     import brain
     return brain.BrainConfig(home=tmp_path / "jarvis",
-                             claude_path=f"{sys.executable} {FAKE}",
+                             claude_path=f"{STANDIN_PYTHON} {FAKE}",
                              turn_timeout=kw.pop("turn_timeout", 5.0),
                              warmup_timeout=kw.pop("warmup_timeout", 10.0),
                              **kw)

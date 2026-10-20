@@ -16,6 +16,7 @@ outside tmp_path.
 """
 
 import importlib
+import os
 import sys
 import threading
 from pathlib import Path
@@ -65,8 +66,12 @@ def wired(monkeypatch, tmp_path):
     root = tmp_path / "claude-browser"
     root.mkdir()
     relative = builds.write_spec(str(root), SPEC_BODY)
-    (root / builds.PLAN_DIR / "2026-09-03-plan.md").write_text(
-        PLAN, encoding="utf-8")
+    plan = root / builds.PLAN_DIR / "2026-09-03-plan.md"
+    plan.write_text(PLAN, encoding="utf-8")
+    # The plan is the newest document, by the clock and not by luck: on
+    # Windows two files written this close together share an mtime.
+    spec_mtime = (root / relative).stat().st_mtime
+    os.utime(plan, (spec_mtime + 1, spec_mtime + 1))
 
     server.cached_projects = [
         {"name": "claude-browser", "path": str(root), "branch": "main"}]

@@ -1,4 +1,7 @@
-"""JARVIS's eyes on the Mac itself: the window list, and one deliberate picture.
+"""JARVIS's eyes on the machine itself: the window list, and one deliberate picture.
+
+This file is the macOS half and the contract; `screen_windows.py` is the
+Windows half of the same two entry points.
 
 Two capabilities, priced very differently, exactly as `read_page` and
 `look_at_page` are for the web:
@@ -53,6 +56,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger("jarvis.screen")
+
+# On Windows both capabilities live in `screen_windows` (user32/gdi32 through
+# ctypes); everything below the two entry points is the macOS half.
+_WINDOWS = sys.platform == "win32"
 
 # Each of these must finish WELL inside `jarvis_mcp.TIMEOUT_SEC` (20s), and
 # the caller puts its own hard deadline on top: a handler that outlives it
@@ -285,7 +292,13 @@ async def capture_screen(display: int | None = None) -> Shot:
     handing back something the brain would describe wrongly.
 
     Call this ONLY on a turn the user drove. See the module docstring.
+
+    On Windows `screen_windows` does the work (displays numbered primary
+    first, then left to right), in a thread: it is blocking GDI calls.
     """
+    if _WINDOWS:
+        import screen_windows
+        return await asyncio.to_thread(screen_windows.capture_screen, display)
     if screen_recording_granted() is False:
         raise ScreenError(_NO_PERMISSION)
 
@@ -384,8 +397,12 @@ async def list_windows() -> list[Window]:
     """Open windows: app name, window title, and which app is in front.
 
     Raises ScreenError when Accessibility is missing. An empty list would have
-    JARVIS say "nothing is open" — a lie with a remedy attached.
+    JARVIS say "nothing is open" — a lie with a remedy attached. (Windows
+    needs no permission to list windows, so there an empty list is the truth.)
     """
+    if _WINDOWS:
+        import screen_windows
+        return await asyncio.to_thread(screen_windows.list_windows)
     rc, stdout, stderr = await _run("osascript", "-e", _WINDOWS_SCRIPT,
                                     timeout=WINDOWS_TIMEOUT_SEC)
     if rc != 0:

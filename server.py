@@ -17,12 +17,24 @@ import os
 import difflib
 import re
 import secrets
-import shlex
 import sys
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+# Windows reads text files in the ANSI code page unless Python is in UTF-8
+# mode, and a memory note, transcript or spec holding anything outside it is
+# then misread or fails to read at all. `python server.py` re-runs itself in
+# UTF-8 mode before anything else is imported; any other way of starting the
+# server is caught by preflight's `utf8_mode` check instead.
+if __name__ == "__main__" and sys.platform == "win32" and not sys.flags.utf8_mode:
+    import subprocess as _subprocess
+    try:
+        _code = _subprocess.call([sys.executable, "-X", "utf8", *sys.argv])
+    except KeyboardInterrupt:
+        _code = 130
+    sys.exit(_code)
 
 # The ONE definition of what a line of `.env` is. Both readers use it (this
 # boot loader and `_read_env`), and so does `_env_value_problem`, which is
@@ -83,7 +95,10 @@ from run_executor import RunExecutor
 import data_paths
 import dialog
 import jarvis_memory
+import learning
+import learning_store
 import notifier
+import sandbox
 import tts
 from brain import Brain, BrainConfig, MAX_BOOT_PROJECTS
 from speech import Priority, SpeechScheduler
@@ -98,6 +113,9 @@ log = logging.getLogger("jarvis")
 FISH_API_KEY = os.getenv("FISH_API_KEY", "")
 FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
 FISH_API_URL = "https://api.fish.audio/v1/tts"
+# No Fish key on Windows: speak with the system's own SAPI voice rather than
+# not at all. JARVIS_WINDOWS_TTS=false turns the fallback off (text only).
+WINDOWS_TTS_FALLBACK = os.getenv("JARVIS_WINDOWS_TTS", "true").lower() not in ("0", "false", "no")
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -226,11 +244,11 @@ SCAN_BUDGET_SECONDS = float(os.getenv("JARVIS_SCAN_BUDGET", "20"))
 SCAN_CACHE_SECONDS = float(os.getenv("JARVIS_SCAN_CACHE", "300"))
 
 # Roots are overridable so a user whose Desktop is slow, huge or cloud-backed
-# has somewhere to point this. Colon-separated, like PATH.
+# has somewhere to point this. Separated like PATH (`:`, or `;` on Windows).
 def _scan_roots() -> list[Path]:
     override = os.getenv("JARVIS_PROJECT_ROOTS", "").strip()
     if override:
-        return [Path(r).expanduser() for r in override.split(":") if r.strip()]
+        return [Path(r).expanduser() for r in override.split(os.pathsep) if r.strip()]
     return [DESKTOP_PATH, project_maker.projects_root()]
 
 
@@ -460,9 +478,21 @@ _last_greeting_time: float = 0
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
+def voice_backend() -> str:
+    """"fish", "windows", or "" when JARVIS has no voice at all."""
+    if tts.fish_key_usable(FISH_API_KEY):
+        return "fish"
+    if WINDOWS_TTS_FALLBACK and tts.windows_speech_available():
+        return "windows"
+    return ""
+
+
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
+    """Generate speech audio from text using Fish Audio TTS, or the Windows fallback."""
+    backend = voice_backend()
+    if backend == "windows":
+        return await _synth_windows(text)
+    if backend != "fish":
         log.warning("FISH_API_KEY not set, skipping TTS")
         return None
 
@@ -504,6 +534,7 @@ speech: Optional[SpeechScheduler] = None
 session_watcher: "session_watch.SessionWatcher | None" = None
 session_clients: set = set()
 _tts_client: Optional[httpx.AsyncClient] = None
+_windows_speech: Optional[tts.WindowsSpeech] = None
 _brain_notice_at = {"restarting": 0.0}
 _bg_tasks: set[asyncio.Task] = set()
 _CONTENT_FRAMES = ("audio", "text")
@@ -610,7 +641,20 @@ async def _voice_emit(msg: dict) -> None:
         raise NoVoiceClient("no voice client connected")
 
 
+async def _synth_windows(text: str) -> Optional[bytes]:
+    global _windows_speech
+    if _windows_speech is None:
+        _windows_speech = tts.WindowsSpeech()
+    r = await _windows_speech.synthesize(text)
+    if r is None:
+        return None
+    log.debug(f"tts (windows): {len(text)} chars, total {r.total_sec:.2f}s")
+    return r.audio
+
+
 async def _synth_for_speech(text: str) -> Optional[bytes]:
+    if voice_backend() == "windows":
+        return await _synth_windows(text)
     r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
     if r is None:
         return None
@@ -631,7 +675,7 @@ def _fmt_reset(ts) -> str:
         when = datetime.fromtimestamp(float(ts))
     except (TypeError, ValueError, OSError, OverflowError):
         return "later"
-    clock = when.strftime("%-I:%M %p").replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
+    clock = f"{when.hour % 12 or 12}:{when:%M %p}".replace(":00 ", " ")   # "10:00 AM" -> "10 AM"
     days = (when.date() - datetime.now().date()).days
     if days <= 0:
         return clock
@@ -639,7 +683,7 @@ def _fmt_reset(ts) -> str:
         return f"tomorrow at {clock}"
     if days < 7:
         return f"{when.strftime('%A')} at {clock}"
-    return f"{when.strftime('%A %-d %B')} at {clock}"
+    return f"{when:%A} {when.day} {when:%B} at {clock}"
 
 
 # True but useless: "down" names neither cause nor remedy. When the brain's
@@ -941,6 +985,9 @@ def _active_project_names() -> list[str]:
 async def start_brain_and_speech() -> None:
     global brain_instance, speech, _tts_client
     _tts_client = httpx.AsyncClient(timeout=15.0)
+    if voice_backend() == "windows":
+        log.info(f"no Fish Audio key: speaking with the Windows voice "
+                 f"({os.getenv('JARVIS_WINDOWS_VOICE', tts.WINDOWS_VOICE_DEFAULT)})")
     speech = SpeechScheduler(lambda t: _synth_for_speech(t), _voice_emit, prepare=strip_markdown_for_tts,
                              transport_ready=lambda: bool(voice_clients))
     await speech.start()
@@ -1141,7 +1188,7 @@ async def _maybe_rotate() -> None:
 async def stop_brain_and_speech() -> None:
     """Stop the brain first (no more turns), then the mouth, then the HTTP client.
     Each step is isolated so one failure cannot leak the others."""
-    global brain_instance, speech, _tts_client
+    global brain_instance, speech, _tts_client, _windows_speech
     # A generation must never vanish without a trace. The entry is written
     # whether or not the brain was in a state to write one itself, and the
     # whole step is wrapped: journalling must never prevent shutdown.
@@ -1165,7 +1212,8 @@ async def stop_brain_and_speech() -> None:
         log.warning(f"shutdown journal failed: {e}")
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
                         ("speech", speech.stop() if speech else None),
-                        ("tts client", _tts_client.aclose() if _tts_client else None)):
+                        ("tts client", _tts_client.aclose() if _tts_client else None),
+                        ("windows speech", _windows_speech.close() if _windows_speech else None)):
         if coro is None:
             continue
         try:
@@ -1173,6 +1221,7 @@ async def stop_brain_and_speech() -> None:
         except Exception as e:
             log.warning(f"shutdown: {label} did not stop cleanly: {e}")
     brain_instance, speech, _tts_client = None, None, None
+    _windows_speech = None
 
 
 # Completions are held and spoken together at the next pause: the user asked
@@ -1705,6 +1754,13 @@ run_executor_instance = RunExecutor(run_store, max_concurrent=3)
 # test (or a partial boot) might skip. `subscribe` de-duplicates, and
 # `_on_run_event` ignores everything that is not a voice-origin completion.
 run_executor_instance.subscribe(_on_run_event)
+# Learns from every run that finishes (any origin: a dashboard run's failure
+# teaches as much as a voice run's). Subscribed in lifespan, not here — its
+# worker needs a running loop, and a test that skips lifespan should see no
+# learning at all rather than a queue nothing drains.
+learning_engine = learning.LearningEngine(
+    outcome_of=lambda run: _learning_outcome(run),
+    prompt_of=lambda text: user_prompt_of(text))
 cached_projects: list[dict] = []
 
 # Usage tracking — logs every call with timestamp, persists to disk
@@ -1803,6 +1859,14 @@ async def lifespan(application: FastAPI):
     except Exception:
         log.warning("dispatch migration skipped", exc_info=True)
     run_store.sweep_stale_runs()
+    try:
+        await learning_engine.start()
+        subscribe = getattr(run_executor_instance, "subscribe", None)
+        if subscribe is not None:      # a test's stand-in executor may have none
+            subscribe(learning_engine.on_run_message)
+    except Exception:
+        # Learning is an addition; it must never be the reason JARVIS is mute.
+        log.warning("learning engine did not start", exc_info=True)
 
     await start_brain_and_speech()
     await start_session_watcher()
@@ -1818,6 +1882,10 @@ async def lifespan(application: FastAPI):
 
     await stop_session_watcher()
     await stop_brain_and_speech()
+    unsubscribe = getattr(run_executor_instance, "unsubscribe", None)
+    if unsubscribe is not None:
+        unsubscribe(learning_engine.on_run_message)
+    await learning_engine.stop()
 
 
 # The interactive OpenAPI console is a "Try it out" button on every route
@@ -2192,9 +2260,12 @@ def _specs_fingerprint() -> str:
     for project in _specs_projects():
         for doc in project["documents"]:
             progress = doc["progress"] or {}
+            # `sections` as well as the mtime: on Windows the file clock
+            # ticks every ~16 ms, so an edit that soon after the last write
+            # leaves `modified` unchanged.
             parts.append("|".join((
                 project["name"], project["path"], doc["path"],
-                f"{doc['modified']:.3f}",
+                f"{doc['modified']:.3f}", str(doc["sections"]),
                 doc["approval"]["state"],
                 f"{progress.get('done', '')}/{progress.get('total', '')}")))
     return "\n".join(parts)
@@ -2613,6 +2684,8 @@ async def internal_tool(request: Request):
             result = await result
     except Exception as e:
         log.error(f"tool {tool} failed: {e}", exc_info=True)
+        # One of JARVIS's own tools broke: material for a brain lesson.
+        learning_engine.observe_tool_failure(tool, f"{type(e).__name__}: {e}")
         return _tool_reply(False, f"That tool failed: {e}")
     # The turn now holds whatever that tool brought back. Marked HERE, once,
     # rather than in each handler: a reader added later cannot forget, and
@@ -3528,12 +3601,11 @@ async def _perform_command(item: _StagedCommand) -> None:
             await speech.say("Cancelled, sir.", Priority.NORMAL)
             return
 
-        # `cd` into the project first: a start command means nothing in the
-        # wrong directory, and the path is quoted while the command itself has
-        # already been through `builds.command_problem`, which permits no
-        # shell metacharacter at all.
-        result = await actions.open_terminal(
-            f"cd {shlex.quote(item.path)} && {item.command}")
+        # In the project directory: a start command means nothing in the wrong
+        # one. The path travels separately (see actions.open_terminal_at) and
+        # the command has already been through `builds.command_problem`, which
+        # permits no shell metacharacter at all.
+        result = await actions.open_terminal_at(item.path, item.command)
         if result.get("success"):
             record("ran")
             await speech.say(
@@ -3617,10 +3689,12 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             record("no_voice")             # the mouth went away between turns
             return
         # The read-back names the key AND warns about the focus theft, because
-        # the window coming forward is the part that interrupts the user.
+        # the window coming forward is the part that interrupts the user. On
+        # Windows the key goes into the console's input, not to its window,
+        # so nothing comes forward and there is nothing to warn about.
+        forward = "" if _KEYS_GO_TO_A_CONSOLE else " — this will bring that window forward"
         utt = await speech.say(
-            f"Pressing {said} on {_said_name(item)} — this will bring that "
-            f"window forward.", Priority.NORMAL)
+            f"Pressing {said} on {_said_name(item)}{forward}.", Priority.NORMAL)
         heard = await speech.wait_for(utt, timeout=READBACK_TIMEOUT)
         if utt.was_cancelled:
             if getattr(utt, "was_abandoned", False):
@@ -3643,8 +3717,9 @@ async def _perform_dialog(item: _StagedDialog) -> None:
             await speech.say(f"Pressed {said} on {_said_name(item)}.",
                              Priority.NORMAL)
         elif outcome == dialog.NOT_FOUND:
+            where = "a console" if _KEYS_GO_TO_A_CONSOLE else "a Terminal window"
             await speech.say(
-                f"{_said_name(item)} isn't in a Terminal window I can reach, "
+                f"{_said_name(item)} isn't in {where} I can reach, "
                 f"sir — another application is hosting it, so that one needs "
                 f"your own hand.", Priority.NORMAL)
         elif outcome == dialog.NOT_PERMITTED:
@@ -3695,6 +3770,21 @@ async def _tty_for_session_or_explain(session):
     return pid, tty, None
 
 
+# On Windows a keypress goes into the session's console input (dialog_windows),
+# not to a Terminal.app window: nothing is brought forward, and what the
+# session must be in to be reached is "a console".
+_KEYS_GO_TO_A_CONSOLE = sys.platform == "win32"
+
+
+def _keypress_supported() -> bool:
+    """Whether `answer_dialog` can work on this machine. On macOS it finds
+    the Terminal.app tab that owns a session's tty over AppleScript; on
+    Windows it attaches to the console that owns the session's pid. Both are
+    found by identity, never by focus (see dialog.py). Kept as the one gate
+    for a platform where neither holds."""
+    return True
+
+
 async def tool_answer_dialog(args: dict) -> str:
     """Validate the user's decision to press a key, and STAGE it.
 
@@ -3719,6 +3809,16 @@ async def tool_answer_dialog(args: dict) -> str:
         run_store.record_steer("", name, "", raw_key,
                                f"dialog:{reason or 'unresolved'}")
         return problem
+
+    if not _keypress_supported():
+        # Refused before anything is staged: see `_keypress_supported`. The
+        # brain is not offered this tool on Windows at all; this is the wall
+        # for a caller that reaches the endpoint anyway.
+        run_store.record_steer(session.session_id, session.voice_name,
+                               session.project, raw_key,
+                               "dialog:unsupported_platform")
+        return (f"I can't press keys in another terminal on this machine, sir — "
+                f"{_said_name(session)} needs you to answer it there yourself.")
 
     key = dialog.normalize_key(raw_key)
     if key is None:
@@ -3862,7 +3962,10 @@ async def tool_steer_session(args: dict) -> str:
 # place" speaks it and a path legitimately holds almost any punctuation. The
 # residual is prose in a header line, for the price of two same-named
 # directories; it is accepted, and it is not parity with the name wall.
-_PLAIN_PATH_RE = _action_re.compile(r"/[^\x00-\x1f\x7f-\x9f<>\"=\u2028\u2029]{0,299}")
+# On Windows a path starts at a drive letter (`C:\Users\...`), not at `/`; the
+# forbidden class after it is the same either way.
+_PLAIN_PATH_RE = _action_re.compile(
+    r"(?:/|[A-Za-z]:[\\/])[^\x00-\x1f\x7f-\x9f<>\"=\u2028\u2029]{0,299}")
 
 
 def _project_name_speakable(name) -> bool:
@@ -3989,7 +4092,8 @@ def user_prompt_of(stored_prompt: str) -> str:
     """
     text = stored_prompt or ""
     if text.startswith(UNATTENDED_PREAMBLE):
-        return text[len(UNATTENDED_PREAMBLE):]
+        # The lessons appended after his words are JARVIS's, not his.
+        return text[len(UNATTENDED_PREAMBLE):].split(learning.RUNS_HEADER, 1)[0]
     if builds.is_build_prompt(text):
         # A build's prompt is framing to its last line — there is no "user
         # half" to strip down to. Its topic comes off the spec path instead.
@@ -4128,8 +4232,10 @@ async def tool_spawn_run(args: dict) -> str:
         resume_from = previous["id"] if previous else None
 
     # The user's own words, framed for a process nobody can answer. See
-    # UNATTENDED_PREAMBLE.
-    composed = compose_run_prompt(prompt)
+    # UNATTENDED_PREAMBLE. Then whatever earlier runs in this area taught —
+    # AFTER his words, so they stay verbatim and first.
+    lessons = await asyncio.to_thread(_lessons_for_run, prompt, name)
+    composed = compose_run_prompt(prompt) + learning.LearningEngine.format_for_run(lessons)
 
     try:
         run_id = await run_executor_instance.spawn(composed, name, path, "voice",
@@ -4138,6 +4244,10 @@ async def tool_spawn_run(args: dict) -> str:
     except Exception as e:
         log.error(f"spawn_run failed for {name}: {e}", exc_info=True)
         return f"I couldn't start that in {name}, sir."
+    if lessons:
+        # Recorded so the run's outcome can credit or blame each one.
+        await asyncio.to_thread(learning_store.record_application, run_id,
+                                [lesson["id"] for lesson in lessons])
 
     # "cancel that" and "how's it going" have to work: nobody can say a UUID
     # out loud, so the run JARVIS just started is remembered as the referent
@@ -4340,6 +4450,30 @@ def _run_gist(run: dict, words: int = 7) -> str:
 # answer we would reach — so the cap costs nothing and bounds the read.
 _OUTCOME_EVENT_CAP = 800
 _OUTCOME_PAGE = 200
+
+
+def _lessons_for_run(prompt: str, project: str) -> list[dict]:
+    """Never the reason a run does not start."""
+    try:
+        learning_store.init_db()
+        return learning_engine.lessons_for_run(prompt, project)
+    except Exception:
+        log.warning("could not choose lessons for a run", exc_info=True)
+        return []
+
+
+def _learning_outcome(run: dict) -> bool | None:
+    """Did the work a lesson rode along with succeed? A run that exited zero
+    by asking a question it could not have answered did not; one that changed
+    nothing may simply have been a question, so it says nothing either way."""
+    verdict = learning.default_outcome(run)
+    if verdict is True:
+        outcome = _run_outcome(run)
+        if outcome == stream_parser.STALLED:
+            return False
+        if outcome != stream_parser.OK:
+            return None
+    return verdict
 
 
 def _run_outcome(run: dict) -> str:
@@ -4861,7 +4995,7 @@ async def tool_open_in_terminal(args: dict) -> str:
     name, path, problem = _resolve_project_or_explain(reference)
     if problem:
         return problem
-    result = await actions.open_terminal(f"cd {shlex.quote(path)}")
+    result = await actions.open_terminal_at(path)
     if not result.get("success"):
         return result.get("confirmation") or "Terminal wouldn't open, sir."
     return f"Terminal's open in {name}, sir."
@@ -5411,7 +5545,7 @@ def _repo_relative(root: Path, resolved: Path) -> str:
     A filename on APFS may hold anything but `/` and NUL, so this value is
     never put in a header line; `_said_path` is for that."""
     try:
-        return str(resolved.relative_to(Path(os.path.realpath(str(root)))))
+        return resolved.relative_to(Path(os.path.realpath(str(root)))).as_posix()
     except ValueError:                       # cannot happen after containment
         return resolved.name
 
@@ -6316,6 +6450,227 @@ TOOL_HANDLERS.update({
 ACTING_TOOLS.update({"remember", "project_note", "write_journal"})
 
 
+# ---------------------------------------------------------------------------
+# Learning: lessons from failures, scored by outcome; skills, written and
+# repaired under test. The engine and its trust rules are in learning.py.
+# ---------------------------------------------------------------------------
+
+_LEARNING_WRAP_NAME = "learned"
+
+
+def _learning_ready() -> None:
+    """CREATE IF NOT EXISTS, on every call: a handler can be reached before
+    (or without) the lifespan that starts the engine, and JARVIS_DATA_DIR
+    may have moved under it."""
+    learning_store.init_db()
+
+
+async def tool_learning_status(args: dict) -> str:
+    """What JARVIS has learned, what waits on the user, and whether the
+    local model is up. Lesson text was distilled from run output, so it is
+    wrapped and the tool taints, like any other reader of foreign words."""
+    await asyncio.to_thread(_learning_ready)
+    status = await asyncio.to_thread(learning_engine.status)
+    llm = status["local_llm"]
+    head = [
+        (f"Local model {_plain_name(llm['model'], 'configured')} is set up"
+         if llm["enabled"] else "No local model is configured, so I record but cannot reflect"),
+        f"auto-apply is {'on' if status['auto_apply'] else 'off'}",
+        f"{status['lessons'][learning_store.ACTIVE]} lessons in use, "
+        f"{status['lessons'][learning_store.CANDIDATE]} waiting, "
+        f"{status['lessons'][learning_store.RETIRED]} retired",
+        f"{status['experiences'].get('unreflected_failures', 0)} failures not yet reflected on",
+    ]
+    lines = []
+    for lesson in status["pending"][:6]:
+        # The body, not just the title: the body is what approval puts in
+        # front of a run (or into every conversation), so it is what he has
+        # to hear before saying yes.
+        flag = " (reads like an instruction)" if lesson["risky"] else ""
+        lines.append(f"waiting — lesson {lesson['id']} [{lesson['scope']}]{flag}: "
+                     f"{lesson['title']} — {lesson['body']}")
+    for lesson in status["active"][:6]:
+        if lesson["scope"] == "brain":
+            versus = "loaded into every conversation"
+        elif lesson["lift"] is None:
+            versus = "no comparison runs yet"
+        else:
+            versus = (f"{abs(round(lesson['lift'] * 100))} points "
+                      f"{'better' if lesson['lift'] >= 0 else 'worse'} than runs without it")
+        uses = "" if lesson["scope"] == "brain" else f"{lesson['uses']} uses, "
+        lines.append(f"in use — lesson {lesson['id']} [{lesson['scope']}], "
+                     f"{uses}{versus}: {lesson['title']}")
+    for skill in status["skills"][:6]:
+        state = (f"v{skill['active_version']} in use" if skill["active_version"]
+                 else "waiting for approval")
+        lines.append(f"skill {skill['name']} — {state}; latest v{skill['version']} "
+                     f"passes {skill['passed']}/{skill['total']} tests; {skill['note']}")
+    lines += [f"recently — {a}" for a in status["activity"][:4]]
+    if status["busy"]:
+        lines.append("working on — " + ", ".join(status["busy"]))
+    text = "; ".join(head) + "."
+    if lines:
+        text += "\n" + _wrap_untrusted(_LEARNING_WRAP_NAME, "\n".join(lines))
+    return text
+
+
+def _ref_arg(args: dict) -> str:
+    return str(args.get("ref") or args.get("id") or args.get("name") or "").strip()
+
+
+async def tool_approve_learning(args: dict) -> str:
+    await asyncio.to_thread(_learning_ready)
+    return await asyncio.to_thread(learning_engine.approve, _ref_arg(args))
+
+
+async def tool_retire_learning(args: dict) -> str:
+    await asyncio.to_thread(_learning_ready)
+    return await asyncio.to_thread(learning_engine.retire, _ref_arg(args))
+
+
+async def tool_teach(args: dict) -> str:
+    """The user's own lesson, in use at once. A memory writer: it lands in
+    LESSONS.md (or in every matching run's prompt), so it is gated on the
+    generation exactly as `remember` is."""
+    text = str(args.get("lesson") or "").strip()
+    if not text:
+        return "There was nothing to learn."
+    scope = str(args.get("scope") or "brain").strip().lower()
+    await asyncio.to_thread(_learning_ready)
+    lesson_id = await asyncio.to_thread(learning_engine.teach, text, scope,
+                                        str(args.get("applies_to") or ""))
+    return f"Learned, as lesson {lesson_id}."
+
+
+async def tool_evaluate_code(args: dict) -> str:
+    code = str(args.get("code") or "")
+    if not code.strip():
+        return "There was no code to run."
+    try:
+        timeout = float(args.get("timeout") or sandbox.DEFAULT_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        timeout = sandbox.DEFAULT_TIMEOUT_SEC
+    await asyncio.to_thread(_learning_ready)
+    result = await learning_engine.evaluate_code(code, timeout=timeout)
+    verdict = ("It timed out" if result.timed_out else
+               "It ran cleanly" if result.ok else f"It failed, exit {result.returncode}")
+    out = "\n".join(part for part in (
+        result.stdout.strip() and f"output:\n{result.stdout.strip()[-700:]}",
+        result.stderr.strip() and f"errors:\n{result.stderr.strip()[-500:]}") if part)
+    text = f"{verdict}, in {result.duration:.1f} seconds."
+    return text + ("\n" + _wrap_untrusted("code output", out) if out else "")
+
+
+async def tool_learn_skill(args: dict) -> str:
+    name = str(args.get("name") or "").strip().lower().replace(" ", "_")
+    description = str(args.get("description") or "").strip()
+    if not description:
+        return "Tell me what the skill should do."
+    if not learning.SKILL_NAME_RE.fullmatch(name):
+        return "A skill needs a short name: lowercase letters, digits and underscores."
+    if not learning_engine.llm.enabled:
+        return "I need a local model to write skills; none is configured."
+    await asyncio.to_thread(_learning_ready)
+    started = learning_engine.background(
+        learning.job_key("learn", name), learning_engine.learn_skill(name, description))
+    said = _plain_name(name, "that skill")
+    return (f"Working on {said}; I'll test it until it passes. Ask me how I'm getting on."
+            if started else f"I'm already working on {said}.")
+
+
+async def tool_run_skill(args: dict) -> str:
+    name = str(args.get("name") or "").strip().lower().replace(" ", "_")
+    kwargs = args.get("arguments") or {}
+    if isinstance(kwargs, str):
+        try:
+            kwargs = json.loads(kwargs or "{}")
+        except ValueError:
+            return "The arguments have to be a JSON object."
+    if not isinstance(kwargs, dict):
+        return "The arguments have to be a JSON object."
+    await asyncio.to_thread(_learning_ready)
+    result = await learning_engine.run_skill(name, kwargs)
+    if result is None:
+        return f"I have no approved skill called {_plain_name(name, 'that')}."
+    if result.bad_arguments:
+        return f"Those arguments don't fit that skill: {_cap_tool_result(result.error)[:300]}."
+    if not result.ok:
+        repair = " I'll try to repair it." if learning_engine.llm.enabled else ""
+        return f"It failed: {_cap_tool_result(result.error)[:300]}.{repair}"
+    shown = json.dumps(result.value, ensure_ascii=False)[:900]
+    return "Result:\n" + _wrap_untrusted("skill output", shown)
+
+
+async def tool_improve_now(args: dict) -> str:
+    if not learning_engine.llm.enabled:
+        return "I need a local model to reflect; none is configured."
+    await asyncio.to_thread(_learning_ready)
+    skill = str(args.get("skill") or "").strip().lower().replace(" ", "_")
+    if skill:
+        if not learning.SKILL_NAME_RE.fullmatch(skill):
+            return "A skill's name is lowercase letters, digits and underscores."
+        started = learning_engine.background(learning.job_key("improve", skill),
+                                             learning_engine.improve_skill(skill))
+        said = _plain_name(skill, "that skill")
+        return (f"Reworking {said} against everything it has failed on."
+                if started else f"I'm already working on {said}.")
+    started = learning_engine.background("reflect", learning_engine.improve_now())
+    return ("Reflecting on what has gone wrong and tidying what I've learned."
+            if started else "I'm already reflecting.")
+
+
+TOOL_HANDLERS.update({
+    "learning_status": tool_learning_status,
+    "approve_learning": tool_approve_learning,
+    "retire_learning": tool_retire_learning,
+    "teach": tool_teach,
+    "evaluate_code": tool_evaluate_code,
+    "learn_skill": tool_learn_skill,
+    "run_skill": tool_run_skill,
+    "improve_now": tool_improve_now,
+})
+# Every one of these but the reader changes what JARVIS (or a run) will do
+# next, or executes code. Only the user, on a turn that read nothing foreign.
+ACTING_TOOLS.update({"approve_learning", "retire_learning", "teach", "evaluate_code",
+                     "learn_skill", "run_skill", "improve_now"})
+# `teach` outlives the generation the same way `remember` does.
+MEMORY_WRITERS.add("teach")
+TAINTING_TOOLS.update({
+    "learning_status": "something I learned from a run",
+    "evaluate_code": "the output of code I ran",
+    "run_skill": "the output of code I ran",
+})
+TAINT_EXEMPT_TOOLS.update({
+    "approve_learning": "it changes a lesson's or a skill's status, it does not read",
+    "retire_learning": "it changes a lesson's or a skill's status, it does not read",
+    "teach": "it writes a lesson the user dictated, it does not read",
+    "learn_skill": "it starts background work and says only that it has",
+    "improve_now": "it starts background work and says only that it has",
+})
+
+
+@app.get("/api/learning")
+async def api_learning():
+    await asyncio.to_thread(_learning_ready)
+    return await asyncio.to_thread(learning_engine.status)
+
+
+class LearningRef(BaseModel):
+    ref: str
+
+
+@app.post("/api/learning/approve")
+async def api_learning_approve(body: LearningRef):
+    await asyncio.to_thread(_learning_ready)
+    return {"said": await asyncio.to_thread(learning_engine.approve, body.ref)}
+
+
+@app.post("/api/learning/retire")
+async def api_learning_retire(body: LearningRef):
+    await asyncio.to_thread(_learning_ready)
+    return {"said": await asyncio.to_thread(learning_engine.retire, body.ref)}
+
+
 @app.websocket("/ws/sessions")
 async def ws_sessions(websocket: WebSocket):
     await websocket.accept()
@@ -6542,7 +6897,7 @@ async def api_project_open(body: ProjectOpenRequest):
     if body.target == "editor":
         result = await actions.open_in_editor(body.path)
     elif body.target == "terminal":
-        result = await actions.open_terminal(f"cd {shlex.quote(body.path)}")
+        result = await actions.open_terminal_at(body.path)
     elif body.target == "browser":
         result = await actions.open_browser(Path(body.path).as_uri())
     else:

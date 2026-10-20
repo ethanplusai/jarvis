@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 import pytest
 import pytest_asyncio
@@ -69,6 +70,25 @@ def _never_write_to_the_live_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data-dir"))
 
 
+@pytest.fixture(autouse=True)
+def _never_read_the_live_session_roster(monkeypatch, tmp_path):
+    """No test may see the developer's own Claude Code sessions.
+
+    The session watcher reads `~/.claude/sessions` and `~/.claude-orcha`,
+    and a server started under TestClient starts the watcher. That passed on
+    CI only because the runner has no live sessions; on a machine running
+    Claude Code (as this suite usually is) the real ones appeared in
+    "empty roster" assertions. The defaults are pointed at empty directories
+    of the same names in tmp_path; a test that wants a roster builds one there
+    or sets its own roots.
+    """
+    import session_watch
+    home = tmp_path / "home"
+    monkeypatch.setattr(session_watch, "DEFAULT_ROOTS",
+                        (str(home / ".claude"), str(home / ".claude-orcha")))
+    monkeypatch.delenv("JARVIS_CLAUDE_CONFIG_DIRS", raising=False)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _no_run_left_mid_flight():
     """No test may end with a run's driver still starting its child.
@@ -115,3 +135,26 @@ async def _no_run_left_mid_flight():
         task.cancel()
     if pending:
         await asyncio.wait(pending, timeout=5)
+
+
+# Two things a test can ask of the filesystem that Windows will not do, and
+# that are skips rather than failures there:
+#   * a symlink, which needs Developer Mode or an elevated shell (1314); and
+#   * a filename holding a newline, quote or other character NTFS forbids —
+#     the "hostile filename" attacks, which cannot exist on that filesystem.
+# Narrow on purpose: any other OSError still fails the test.
+_NTFS_FORBIDDEN = set(chr(10) + chr(13) + '"<>|*?')
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_pyfunc_call(pyfuncitem):
+    try:
+        return (yield)
+    except OSError as e:
+        if sys.platform == "win32":
+            if getattr(e, "winerror", None) == 1314:
+                pytest.skip("creating a symlink needs Developer Mode on Windows")
+            names = f"{e.filename or ''}{e.filename2 or ''}"
+            if e.errno == 22 and _NTFS_FORBIDDEN & set(names):
+                pytest.skip("filename characters NTFS cannot store")
+        raise

@@ -269,6 +269,8 @@ SAMPLES = {
     "_HEADING": "# Title",
     "_TASK_HEADING": "## Task 1: wire the executor",
     "_CHECKBOX": "- [x] done",
+    "_CONSOLE_RE": "console:0x8b05bc",
+    "SKILL_NAME_RE": "parse_dates",
 }
 
 ALPHABET = ("abcdefghijklmnopqrstuvwxyz0123456789"

@@ -2,12 +2,86 @@ import asyncio
 import json
 import os
 import socket
+import sys
 import threading
 import time
+import uuid
 
 import pytest
 
 import session_steer
+
+WINDOWS = sys.platform == "win32"
+
+
+def _one_shot_inbox(name, record):
+    """Serve one client the way a live session's inbox does, handing what it
+    sent (up to the first newline) to `record`. Returns (path, close).
+
+    macOS: a Unix socket bound at `name`, relative to the cwd (see
+    fake_session for why). Windows: a byte-mode named pipe, the transport
+    Claude Code uses there, under a per-test unique name. Never a real
+    session's: those are `LOCAL\\cc-msg-*`.
+    """
+    if not WINDOWS:
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(name)
+        srv.listen(1)
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    record(data.decode())
+            except OSError:
+                pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        return name, srv.close
+
+    import _winapi
+    path = f"{session_steer.PIPE_PREFIX}jarvis-test-{uuid.uuid4().hex}-{name}"
+    handle = _winapi.CreateNamedPipe(
+        path, _winapi.PIPE_ACCESS_INBOUND, _winapi.PIPE_WAIT,   # byte mode, blocking
+        1, 65536, 65536, 0, _winapi.NULL)
+    state = {"connected": False}
+
+    def serve():
+        try:
+            _winapi.ConnectNamedPipe(handle, False)
+            state["connected"] = True
+            data = b""
+            while b"\n" not in data:
+                try:
+                    chunk, _ = _winapi.ReadFile(handle, 4096)
+                except OSError:          # the client closed: all it sent is in
+                    break
+                if not chunk:
+                    break
+                data += chunk
+            record(data.decode())
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    def close():
+        if not state["connected"]:
+            try:                         # unblock ConnectNamedPipe so the thread ends
+                open(path, "wb").close()
+            except OSError:
+                pass
+        thread.join(2.0)
+        _winapi.CloseHandle(handle)
+
+    return path, close
 
 
 def _wait_for_receipt(received, timeout=2.0):
@@ -39,30 +113,10 @@ def fake_session(tmp_path, monkeypatch):
     # ambiently: `env | grep CLAUDE_CODE_MESSAGING` shows it set to a real
     # token). Tests that assume no auth line must not inherit it.
     monkeypatch.delenv("CLAUDE_CODE_MESSAGING_TOKEN", raising=False)
-    path = "s.sock"
     received = []
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(1)
-
-    def serve():
-        try:
-            conn, _ = srv.accept()
-            with conn:
-                data = b""
-                while b"\n" not in data:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                received.append(data.decode())
-        except OSError:
-            pass
-
-    t = threading.Thread(target=serve, daemon=True)
-    t.start()
-    yield path, received, srv
-    srv.close()
+    path, close = _one_shot_inbox("s.sock", received.append)
+    yield path, received, close
+    close()
 
 
 def test_a_prompt_is_delivered_as_one_json_line(fake_session):
@@ -81,6 +135,7 @@ def test_a_missing_socket_is_not_live_not_a_crash(tmp_path):
     assert session_steer.post_to_session(str(tmp_path / "nope.sock"), "hi") == "not_live"
 
 
+@pytest.mark.skipif(WINDOWS, reason="a named pipe leaves no stale file behind")
 def test_a_socket_that_refuses_the_connection_is_not_live(tmp_path, monkeypatch):
     """A stale .sock file left behind by a dead process."""
     monkeypatch.chdir(tmp_path)   # see fake_session: AF_UNIX path-length cap
@@ -89,6 +144,54 @@ def test_a_socket_that_refuses_the_connection_is_not_live(tmp_path, monkeypatch)
     s.bind(path)
     s.close()                     # the file remains, nothing listens
     assert session_steer.post_to_session(path, "hi") == "not_live"
+
+
+# --- Windows: the inbox is a named pipe -------------------------------------
+
+def _missing_pipe():
+    return f"{session_steer.PIPE_PREFIX}jarvis-test-{uuid.uuid4().hex}-gone"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="named pipes are Windows-only")
+def test_a_pipe_that_does_not_exist_is_not_live():
+    path = _missing_pipe()
+    assert session_steer.endpoint_exists(path) is False
+    assert session_steer.post_to_session(path, "hi") == "not_live"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="named pipes are Windows-only")
+def test_a_pipe_that_vanishes_after_it_was_listed_is_not_live(monkeypatch):
+    """The session exits between the roster read and the write."""
+    monkeypatch.setattr(session_steer, "endpoint_exists", lambda p: True)
+    assert session_steer.post_to_session(_missing_pipe(), "hi") == "not_live"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="named pipes are Windows-only")
+def test_finding_a_pipe_does_not_connect_to_it(fake_session):
+    """`steerable` runs every watcher tick against every live session; a stat
+    there would open the target's pipe and burn one of its instances."""
+    path, received, _ = fake_session
+    assert session_steer.endpoint_exists(path) is True
+    assert session_steer.endpoint_exists(path.upper()) is True    # names are case-blind
+    time.sleep(0.2)
+    assert received == []         # nobody connected, so nothing was read
+
+
+@pytest.mark.skipif(not WINDOWS, reason="named pipes are Windows-only")
+def test_a_pipe_busy_past_the_timeout_fails_rather_than_hangs(fake_session):
+    path, _, _ = fake_session
+    holder = open(path, "wb", buffering=0)    # takes the pipe's only instance
+    try:
+        t0 = time.monotonic()
+        assert session_steer.post_to_session(path, "hi", timeout=0.5) == "failed"
+        assert time.monotonic() - t0 < 3.0
+    finally:
+        holder.close()
+
+
+def test_a_pipe_path_off_windows_is_not_live(monkeypatch):
+    monkeypatch.setattr(session_steer.sys, "platform", "darwin")
+    assert session_steer.endpoint_exists("\\\\.\\pipe\\LOCAL\\cc-msg-abc") is False
 
 
 def test_an_empty_prompt_is_refused_before_it_reaches_the_socket(fake_session):
@@ -495,31 +598,13 @@ def socket_factory(tmp_path, monkeypatch):
 
     def make(name):
         received = []
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(name)
-        srv.listen(1)
-        servers.append(srv)
-
-        def serve():
-            try:
-                conn, _ = srv.accept()
-                with conn:
-                    data = b""
-                    while b"\n" not in data:
-                        chunk = conn.recv(4096)
-                        if not chunk:
-                            break
-                        data += chunk
-                    received.append((time.monotonic(), data.decode()))
-            except OSError:
-                pass
-
-        threading.Thread(target=serve, daemon=True).start()
-        return name, received
+        path, close = _one_shot_inbox(name, lambda data: received.append((time.monotonic(), data)))
+        servers.append(close)
+        return path, received
 
     yield make
-    for srv in servers:
-        srv.close()
+    for close in servers:
+        close()
 
 
 class _Client:
@@ -700,12 +785,14 @@ async def test_a_cancel_word_in_the_window_after_the_readback_blocks_the_send(
                        cancel_window=2.0) as rig:
         task = rig.start()
         s = rig.h.sched
-        for _ in range(500):                     # wait for the window to open
-            if s.classify("wait") == "cancel":
-                break
+        # Wait for the window to open, by the clock: on Windows a 10 ms
+        # asyncio.sleep is under the loop's clock resolution and returns at
+        # once, so a count of sleeps is no time at all.
+        deadline = time.monotonic() + 5.0
+        while s.classify("wait") != "cancel":
+            if time.monotonic() > deadline:
+                pytest.fail("the cancel window never opened")
             await asyncio.sleep(0.01)
-        else:
-            pytest.fail("the cancel window never opened")
         assert await s.user_final("wait") == "cancel"
         await asyncio.wait_for(task, timeout=15)
 

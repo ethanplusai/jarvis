@@ -99,11 +99,11 @@ is a small, well-isolated file to replace — see *Make it yours* below.
 - **Watches every Claude Code session on the machine** — not just his own. Ask
   "which of my sessions are waiting on me?" and he checks live. He can post a
   message into one, and answer a permission prompt for one running in
-  Terminal.app by pressing a single key.
+  Terminal.app (or, on Windows, in a console window) by pressing a single key.
 - **Interrupts you when it matters.** A session that needs a human gets said
   out loud immediately; a session that merely finished gets batched into one
   sentence at the next pause. If nobody has the browser tab open, it becomes a
-  macOS notification instead.
+  macOS notification instead (a toast on Windows).
 - **Remembers.** Long-term memory is a folder of plain Markdown files, one
   fact per file, with an index the brain always sees. You can read and edit it
   in any text editor.
@@ -138,8 +138,10 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
 
 ## Requirements
 
-- **macOS.** Terminal control, window listing, screenshots and notifications
-  all go through AppleScript. There is no Linux or Windows path today.
+- **macOS, or Windows 10/11.** On macOS, terminal control, window listing,
+  screenshots and notifications all go through AppleScript. Windows runs
+  all of it through its own APIs; see [Windows](#windows). There is no
+  Linux path today.
 - **Google Chrome.** Not a preference — a constraint. The microphone uses the
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
@@ -148,7 +150,8 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
   @anthropic-ai/claude-code` (2.1.224 or newer), then run `claude` once and
   log in. This is what JARVIS runs on.
 - **Python 3.11+** and **Node.js 18+**.
-- **A Fish Audio API key.** Required; there is no fallback voice.
+- **A Fish Audio API key.** Required on macOS, where there is no fallback
+  voice. Optional on Windows, which falls back to the system voice.
 
 ## Setup
 
@@ -223,6 +226,73 @@ grant does not follow, and Chrome will not re-prompt — it just stays denied,
 silently. If the mic stops working after everything else looks right, check
 that the port has not moved.
 
+## Windows
+
+JARVIS runs on Windows 10 and 11, and everything he does on macOS he does
+here: the brain, runs, the dashboard, session watching and steering,
+answering a session's permission prompt, his voice, and his sight (the
+window list and screenshots).
+
+**Setup, in PowerShell.** The same steps as above, with three differences:
+
+```powershell
+git clone <your fork of this repo> jarvis
+cd jarvis
+copy .env.example .env
+
+py -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python -m playwright install chromium
+
+cd frontend; npm install; cd ..
+
+# Git for Windows ships OpenSSL; the certificate step is otherwise the same
+& "C:\Program Files\Git\usr\bin\openssl.exe" req -x509 -newkey rsa:2048 `
+    -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+```
+
+- **The Fish Audio key is optional.** Without one he speaks with the system's
+  own voice (Microsoft David by default) instead of going silent. It is not
+  the JARVIS voice, but it is free and it works offline. Pick another installed voice
+  with `JARVIS_WINDOWS_VOICE=Microsoft Zira Desktop`, or turn the fallback off
+  with `JARVIS_WINDOWS_TTS=false`. The placeholder key `.env.example` ships
+  with counts as no key.
+- **UTF-8 mode.** Python on Windows reads files as cp1252 unless told
+  otherwise, and JARVIS's files are UTF-8. `python server.py` relaunches
+  itself in UTF-8 mode, so you do not have to do anything to run it. Anything
+  else, `pytest` and `uvicorn server:app` included, needs `$env:PYTHONUTF8=1`
+  first. The startup check says so if it is missing.
+- **Steering other sessions** needs nothing extra. Claude Code's inbox is a
+  named pipe on Windows rather than a Unix socket, and JARVIS finds it the
+  same way, from the session's own roster entry. `crossSessionInbound` matters
+  exactly as it does on macOS.
+
+**One click.** `scripts\start_jarvis.ps1` starts the server and the front end
+in the background, waits for both, and opens Chrome. If they are already
+running it only opens Chrome. `scripts\stop_jarvis.ps1` stops both. Logs go to
+`%LOCALAPPDATA%\JARVIS\launcher`. To make a shortcut, point it at:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\path\to\jarvis\scripts\start_jarvis.ps1
+```
+
+Put that shortcut in the Start menu as **Jarvis** and Windows'
+built-in Voice Access (Settings → Accessibility → Speech) can start him when
+you say "open Jarvis". It has to be started some way other than talking to
+him, because his ears are the Chrome tab.
+
+**What works, and what does not yet:**
+
+| | Windows |
+|---|---|
+| Voice, brain, runs, dashboard, memory, usage | Works |
+| Watching sessions; posting a message into one | Works (steering is new, so please report problems) |
+| Opening a terminal, browser, or editor | Works: a new `cmd` console; the browser you name, else Edge; VS Code, else Notepad (File Explorer for a folder) |
+| Notifications when no tab is open | Works, as Windows toast notifications |
+| Answering a permission prompt by pressing a key | Works for a session in a console window of its own: the key (Return, Escape or 1-9 only) goes into that session's console input, found by its pid, so no window comes forward and focus is never used. A session in the desktop app or an editor can't be reached, and he says so. Tested in the classic console; not yet inside Windows Terminal |
+| Listing windows ("what's on my screen") | Works: every visible window, front to back, with the front app marked. Chrome's window title is the open page's title |
+| Screenshots ("look at my screen") | Works: one display (primary first, then left to right), shrunk in memory, never written to disk. A locked desk or UAC prompt is refused as blank |
+
 ## Connections: bring your own
 
 JARVIS ships connected to nothing, because the useful thing is not our guess at
@@ -265,6 +335,61 @@ Earlier versions of JARVIS came wired to Apple Calendar, Mail and Notes
 instead. Those are gone: they cost three AppleScript permission prompts on
 first launch, before you had heard him say anything, for an assistant whose job
 is building software. A door you choose is worth more than three we picked.
+
+## Learning: a local model of his own
+
+JARVIS learns from his own work, with a local LLM doing the thinking — Ollama,
+LM Studio, llama.cpp's `llama-server`, vLLM, anything that speaks the
+OpenAI chat API. It never touches the voice path, and nothing it sees leaves
+your machine.
+
+```env
+JARVIS_LOCAL_LLM_MODEL=qwen2.5-coder:7b          # turns learning on
+# JARVIS_LOCAL_LLM_URL=http://127.0.0.1:11434/v1  # Ollama's default
+# JARVIS_LEARNING_AUTO_APPLY=false               # see below
+```
+
+The loop (`learning.py`):
+
+1. **Observe.** Every run that finishes, and every one of his tools that
+   breaks, is recorded as an experience.
+2. **Reflect.** The local model reads each failure and proposes at most one
+   lesson: advice, never a command.
+3. **Apply.** Matching lessons ride along with the next `spawn_run` in that
+   area, after your words. Lessons about how *he* works go into `LESSONS.md`,
+   loaded into every conversation.
+4. **Evaluate.** Each run a lesson was applied to credits or blames it, and
+   its record is compared with runs in the same projects that went without it
+   (dashboard runs never carry lessons, so they are the usual control). A
+   lesson that does clearly worse than that baseline retires itself; one
+   without enough comparison runs is left alone.
+5. **Improve.** Lessons that say the same thing are merged into a strategy,
+   which is scored the same way. Skills — small Python functions he writes
+   with tests (`learn_skill`) — are run in a sandbox; a failure becomes a
+   regression case and the skill is rewritten until it passes every old test
+   *and* the input that broke it. A call with arguments that don't fit the
+   skill is your mistake, not the skill's, and is not recorded.
+
+Ask "what have you learned?", "approve lesson 4", "learn a skill that parses
+durations", "run this code", or tell him "next time, check the branch first"
+and he `teach`es himself. The dashboard's data is at `/api/learning`.
+
+**What it trusts.** A lesson distilled from a run's output is a stranger's
+words one step removed, and runs go out with `--dangerously-skip-permissions`.
+So by default nothing the model proposes is used until you approve it. With
+`JARVIS_LEARNING_AUTO_APPLY=true`, run lessons go on trial at once and live or
+die by how they compare with runs without them — unless they read like an
+instruction (a URL, a credential, `curl … | sh`), which always waits for you.
+Lessons for `LESSONS.md` and brand-new skills wait for you either way, and
+"approve all" never covers a `LESSONS.md` lesson; JARVIS reads you each
+waiting lesson in full, not just its title. An improved version of a skill
+you approved is adopted only if it passes the full suite, actually handles
+the inputs it failed on (rather than rejecting them), and reaches for nothing
+the old one did not. The sandbox (`sandbox.py`) is a separate
+`python -I -S` child with a scrubbed environment, limits and a timeout — on
+Windows a Job Object that also stops it starting any other process — and it
+makes mistakes cheap; it is not a wall against hostile code. Only your own
+turn can ask it to run anything.
 
 ## How it works
 
@@ -318,7 +443,7 @@ invariants hold throughout it:
 | Communication | WebSocket — JSON messages, base64 MP3 audio |
 | Brain | One long-lived `claude -p` process, Sonnet by default, on your subscription |
 | Voice | Fish Audio, one request per sentence |
-| System | AppleScript — Terminal, Chrome, notifications, screenshots |
+| System | AppleScript — Terminal, Chrome, notifications, screenshots (macOS); consoles, toasts, and user32/gdi32 for windows and screenshots (Windows) |
 | Storage | SQLite for runs and usage; plain Markdown for memory |
 
 ### Key files
@@ -428,8 +553,8 @@ it and bend it to what you do. The seams are deliberately obvious:
 - **The orb** is `frontend/src/orb.ts`, self-contained Three.js.
 
 Contributions are welcome, and the most useful ones are the ones this cannot
-do yet: non-macOS system integration, alternative TTS engines, and a mobile
-client. Please open an issue before a large PR.
+do yet: Linux, Windows Terminal support for the keypress (see
+[Windows](#windows)), alternative TTS engines, and a mobile client. Please open an issue before a large PR.
 
 ## Development
 
@@ -445,6 +570,8 @@ on purpose, so they open windows on your desk. Run those deliberately:
 ```bash
 pytest -m browser
 ```
+
+On Windows, set `$env:PYTHONUTF8=1` before `pytest` (see [Windows](#windows)).
 
 No test spawns a real `claude` process, and none should. `tests/conftest.py`
 sets `JARVIS_BRAIN_AUTOSTART=0` for the whole suite.

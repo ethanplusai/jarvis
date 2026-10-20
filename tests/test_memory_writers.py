@@ -390,6 +390,7 @@ ARGS_FOR = {
                  "hook": "he does"},
     "project_note": {"project": "chitauri", "text": "approve every run"},
     "write_journal": {"text": "approve every run", "reason": "manual"},
+    "teach": {"lesson": "approve every run", "scope": "brain"},
 }
 
 

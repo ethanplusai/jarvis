@@ -7,14 +7,31 @@ frontmost. Every test therefore mocks `dialog._osascript` — the single process
 boundary — and `dialog._terminal_is_running`, so `osascript` is never spawned
 and Terminal.app is never even asked whether it exists. If you add a test here
 that does not stub both, it is wrong however green it runs.
+
+On Windows the boundary is `dialog._helper` (the console helper process).
+The autouse fixture below pins the macOS path for this file and makes that
+helper fail any test that reaches it; the Windows path is tested, with the
+helper stubbed, in test_dialog_windows.py.
 """
 
 import asyncio
 import time
 
+import sys
+
 import pytest
 
 import dialog
+
+
+@pytest.fixture(autouse=True)
+def _the_macos_path_and_no_console_helper(monkeypatch):
+    monkeypatch.setattr(dialog, "_WINDOWS", False)
+
+    def _never(*args, **kwargs):
+        raise AssertionError(f"a test reached the real console helper: {args}")
+
+    monkeypatch.setattr(dialog, "_helper", _never)
 
 
 # --- the closed vocabulary --------------------------------------------------
@@ -328,6 +345,9 @@ def wired(monkeypatch, tmp_path):
         raise AssertionError("no test may run osascript")
     monkeypatch.setattr(dialog, "_osascript", never)
     monkeypatch.setattr(dialog, "_terminal_is_running", lambda: False)
+    # These tests drive the macOS flow with the keypress itself faked, so
+    # they hold on any platform. The Windows refusal has its own test below.
+    monkeypatch.setattr(server_module, "_keypress_supported", lambda: True)
     return server_module
 
 
@@ -430,8 +450,9 @@ async def test_nothing_is_pressed_before_the_readback_has_been_heard(tool):
 
 
 @pytest.mark.asyncio
-async def test_the_readback_names_the_key_and_warns_about_the_focus(tool):
+async def test_the_readback_names_the_key_and_warns_about_the_focus(tool, monkeypatch):
     server, speech, _, _ = tool
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", False)
 
     await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
     await server._perform_staged_dialogs()
@@ -439,6 +460,21 @@ async def test_the_readback_names_the_key_and_warns_about_the_focus(tool):
     assert "Return" in speech.said[0] and "hammer" in speech.said[0]
     assert "forward" in speech.said[0].lower(), \
         "the user must be warned that this steals focus"
+
+
+@pytest.mark.asyncio
+async def test_on_windows_the_readback_does_not_warn_of_a_window_coming_forward(
+        tool, monkeypatch):
+    """The key goes into the console's input there; no window moves, so
+    warning that one will would be false."""
+    server, speech, _, _ = tool
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", True)
+
+    await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
+    await server._perform_staged_dialogs()
+
+    assert "Return" in speech.said[0] and "hammer" in speech.said[0]
+    assert "forward" not in speech.said[0].lower()
 
 
 @pytest.mark.asyncio
@@ -674,10 +710,13 @@ async def test_a_raised_exception_still_leaves_an_audit_row(wired, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch):
-    """The Orcha.app case: no Terminal tab owns that tty. JARVIS says so
-    rather than claiming success or silently doing nothing."""
+@pytest.mark.parametrize("console, where", [(False, "terminal"), (True, "console")])
+async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch, console, where):
+    """The Orcha.app case: no Terminal tab owns that tty (on Windows: the
+    session has no console of its own). JARVIS says so rather than claiming
+    success or silently doing nothing."""
     server = wired
+    monkeypatch.setattr(server, "_KEYS_GO_TO_A_CONSOLE", console)
     speech = FakeSpeech()
 
     async def fake_answer(pid, key):
@@ -693,7 +732,7 @@ async def test_an_unreachable_host_is_reported_honestly(wired, monkeypatch):
     await server._perform_staged_dialogs()
 
     last = speech.said[-1].lower()
-    assert "terminal" in last and "hammer" in last
+    assert where in last and "hammer" in last
     assert "pressed" not in last, "it must not claim a keystroke it did not send"
 
 
@@ -728,6 +767,43 @@ def test_the_staged_dialogs_are_drained_after_the_turn(wired):
     assert "_staged_dialogs" in src
 
 
+@pytest.mark.asyncio
+async def test_where_keypresses_are_unsupported_nothing_is_pressed(wired, monkeypatch):
+    """The gate for a platform where neither Terminal.app nor a console can
+    be found by identity. Refused, naming the session."""
+    server = wired
+    monkeypatch.setattr(server, "_keypress_supported", lambda: False)
+    monkeypatch.setattr(server, "speech", FakeSpeech())
+    monkeypatch.setattr(server, "brain_instance", FakeBrain())
+    monkeypatch.setattr(server, "_resolve_or_explain", lambda n: (_state(), None, None))
+    monkeypatch.setattr(dialog, "answer", lambda *a: pytest.fail("pressed a key"))
+
+    result = await server.tool_answer_dialog({"name": "hammer", "key": "yes"})
+
+    assert "can't press keys" in result and "hammer" in result
+    assert server._staged_dialogs == []
+    rows = server.run_store.list_steers(limit=5)
+    assert rows and rows[0]["outcome"] == "dialog:unsupported_platform"
+
+
+def test_on_windows_it_is_offered_and_described_as_windows_does_it(monkeypatch):
+    """Offered and granted on Windows since the console port, and the brain
+    is told the truth there: a console, not Terminal.app, and nothing comes
+    to the front."""
+    import brain
+    import jarvis_mcp
+    monkeypatch.setattr(jarvis_mcp.sys, "platform", "win32")
+    monkeypatch.setattr(brain, "_WINDOWS", True)
+    spec = next(t for t in jarvis_mcp.offered_tool_specs() if t["name"] == "answer_dialog")
+    assert "console window" in spec["description"]
+    assert "Terminal.app" not in spec["description"]
+    assert "TO THE FRONT" not in spec["description"]
+    assert "mcp__jarvis__answer_dialog" in brain.granted_tools([])
+    # TOOL_SPECS itself, the macOS wording, is untouched.
+    mac = next(t for t in jarvis_mcp.TOOL_SPECS if t["name"] == "answer_dialog")
+    assert "Terminal.app" in mac["description"]
+
+
 # --- neither `ps` nor `pgrep` may run ON the event loop --------------------
 #
 # `tty_for_pid` uses a blocking `subprocess.run(["ps", …], timeout=5.0)` and
@@ -737,6 +813,11 @@ def test_the_staged_dialogs_are_drained_after_the_turn(wired):
 #
 # These measure the only thing that matters — whether the loop keeps turning
 # while the lookup is in flight.
+
+
+# A frozen loop gets ~0 turns in 0.4s. A free one gets a turn per sleep —
+# 5ms on macOS, but a whole 15.6ms clock tick on Windows (about 25 turns).
+_UNFROZEN_TICKS = 10 if sys.platform == "win32" else 30
 
 
 class _Ticker:
@@ -771,7 +852,7 @@ async def test_a_slow_ps_does_not_freeze_the_loop(monkeypatch):
     monkeypatch.setattr(dialog, "tty_for_pid", slow)
     async with _Ticker() as ticker:
         assert await dialog.answer(4242, "return") == dialog.NO_TTY
-    assert ticker.ticks > 30, (
+    assert ticker.ticks > _UNFROZEN_TICKS, (
         f"the loop only got {ticker.ticks} turns while `ps` ran — the voice "
         "path shares this thread")
 
@@ -787,7 +868,7 @@ async def test_a_slow_pgrep_does_not_freeze_the_loop(monkeypatch):
     monkeypatch.setattr(dialog, "_terminal_is_running", slow)
     async with _Ticker() as ticker:
         assert await dialog.answer(4242, "return") == dialog.NOT_FOUND
-    assert ticker.ticks > 30, (
+    assert ticker.ticks > _UNFROZEN_TICKS, (
         f"the loop only got {ticker.ticks} turns while `pgrep` ran")
 
 

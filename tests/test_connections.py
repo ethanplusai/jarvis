@@ -136,10 +136,10 @@ def test_every_connections_template_this_project_has_shipped_is_listed(
     for commit in commits:
         blob = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{rel}"],
                               capture_output=True, timeout=60).stdout
-        digest = hashlib.sha256(blob).hexdigest()
+        digest = dp._sha256(blob)
         if digest not in dp.KNOWN_CONNECTIONS_HASHES:
             missing[digest] = commit[:8]
-    here = hashlib.sha256(dp.connections_template_path().read_bytes()).hexdigest()
+    here = dp._sha256(dp.connections_template_path().read_bytes())
     if here not in dp.KNOWN_CONNECTIONS_HASHES:
         missing[here] = "the working tree"
     assert not missing, (
@@ -302,12 +302,13 @@ def test_the_problems_are_sentences_a_butler_could_say(srv):
 
 # --- 4. the allowlist admits their tools without becoming a denylist ------
 
-def test_the_allowlist_grants_exactly_the_servers_the_user_declared(tmp_path):
+def test_the_allowlist_grants_exactly_the_servers_the_user_declared(tmp_path, monkeypatch):
     """One `mcp__<server>` grant per server named in their own file, and
     nothing else. A server they did not declare is still refused, and so is
     every built-in a future CLI invents."""
     from tests.test_brain import _config
     import brain
+    monkeypatch.setattr(brain, "_WINDOWS", False)   # the macOS flag, pinned
     b = brain.Brain(_config(tmp_path, connections=["notion", "linear"]))
     granted = b.command()[b.command().index("--tools") + 1].split(",")
 
@@ -317,14 +318,35 @@ def test_the_allowlist_grants_exactly_the_servers_the_user_declared(tmp_path):
     assert "mcp__github" not in granted, "not declared, not granted"
 
 
-def test_no_declared_servers_leaves_the_flag_byte_identical(tmp_path):
+def test_no_declared_servers_leaves_the_flag_byte_identical(tmp_path, monkeypatch):
     """The overwhelmingly common install connects nothing. It must be the
     exact command it was before any of this existed."""
     from tests.test_brain import _config
     import brain
+    monkeypatch.setattr(brain, "_WINDOWS", False)   # the macOS flag, pinned
     b = brain.Brain(_config(tmp_path))
     cmd = b.command()
     assert cmd[cmd.index("--tools") + 1] == ",".join(brain.ALLOWED_TOOLS)
+
+
+def test_on_windows_the_flag_is_exactly_the_macos_flag(tmp_path, monkeypatch):
+    """Since answer_dialog was ported (a session's own console), nothing is
+    left out on Windows, and the brain is no longer told it cannot press."""
+    from tests.test_brain import _config
+    import brain
+    monkeypatch.setattr(brain, "_WINDOWS", True)
+    b = brain.Brain(_config(tmp_path, connections=["notion"]))
+    granted = b.command()[b.command().index("--tools") + 1].split(",")
+    assert granted == brain.ALLOWED_TOOLS + ["mcp__notion"]
+    assert "cannot press a key" not in b.launch_prompt()
+
+
+def test_a_tool_unavailable_on_windows_is_still_left_out_there(tmp_path, monkeypatch):
+    """The mechanism stays for the next tool that cannot be ported."""
+    import brain
+    monkeypatch.setattr(brain, "_WINDOWS", True)
+    monkeypatch.setattr(brain, "_UNAVAILABLE_ON_WINDOWS", {"answer_dialog"})
+    assert "mcp__jarvis__answer_dialog" not in brain.granted_tools([])
 
 
 def test_the_static_allowlist_still_names_only_jarvis_and_the_two_web_tools():

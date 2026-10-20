@@ -650,12 +650,30 @@ def test_vs_code_is_preferred_but_not_required(monkeypatch):
     """Falls back to the system default, so this works on a Mac that has
     never had VS Code installed."""
     import actions
+    monkeypatch.setattr(actions.sys, "platform", "darwin")   # the macOS branch, pinned
     monkeypatch.setattr(actions.shutil, "which", lambda name: None)
     monkeypatch.setattr(actions.os.path, "isdir", lambda p: False)
     assert actions._vscode_command("/tmp/x") is None
 
     monkeypatch.setattr(actions.shutil, "which", lambda name: "/usr/bin/code")
     assert actions._vscode_command("/tmp/x") == ["/usr/bin/code", "/tmp/x"]
+
+
+def test_on_windows_vs_code_is_started_as_code_exe_never_code_cmd(monkeypatch, tmp_path):
+    """`code` on Windows is a batch file, and cmd.exe re-parses its arguments:
+    a legal filename like `a&calc.ts` would run `calc`. The executable it
+    wraps takes the path as plain argv; with no executable, no VS Code."""
+    import actions
+    monkeypatch.setattr(actions.sys, "platform", "win32")
+    install = tmp_path / "Microsoft VS Code"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "code.cmd").write_text("@echo off")
+    monkeypatch.setattr(actions.shutil, "which",
+                        lambda name: str(install / "bin" / "code.cmd"))
+    assert actions._vscode_command("a&calc.ts") is None
+    (install / "Code.exe").write_bytes(b"")
+    argv = actions._vscode_command("a&calc.ts")
+    assert argv == [str((install / "Code.exe").resolve()), "a&calc.ts"]
 
 
 # --- the cap, through the real channel ------------------------------------

@@ -33,6 +33,8 @@ import importlib
 import re
 from pathlib import Path
 
+import sys
+
 import pytest
 
 SERVER = Path(__file__).parent.parent / "server.py"
@@ -160,6 +162,7 @@ def repo(server, monkeypatch, tmp_path):
     return server, project
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids \" < > and newlines in file names, so this name cannot exist there")
 @pytest.mark.asyncio
 async def test_a_hostile_filename_cannot_escape_read_files_block(repo):
     """The reviewer's own path: a real file, on a real disk, with a name
@@ -176,6 +179,7 @@ async def test_a_hostile_filename_cannot_escape_read_files_block(repo):
     assert hostile in out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids \" < > and newlines in file names, so this name cannot exist there")
 @pytest.mark.asyncio
 async def test_a_hostile_filename_cannot_stand_outside_the_block_either(repo):
     """`read_file` printed the raw relative path in the header line ABOVE the
@@ -192,6 +196,7 @@ async def test_a_hostile_filename_cannot_stand_outside_the_block_either(repo):
     assert "<" not in header and ">" not in header and '"' not in header, header
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids \" < > and newlines in file names, so this name cannot exist there")
 @pytest.mark.asyncio
 async def test_a_hostile_project_name_cannot_write_a_tag(server, monkeypatch,
                                                          tmp_path):

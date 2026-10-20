@@ -87,7 +87,8 @@ def build_bundle() -> Path:
     """
     target = DIST / "dashboard.html"
     if not target.is_file() or target.stat().st_mtime < _newest_source():
-        subprocess.run(["npm", "run", "build"], cwd=FRONTEND, check=True,
+        # shutil.which: on Windows npm is npm.cmd, which a bare "npm" never finds.
+        subprocess.run([shutil.which("npm") or "npm", "run", "build"], cwd=FRONTEND, check=True,
                        capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT_SEC)
     return DIST

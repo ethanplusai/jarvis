@@ -389,7 +389,7 @@ def test_a_replaced_file_at_the_same_path_and_size_is_read_from_the_start(tmp_pa
 
     body = p.read_text().replace('"output_tokens": 111', '"output_tokens": 222')
     p.unlink()
-    p.write_text(body)
+    p.write_text(body, newline="")   # byte-for-byte: no CRLF on Windows
     assert len(body) == p.stat().st_size
 
     assert one(us.report(roots=[a], now=NOW, cache=cache), "s1").tokens.output == 222
@@ -662,7 +662,8 @@ def _unreadable(path: Path) -> None:
     os.chmod(path, 0o000)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read anything")
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                    reason="root can read anything; chmod 000 is a no-op on Windows")
 def test_a_transcript_that_could_not_be_read_is_not_measured(tmp_path):
     a, _ = roots(tmp_path)
     p = write_transcript(a, cwd="/p/one", session_id="s1",
@@ -679,7 +680,8 @@ def test_a_transcript_that_could_not_be_read_is_not_measured(tmp_path):
     assert report.files == 0
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read anything")
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                    reason="root can read anything; chmod 000 is a no-op on Windows")
 def test_one_unreadable_file_does_not_unmeasure_the_readable_ones(tmp_path):
     a, _ = roots(tmp_path)
     good = write_transcript(a, cwd="/p/one", session_id="good",

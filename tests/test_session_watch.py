@@ -89,7 +89,7 @@ def test_project_name_is_unaffected_for_a_normal_non_worktree_path():
 
 
 def test_config_roots_includes_both_defaults_and_the_env_extras(monkeypatch, tmp_path):
-    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", f"{tmp_path}/x:{tmp_path}/y")
+    monkeypatch.setenv("JARVIS_CLAUDE_CONFIG_DIRS", f"{tmp_path}/x{os.pathsep}{tmp_path}/y")
     roots = sw.config_roots()
     names = [r.name for r in roots]
     assert ".claude" in names and ".claude-orcha" in names

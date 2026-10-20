@@ -121,6 +121,8 @@ KNOWN_TEMPLATE_HASHES = frozenset({
     "8b038b5497293a55d1aa18e9ce759d3270228c98ae8b3ceb3bb053eb84509310",  # anything read off this machine is information
     "dfec0e28f7fc734987a1bcffd4feda103bde961f4a4721ce7957a7dccae96487",  # send it, do not ask twice
     "092df6a5e43bc5ed0a31e9f79b1f77cc4849754d1f4ab4807bded122ab97ad5f",  # say "start fresh" when a memory is refused
+    "ca9b3f7823812af26aa4a0e6d4e07b25a67b60b46ff69cb209ad98af88b206f8",  # learning: teach, lessons, skills
+    "7cf1b37dda3ff10c43836851425ae44b57b7a7ca50d07b52992a44b2730299ae",  # learning: lessons scored against runs without them
 })
 
 # The same list, for the connections file. APPEND the new hash whenever
@@ -133,7 +135,11 @@ KNOWN_CONNECTIONS_HASHES = frozenset({
 
 
 def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    # CRLF folded to LF first: Windows git (core.autocrlf) checks the shipped
+    # templates out with CRLF, and a template must still be recognised as the
+    # one it is. .gitattributes prevents that for new clones; this covers the
+    # clones that already exist, and a template the user saved with CRLF.
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _recorded_seed_hash(seed: Path) -> Optional[str]:
@@ -338,6 +344,12 @@ def ensure_memory_layout() -> Path:
     return home
 
 
+def lessons_path() -> Path:
+    """LESSONS.md: the approved lessons about how JARVIS works, which
+    `CLAUDE.md` `@`-imports beside MEMORY.md. Written by learning.py only."""
+    return brain_home() / "LESSONS.md"
+
+
 def usage_path() -> Path:
     """The last rate-limit observation from the CLI (see usage_store.py)."""
     return data_dir() / "usage.json"
@@ -376,7 +388,8 @@ def ensure_tool_token() -> str:
 
     token = secrets.token_urlsafe(32)
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                     | getattr(os, "O_BINARY", 0), 0o600)
     except FileExistsError:
         pass
     else:
@@ -386,14 +399,23 @@ def ensure_tool_token() -> str:
             os.close(fd)
         return token
 
-    fd = os.open(str(path), os.O_RDWR | os.O_NOFOLLOW)
+    # Windows has no O_NOFOLLOW, no uids and no fchmod. The token lives under
+    # the user's profile, whose ACL already keeps other accounts out, so what
+    # is left to refuse there is a link planted at the path — checked by name
+    # first, since the open below cannot refuse to follow one.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and (path.is_symlink()
+                         or getattr(path, "is_junction", lambda: False)()):
+        raise OSError(f"{path} is a link, not a regular file")
+    fd = os.open(str(path), os.O_RDWR | nofollow | getattr(os, "O_BINARY", 0))
     try:
         info = os.fstat(fd)
         if not _stat.S_ISREG(info.st_mode):
             raise OSError(f"{path} is not a regular file")
-        if info.st_uid != os.getuid():
-            raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "getuid"):
+            if info.st_uid != os.getuid():
+                raise OSError(f"{path} is owned by uid {info.st_uid}, not by us")
+            os.fchmod(fd, 0o600)
         existing = os.read(fd, 4096).decode("utf-8", "ignore").strip()
         if existing:
             return existing

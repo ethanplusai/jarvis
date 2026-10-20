@@ -51,6 +51,15 @@ this presents as "the UI is up but nothing works" rather than as an error.
   listing, steering, etc.) via a stdio MCP child that forwards
   `tools/call` to `POST /internal/tool` over loopback HTTP, bearing the
   token from `data_paths.ensure_tool_token()`.
+- **Learning** (`learning.py`): a local LLM (any OpenAI-compatible server,
+  `local_llm.py`) turns failed runs and broken tools into lessons, scores each
+  lesson by the outcomes of the runs it rode along with against runs in the
+  same projects without it (`learning_store.baseline`), merges lessons into
+  strategies, and writes and repairs Python skills under sandboxed tests
+  (`sandbox.py`). State is `learning_store.py` (SQLite, in jarvis.db).
+  The local model only ever proposes: nothing it writes is used until the
+  user approves it, except run lessons on trial under
+  `JARVIS_LEARNING_AUTO_APPLY` that pass `looks_risky`
 - **The web boundary** (`web_auth.py`): one ASGI gate above the router.
   Every WebSocket handshake and every state-changing request must carry
   either an `Origin` JARVIS serves from (localhost/127.0.0.1/[::1] on the
@@ -133,6 +142,19 @@ arbitrary LLM and file content, so everything goes through
 - `work_mode.py` — Vestigial. `is_casual_question` is imported by `server.py`
   and called by nothing; the Haiku-vs-`claude -p` routing it classified for is
   gone. Left in place only because a test pins it
+- `local_llm.py` — The learning system's model: OpenAI-compatible chat over
+  httpx (Ollama, LM Studio, llama.cpp, vLLM). Off unless
+  `JARVIS_LOCAL_LLM_MODEL` is set
+- `sandbox.py` — Runs evaluated code and learned skills in a
+  `python -I -S -X utf8` child: scrubbed env, timeout, rlimits on POSIX and a
+  one-process Job Object on Windows. Makes mistakes cheap; it is NOT a
+  wall against hostile code — the gates upstream are
+- `learning_store.py` — SQLite `learning_*` tables: experiences, lessons
+  (candidate / active / retired, with uses, outcomes and the baseline they
+  are judged against), versioned skills,
+  and the failing inputs each skill must survive
+- `learning.py` — The engine: observe, reflect, apply, evaluate, consolidate,
+  write and improve skills. Writes `LESSONS.md` (active brain lessons only)
 - `data_paths.py` — Single source of truth for where data is written
 
 ## Where the author's own notes live
@@ -173,6 +195,14 @@ JARVIS builds**. It is only this repository's own copies that are gone.
 - `WEATHER_LOCATION_LABEL` / `WEATHER_LATITUDE` / `WEATHER_LONGITUDE` /
   `WEATHER_UNIT` (all optional) — override the auto-detected (public-IP)
   weather location and units
+- `JARVIS_LOCAL_LLM_MODEL` (optional) — turns learning on; the model name on
+  the local server. `JARVIS_LOCAL_LLM_URL` (default
+  `http://127.0.0.1:11434/v1`), `JARVIS_LOCAL_LLM_API_KEY`,
+  `JARVIS_LOCAL_LLM_TIMEOUT` (default 120s) go with it
+- `JARVIS_LEARNING_AUTO_APPLY` (optional, default off) — put reflected run
+  lessons on trial without approval, and adopt improved versions of approved
+  skills that pass their full suite and gain no new module. Brain lessons and
+  new skills always wait for the user
 - `JARVIS_ALLOWED_ORIGINS` (optional) — extra origins the web boundary
   accepts, comma-separated. Only needed when the page is opened at an
   address JARVIS does not serve from itself (a LAN IP, a tunnel). Their
@@ -211,6 +241,7 @@ needs the network, a real window, or a real `claude`, mark it.
   tag machinery is gone in full, including the last handler (`_execute_browse`),
   which lost its caller with the voice dispatch chain
 - AppleScript for Terminal and Chrome control (no OAuth needed)
-- SQLite for runs, run events and usage (`run_store.py`, `usage_store.py`);
+- SQLite for runs, run events, usage and learning (`run_store.py`,
+  `usage_store.py`, `learning_store.py`);
   long-term memory is plain Markdown files instead (`jarvis_memory.py`) —
   the user edits it directly, so it is never a database
