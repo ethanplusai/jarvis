@@ -69,6 +69,29 @@ def _never_write_to_the_live_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data-dir"))
 
 
+@pytest.fixture(autouse=True)
+def _never_read_the_live_claude_sessions(monkeypatch, request):
+    """No test may read the developer's real Claude Code sessions.
+
+    `session_watch.config_roots()` always includes `~/.claude` and
+    `~/.claude-orcha`, and the server's lifespan starts a watcher over them.
+    On a CI runner those are empty, so the projects and specs API tests
+    passed there and failed on any machine that had ever run Claude Code:
+    `test_empty_roster_and_no_runs_is_an_empty_list` listed whatever project
+    the developer happened to be working in. test_usage_sessions_api.py
+    already blanked the defaults for itself; this does it for every test.
+    A test that wants roots passes them, or sets JARVIS_CLAUDE_CONFIG_DIRS.
+    The one test of the defaults themselves is exempt.
+    """
+    if request.node.name == \
+            "test_config_roots_includes_both_defaults_and_the_env_extras":
+        return
+    import session_watch
+
+    monkeypatch.setattr(session_watch, "DEFAULT_ROOTS", ())
+    monkeypatch.delenv("JARVIS_CLAUDE_CONFIG_DIRS", raising=False)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _no_run_left_mid_flight():
     """No test may end with a run's driver still starting its child.
