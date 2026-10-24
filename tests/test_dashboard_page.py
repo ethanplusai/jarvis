@@ -11,6 +11,7 @@ cleanly on a machine without `npm` or Playwright.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -373,6 +374,60 @@ async def test_a_fresh_roster_reading_says_nothing():
         await page.wait_for_selector("#sessions-view .row", timeout=WAIT_MS)
 
         assert await page.locator("#sessions-banner").is_hidden()
+
+
+# ── the Today counters follow the runs they count ──────────────────────────
+
+def _day_stats(succeeded: int, running: int, inp: int, out: int) -> dict:
+    by_status = {"queued": 0, "running": running, "succeeded": succeeded,
+                 "failed": 0, "timed_out": 0, "cancelled": 0}
+    return {"period": "day", "by_status": by_status,
+            "total_runs": sum(by_status.values()), "total_cost_usd": 0.0,
+            "total_input_tokens": inp, "total_output_tokens": out}
+
+
+def _today(page, label: str):
+    return page.locator("#stats .readout", has_text=label) \
+        .locator(".readout-value")
+
+
+async def test_a_run_finishing_updates_the_today_counters():
+    """The counters were read only on load and on reconnect, while the live
+    `run_finished` frame repainted just the row. A dashboard opened during a
+    run therefore showed the row "succeeded, 372 tok" under a masthead still
+    reading "0 succeeded, 54 tokens" until the page was reloaded."""
+    api = quiet_machine()
+    api.json("/api/runs", {"runs": [run_row(status="running")]})
+    api.json("/api/runs/stats", _day_stats(succeeded=0, running=1,
+                                           inp=6, out=48))
+    sockets = []
+
+    async def fake_runs_socket(page):
+        def accept(ws):
+            sockets.append(ws)
+            ws.send(json.dumps({"type": "hello"}))
+        await page.route_web_socket("**/ws/runs", accept)
+
+    async with dashboard(api, before_load=fake_runs_socket) as page:
+        await page.wait_for_function(
+            "document.querySelector('#stats') && "
+            "document.querySelector('#stats').innerText.includes('54')",
+            timeout=WAIT_MS)
+        assert sockets, "the page never opened /ws/runs"
+        # live.ts reconciles once more when its 1s poll first sees the socket
+        # up. Spend that reconcile on the OLD stats, or it — not the
+        # run_finished frame — would be what repaints the counters below.
+        await page.clock.fast_forward(2_000)
+
+        api.json("/api/runs/stats", _day_stats(succeeded=1, running=0,
+                                               inp=6, out=366))
+        finished = run_row(status="succeeded")
+        sockets[0].send(json.dumps({"type": "run_finished", "run": finished}))
+        await page.clock.fast_forward(2_000)
+
+        await _today(page, "Succeeded").filter(has_text="1").wait_for(
+            timeout=WAIT_MS)
+        assert await _today(page, "Tokens").inner_text() == "372"
 
 
 # ── the Usage caption only claims what it can prove ────────────────────────

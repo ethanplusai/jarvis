@@ -265,8 +265,12 @@ def usage_limits(*keys: str) -> dict:
 
 
 @asynccontextmanager
-async def dashboard(api: Api):
+async def dashboard(api: Api, before_load=None):
     """The built page, loaded against `api`, as a `page` to drive.
+
+    `before_load`, if given, is awaited with the page before navigation —
+    the only moment a test can intercept the page's own sockets, since the
+    stub server speaks plain HTTP and cannot serve `/ws/runs` itself.
 
     The browser is launched per test rather than shared: a session-scoped
     async fixture would need a session-scoped event loop, and the whole
@@ -287,6 +291,8 @@ async def dashboard(api: Api):
                 context = await browser.new_context(viewport=VIEWPORT)
                 page = await context.new_page()
                 await page.clock.install()
+                if before_load is not None:
+                    await before_load(page)
                 await page.goto(f"{server.base}/dashboard.html",
                                 wait_until="load")
                 yield page

@@ -7,7 +7,7 @@
 // on someone's disk: every one of them goes through textContent.
 import {
   listRuns, getStats, getUsageLimits,
-  type RunRow, type UsageSnapshot,
+  type RunRow, type RunStats, type UsageSnapshot,
 } from "./api";
 import { connectLive } from "./live";
 import { openDetail, appendEvent, notifyRunChanged } from "./detail";
@@ -395,23 +395,45 @@ async function reconcile(): Promise<void> {
     }
     runs = fresh;
     paint();
-
-    const cells = mastheadEnsured();
-    if (cells) {
-      const ok = stats.by_status.succeeded ?? 0;
-      const bad = (stats.by_status.failed ?? 0) + (stats.by_status.timed_out ?? 0);
-      cells.runs.set(String(stats.total_runs));
-      cells.ok.set(String(ok));
-      cells.bad.set(String(bad), bad > 0 ? "bad" : "dim");
-      cells.tokens.set(
-        fmtCount(stats.total_input_tokens + stats.total_output_tokens));
-    }
+    paintToday(stats);
     showBanner(null);
   } catch (e) {
     console.error("[dashboard] reconcile failed", e);
     showBanner("Cannot reach the JARVIS server.");
   }
   await refreshUsage();
+}
+
+function paintToday(stats: RunStats): void {
+  const cells = mastheadEnsured();
+  if (!cells) return;
+  const ok = stats.by_status.succeeded ?? 0;
+  const bad = (stats.by_status.failed ?? 0) + (stats.by_status.timed_out ?? 0);
+  cells.runs.set(String(stats.total_runs));
+  cells.ok.set(String(ok));
+  cells.bad.set(String(bad), bad > 0 ? "bad" : "dim");
+  cells.tokens.set(
+    fmtCount(stats.total_input_tokens + stats.total_output_tokens));
+}
+
+/**
+ * The Today counters, re-read after a live run frame. They used to be read
+ * only by reconcile(), so a run that finished while the page was open
+ * repainted its row as succeeded under a masthead still counting it as
+ * running. Debounced: one finish arrives as several frames, and they are
+ * worth one fetch. A failure keeps the last reading; reconcile owns the
+ * connection banner.
+ */
+let todayTimer: number | undefined;
+function refreshTodaySoon(): void {
+  clearTimeout(todayTimer);
+  todayTimer = window.setTimeout(async () => {
+    try {
+      paintToday(await getStats("day"));
+    } catch (e) {
+      console.error("[dashboard] stats refresh failed", e);
+    }
+  }, 250);
 }
 
 /**
@@ -451,6 +473,7 @@ function onRunChanged(run: RunRow): void {
     runs.unshift(run);
   }
   paint();
+  refreshTodaySoon();
   notifyRunChanged(run);
 }
 
