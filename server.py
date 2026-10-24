@@ -47,8 +47,12 @@ def _parse_env_lines(text: str) -> list[tuple[str, str]]:
     return out
 
 
-# Load .env file if present
-_env_path = Path(__file__).parent / ".env"
+# Load .env file if present. JARVIS_ENV_FILE is honoured here as it is by the
+# writer (`_env_file_path`): the test suite points it at a tmp file, and a
+# reader that ignored it re-imported the developer's live settings on every
+# `importlib.reload(server)` — JARVIS_PROJECT_ROOTS among them.
+_env_path = Path(os.getenv("JARVIS_ENV_FILE", "").strip()
+                 or Path(__file__).parent / ".env")
 if _env_path.exists():
     for _k, _v in _parse_env_lines(_env_path.read_text()):
         os.environ.setdefault(_k, _v)
@@ -2365,8 +2369,8 @@ TAINTING_TOOLS = {
 # came to be missing from the original set.
 TAINT_EXEMPT_TOOLS = {
     "list_projects": (
-        "it emits project names and directory paths off the session roster "
-        "and no file content, no transcript text and no page — and it is how "
+        "it emits project names and directory paths off the session roster, "
+        "and names off the folder scan, and no file content, no transcript text and no page — and it is how "
         "the brain resolves a project name before doing anything at all"),
     "usage_status": (
         "it reports JARVIS's own subscription usage, computed here from "
@@ -3267,10 +3271,23 @@ def tool_session_detail(args: dict) -> str:
     return detail
 
 
+def _speakable_scanned_projects() -> list[dict]:
+    """The folder scan, held to the same name and path walls as
+    `_project_candidates` — these names reach the brain and the voice."""
+    return [p for p in cached_projects
+            if _project_name_speakable(p.get("name"))
+            and _project_path_speakable(p.get("path"))]
+
+
 def tool_list_projects(args: dict) -> str:
     snap = _snapshot_or_empty()
     groups = snap.by_project()
-    if not groups:
+    # Repos the folder scan found that no conversation is open in: named
+    # only, not pathed — twenty of them with cloud-drive paths would blow
+    # the tool-result cap, and `spawn_run` resolves the path itself.
+    on_disk = sorted({p["name"] for p in _speakable_scanned_projects()
+                      if p["name"] not in groups}, key=str.lower)
+    if not groups and not on_disk:
         return "No projects have sessions open."
     lines = []
     for project in sorted(groups):
@@ -3288,6 +3305,9 @@ def tool_list_projects(args: dict) -> str:
         lines.append(f"{_plain_name(project, 'an unnamed project')} "
                      f"({where}): {len(group)} "
                      f"conversation{'s' if len(group) != 1 else ''}")
+    if on_disk:
+        lines.append(f"On disk, no conversation open ({len(on_disk)}): "
+                     f"{', '.join(on_disk)}")
     return "\n".join(lines)
 
 
@@ -6477,7 +6497,8 @@ def _project_views() -> list[projects_view.ProjectView]:
     conversations here any more than anywhere else that lists them."""
     sessions = _snapshot_or_empty().sessions
     runs = run_store.list_runs(limit=_PROJECTS_VIEW_RUN_LOOKBACK)
-    return projects_view.build_project_views(sessions, runs)
+    return projects_view.build_project_views(
+        sessions, runs, known=_speakable_scanned_projects())
 
 
 @app.get("/api/projects/view")

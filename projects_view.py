@@ -123,10 +123,16 @@ def _pick_primary_path(paths: list[str],
 def build_project_views(
     sessions: list[session_watch.SessionState],
     runs: list[dict],
-    *, exists=os.path.isdir,
+    *, known: list[dict] = (),
+    exists=os.path.isdir,
 ) -> list[ProjectView]:
-    """The JOIN: every project name known to either a conversation or a run,
-    folded into one summary each, ordered by what deserves attention first.
+    """The JOIN: every project name known to a conversation, a run or the
+    folder scan, folded into one summary each, ordered by what deserves
+    attention first.
+
+    `known` is the folder scan (`{"name", "path"}` rows): repos with no
+    conversation and no run yet. They join with no activity, so they sort
+    after everything that has some — present, never promoted.
 
     `sessions` and `runs` are handed in rather than read here so this stays a
     pure function over data the caller already fetched — no I/O beyond one
@@ -154,6 +160,11 @@ def build_project_views(
         path = r.get("project_path")
         if path:
             b["paths"].add(path)
+
+    for k in known:
+        name, path = k.get("name"), k.get("path")
+        if name and path:
+            bucket(name)["paths"].add(path)
 
     views: list[ProjectView] = []
     for name, b in buckets.items():

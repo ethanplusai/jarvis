@@ -200,6 +200,44 @@ def test_list_projects_reports_each_project_once_with_its_path(wired):
     assert "2 conversations" in text
 
 
+def test_list_projects_names_projects_on_disk_with_no_conversation(wired, monkeypatch):
+    """The brain resolves a project name through this tool before doing
+    anything, and the folder scan knows repos nobody has a conversation in.
+    "No projects have sessions open" made him answer "two, sir" on a machine
+    with twenty-three."""
+    server, _root, _watcher = wired
+    monkeypatch.setattr(server, "cached_projects", [
+        {"name": "trader", "path": "/p/trader"},
+        {"name": "karanso", "path": "/p/karanso"},
+        {"name": "karanso", "path": "/q/karanso"},
+    ])
+
+    text = server.tool_list_projects({})
+
+    assert "No projects have sessions open" not in text
+    assert "karanso" in text and "trader" in text
+    assert text.count("karanso") == 1, f"a name listed twice:\n{text}"
+
+
+def test_list_projects_does_not_repeat_a_scanned_project_that_has_a_conversation(
+        wired, monkeypatch):
+    server, root, watcher = wired
+    write_roster(root, pid=os.getpid(), session_id="h1", cwd="/p/hammer",
+                 name="h1", status="idle")
+    write_transcript(root, cwd="/p/hammer", session_id="h1", title="T",
+                     last_prompt="P")
+    watcher.poll_once()
+    monkeypatch.setattr(server, "cached_projects", [
+        {"name": "hammer", "path": "/p/hammer"},
+        {"name": "trader", "path": "/p/trader"},
+    ])
+
+    text = server.tool_list_projects({})
+
+    assert text.count("hammer") == 2, f"hammer and its path, once:\n{text}"
+    assert "trader" in text
+
+
 def test_list_projects_shows_every_distinct_directory_for_one_project(wired):
     """A project name can span more than one directory (measured live:
     `chitauri` has conversations in both Projects and Desktop). Showing only

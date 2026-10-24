@@ -56,6 +56,35 @@ def test_a_project_known_only_from_a_run_appears():
     assert views[0].sessions == []
 
 
+def test_a_project_known_only_from_the_folder_scan_appears():
+    """A repo nobody has opened a conversation in, and JARVIS has never run
+    in, is still a project — it is exactly the one someone asks him to start
+    on. The scan found it; the tab must not hide it."""
+    views = pv.build_project_views(
+        [], [], known=[{"name": "trader", "path": "/p/trader"}],
+        exists=ALWAYS_EXISTS)
+    assert [v.name for v in views] == ["trader"]
+    assert views[0].primary_path == "/p/trader"
+    assert views[0].sessions == [] and views[0].runs == []
+    assert views[0].last_activity is None
+
+
+def test_a_scanned_project_with_a_session_is_joined_not_duplicated():
+    views = pv.build_project_views(
+        [_session("s1", "trader", "/p/trader")], [],
+        known=[{"name": "trader", "path": "/p/trader"}], exists=ALWAYS_EXISTS)
+    assert [v.name for v in views] == ["trader"]
+    assert views[0].paths == ["/p/trader"]
+    assert len(views[0].sessions) == 1
+
+
+def test_scanned_only_projects_sort_after_ones_with_activity():
+    views = pv.build_project_views(
+        [_session("s1", "zeta", "/p/zeta", since=time.time())], [],
+        known=[{"name": "alpha", "path": "/p/alpha"}], exists=ALWAYS_EXISTS)
+    assert [v.name for v in views] == ["zeta", "alpha"]
+
+
 def test_a_project_seen_in_both_is_joined_not_duplicated():
     views = pv.build_project_views(
         [_session("s1", "chitauri", "/p/chitauri", since=500.0)],

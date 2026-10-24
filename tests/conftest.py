@@ -41,6 +41,10 @@ def _never_touch_the_real_projects_folder(monkeypatch, tmp_path):
     a safe default.
     """
     monkeypatch.setenv("JARVIS_PROJECTS_DIR", str(tmp_path / "projects-root"))
+    # The developer's .env is loaded into the environment at import, so a
+    # JARVIS_PROJECT_ROOTS set there would point every scan at their real
+    # folders and replace the projects root above.
+    monkeypatch.delenv("JARVIS_PROJECT_ROOTS", raising=False)
 
 
 @pytest.fixture(autouse=True)

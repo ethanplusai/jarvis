@@ -542,7 +542,10 @@ TOOL_SPECS = [
     },
     {
         "name": "list_projects",
-        "description": "The projects that have Claude Code sessions, with their paths.",
+        "description": (
+            "Every project JARVIS knows: those with Claude Code sessions, with "
+            "their paths, then the git repos found on disk with no "
+            "conversation open, by name."),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
