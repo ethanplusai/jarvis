@@ -81,7 +81,7 @@ def test_greeting_is_spoken_through_the_scheduler(client):
         seen = _drain_until(ws, lambda m: m["type"] == "audio")
         audio = seen[-1]
         assert audio["idx"] == 0 and audio["text"].startswith("Good ")
-        assert audio["text"].endswith("sir.")
+        assert audio["text"].endswith(".") and "sir" not in audio["text"]
 
 
 def test_transcript_streams_chunks_and_acks_return_to_idle(client):

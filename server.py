@@ -720,10 +720,10 @@ async def _on_brain_state(state: str, info: dict) -> None:
 def _greeting() -> str:
     hour = datetime.now().hour
     if hour < 12:
-        return "Good morning, sir."
+        return "Good morning."
     if hour < 17:
-        return "Good afternoon, sir."
-    return "Good evening, sir."
+        return "Good afternoon."
+    return "Good evening."
 
 
 def _tool_connect_host(bind_host: str) -> str:
