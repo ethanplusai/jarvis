@@ -440,14 +440,15 @@ def _check_screen_recording_sync() -> Check:
 
 
 def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
-        return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+    """Voice now comes from the Mac's built-in `say` (tts.py); no key needed."""
+    import shutil
+    if shutil.which("say"):
+        return Check(name="fish_api_key", status=STATUS_OK, message="Using the Mac's built-in voice.")
     return Check(
         name="fish_api_key",
         status=STATUS_FAIL,
-        message="FISH_API_KEY is not set.",
-        remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
+        message="The macOS `say` command was not found.",
+        remedy="JARVIS's voice uses macOS `say`; run it on a Mac.",
     )
 
 

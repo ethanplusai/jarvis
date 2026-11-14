@@ -174,6 +174,10 @@ def mp3_seconds(data: Optional[bytes]) -> float:
     that is not one — no header, no floor."""
     if not data:
         return 0.0
+    # WAV from the Mac voice (tts.py): duration straight from the RIFF header.
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE" and len(data) >= 44:
+        byte_rate = int.from_bytes(data[28:32], "little")
+        return (len(data) - 44) / byte_rate if byte_rate else 0.0
     i = 0
     if data[:3] == b"ID3" and len(data) >= 10:
         i = 10 + ((data[6] << 21) | (data[7] << 14) | (data[8] << 7) | data[9])

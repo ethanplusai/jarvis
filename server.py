@@ -457,39 +457,17 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (Mac built-in voice)
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
+    """Generate speech audio from text with the Mac's built-in voice (see tts.py)."""
+    r = await tts.synthesize_chunk(text)
+    if r is None:
         return None
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
-    except Exception as e:
-        log.error(f"TTS error: {e}")
-        return None
+    _session_tokens["tts_calls"] += 1
+    _append_usage_entry(0, 0, "tts")
+    return r.audio
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +693,74 @@ async def _on_brain_state(state: str, info: dict) -> None:
     elif state == "rate_limited":
         await speech.say(f"I've hit the usage limit until {_fmt_reset(info.get('resets_at'))}, sir.",
                          Priority.NORMAL)
+
+
+_BRIEFING_PROMPT = (
+    "Give me my morning briefing. Call the briefing server's morning_briefing tool, "
+    "then speak it to me naturally and concisely, in this order: the weather, today's "
+    "calendar, anything due or overdue, then the five biggest news headlines in a sentence each. "
+    "Skip empty sections in a few words. Keep it under about forty-five seconds."
+)
+
+
+def _briefing_stamp() -> Path:
+    return data_paths.brain_home() / "last_briefing"
+
+
+def _briefing_due() -> bool:
+    """First connection of the day, in the morning, gets a briefing instead of a greeting."""
+    now = datetime.now()
+    if not (4 <= now.hour < 12):
+        return False
+    try:
+        return _briefing_stamp().read_text().strip() != now.date().isoformat()
+    except OSError:
+        return True
+
+
+async def _morning_briefing() -> None:
+    if speech is None:
+        return
+    await speech.say("Good morning. One moment while I gather your briefing.", Priority.NORMAL)
+    for _ in range(90):
+        if brain_instance is not None and (brain_instance.ready or brain_instance.failed):
+            break
+        await asyncio.sleep(1)
+    try:
+        _briefing_stamp().write_text(datetime.now().date().isoformat())
+    except OSError as e:
+        log.warning(f"could not record briefing date: {e}")
+    await _handle_utterance(_BRIEFING_PROMPT)
+
+
+_wake_state = {"user_audio": 0.0, "weather": 0.0, "pending": 0.0}
+WEATHER_GREETING_EVERY = 45 * 60      # seconds: the weather once in a while, not on every wake
+
+
+def _with_time(text: str) -> str:
+    """Prefix a user turn with the local date and time, so he always knows when it is."""
+    now = datetime.now()
+    return f"[{now.strftime('%A %B %-d, %Y, %-I:%M %p')} local time] {text}"
+
+
+async def _greet_short() -> None:
+    if speech is not None:
+        await speech.say("Yes?", Priority.NORMAL)
+
+
+async def _greet_with_weather() -> None:
+    """Time-of-day greeting plus one sentence of weather (briefing_mcp.weather_brief)."""
+    if speech is None:
+        return
+    try:
+        import briefing_mcp
+        wx = await asyncio.to_thread(briefing_mcp.weather_brief)
+    except Exception as e:
+        log.warning(f"greeting weather failed: {e}")
+        wx = ""
+    if wx:
+        _wake_state["weather"] = time.time()
+    await speech.say(f"{_greeting()} {wx}".strip(), Priority.NORMAL)
 
 
 def _greeting() -> str:
@@ -1642,7 +1688,7 @@ async def _handle_utterance(text: str) -> None:
         try:
             try:
                 hold = _OneLinePerTurn(lambda d: speech.feed(utt, d))
-                result = await brain_instance.turn(text, origin="user",
+                result = await brain_instance.turn(_with_time(text), origin="user",
                                                    on_delta=hold.delta,
                                                    on_tool=hold.tool_started)
                 hold.finish()    # the one line this turn is allowed
@@ -1850,6 +1896,32 @@ app.add_middleware(web_auth.OriginGuard)
 @app.get("/api/health")
 async def health():
     return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
+
+
+@app.post("/api/wake")
+async def api_wake():
+    """Double-clap wake (clap_listener.py): greet with the weather, or brief in the morning.
+    Reports whether a voice client (the Chrome tab) is connected to hear it."""
+    global _last_greeting_time
+    if not _voice_queues or speech is None:
+        _wake_state["pending"] = time.time()   # greet when the tab the listener opens connects
+        return {"ok": True, "voice_client": False}
+    # His own voice through the speakers can look like claps: ignore wakes while
+    # he is talking, just finished, or greeted moments ago.
+    now = time.time()
+    if speech.seconds_since_last_played() < 4 or now - _last_greeting_time < 20:
+        return {"ok": True, "voice_client": True, "ignored": "speaking"}
+    if now - _wake_state["user_audio"] < 4:      # that "clap" was you talking
+        return {"ok": True, "voice_client": True, "ignored": "user talking"}
+    _last_greeting_time = now
+    await _voice_emit({"type": "unmute"})
+    if _briefing_due():
+        _spawn(_morning_briefing())
+    elif now - _wake_state["weather"] > WEATHER_GREETING_EVERY:
+        _spawn(_greet_with_weather())
+    else:
+        _spawn(_greet_short())
+    return {"ok": True, "voice_client": True}
 
 
 @app.post("/api/tts-test")
@@ -6597,10 +6669,13 @@ async def voice_handler(ws: WebSocket):
         _enqueue(queue, {"type": "config", "muteMicDuringSpeech": MUTE_MIC_DURING_SPEECH})
         _enqueue(queue, {"type": "status", "state": "idle"})
 
+        # Silent on connect: he speaks first, unless a double clap opened this tab.
         global _last_greeting_time
-        if speech is not None and time.time() - _last_greeting_time > 60:
+        if speech is not None and time.time() - _wake_state["pending"] < 30:
+            _wake_state["pending"] = 0.0
             _last_greeting_time = time.time()
-            await speech.say(_greeting(), Priority.NORMAL)
+            _enqueue(queue, {"type": "unmute"})
+            _spawn(_morning_briefing() if _briefing_due() else _greet_with_weather())
 
         while True:
             raw = await ws.receive_text()
@@ -6611,6 +6686,15 @@ async def voice_handler(ws: WebSocket):
             if speech is None:
                 continue
             kind = msg.get("type")
+            if kind == "location":
+                try:
+                    lat, lon = float(msg.get("lat")), float(msg.get("lon"))
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        (data_paths.brain_home() / "location.json").write_text(
+                            json.dumps({"lat": round(lat, 4), "lon": round(lon, 4), "at": time.time()}))
+                except (TypeError, ValueError, OSError) as e:
+                    log.warning(f"location not saved: {e}")
+                continue
             if kind == "mic":
                 # The browser's recogniser is the one part of the voice path
                 # whose failures were invisible from here: it can go deaf with
@@ -6642,6 +6726,7 @@ async def voice_handler(ws: WebSocket):
                 # wrong happened after this point.
                 text = str(msg.get("text", ""))
                 log.info("mic-hears: %s", text[-70:])
+                _wake_state["user_audio"] = time.time()
                 await speech.user_interim(text)
             elif kind == "played":
                 try:
@@ -6879,7 +6964,9 @@ async def api_settings_status():
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
+            # Voice is the Mac's built-in `say` (tts.py), so it is "set up" whenever
+            # that exists; otherwise the first-time setup panel opened on every load.
+            "fish_audio": bool(_shutil.which("say")) or bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
             "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
             "user_name": env_dict.get("USER_NAME", ""),
         },

@@ -17,7 +17,8 @@ import "./style.css";
 
 type State = "idle" | "listening" | "thinking" | "speaking" | "compacting";
 let currentState: State = "idle";
-let isMuted = false;
+let isMuted = true;
+let unmuteRequested = false;
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -163,11 +164,26 @@ audioPlayer.onNeedsGesture(() => {
 // WebSocket messages
 // ---------------------------------------------------------------------------
 
+// Weather follows him: Chrome asks once, then the tab shares the Mac's location
+// (Wi-Fi based) with the server on every connect.
+function shareLocation() {
+  if (!("geolocation" in navigator)) return;
+  navigator.geolocation.getCurrentPosition(
+    (pos) => socket.send({ type: "location", lat: pos.coords.latitude, lon: pos.coords.longitude }),
+    (err) => console.log("[location] unavailable:", err.message),
+    { maximumAge: 15 * 60 * 1000, timeout: 20000 },
+  );
+}
+
 socket.onMessage((msg) => {
   const type = msg.type as string;
 
-  if (type === "config") {
+  if (type === "unmute") {
+    unmuteRequested = true;
+    if (isMuted) setMuted(false);
+  } else if (type === "config") {
     muteMicDuringSpeech = Boolean(msg.muteMicDuringSpeech);
+    shareLocation();
   } else if (type === "audio") {
     const data = msg.data as string;
     if (data) {
@@ -205,9 +221,11 @@ socket.onMessage((msg) => {
 // ---------------------------------------------------------------------------
 
 // Start listening after a brief delay for the orb to render
+// Opens MUTED: he unmutes with the button or by clapping twice (server sends "unmute").
 setTimeout(() => {
   voiceInput.start();
-  if (currentState !== "speaking") transition("listening");
+  if (unmuteRequested) setMuted(false);
+  else setMuted(true);
 }, 1000);
 
 // Resume AudioContext on ANY user interaction (browser autoplay policy)
@@ -234,9 +252,8 @@ const menuDropdown = document.getElementById("menu-dropdown")!;
 const btnRestart = document.getElementById("btn-restart")!;
 const btnFixSelf = document.getElementById("btn-fix-self")!;
 
-btnMute.addEventListener("click", (e) => {
-  e.stopPropagation();
-  isMuted = !isMuted;
+function setMuted(m: boolean) {
+  isMuted = m;
   btnMute.classList.toggle("muted", isMuted);
   if (isMuted) {
     voiceInput.pause();
@@ -245,6 +262,11 @@ btnMute.addEventListener("click", (e) => {
     voiceInput.resume();
     transition("listening");
   }
+}
+
+btnMute.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setMuted(!isMuted);
 });
 
 btnMenu.addEventListener("click", (e) => {

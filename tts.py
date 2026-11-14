@@ -1,21 +1,25 @@
 """
-tts.py — Fish Audio synthesis, one request per sentence chunk.
+tts.py — speech synthesis with the Mac's built-in voice (`say`), one call per
+sentence chunk. Free and offline: no Fish Audio key needed.
 
-The response is streamed so time-to-first-byte can be measured; the chunk is
-returned whole because the browser decodes one complete MP3 per chunk.
+Returns a complete WAV file per chunk; the browser's decodeAudioData plays WAV
+just as it played MP3. Pick a voice with MAC_VOICE in .env (default: Daniel,
+a British English voice). `say -v '?'` lists the voices on your Mac.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
-
 log = logging.getLogger("jarvis.tts")
 
-FISH_TTS_URL = "https://api.fish.audio/v1/tts"
+MAC_VOICE = os.getenv("MAC_VOICE", "Daniel")
+MAC_VOICE_RATE = os.getenv("MAC_VOICE_RATE", "")   # words per minute, e.g. 190
 
 
 @dataclass
@@ -25,40 +29,55 @@ class SynthResult:
     total_sec: float
 
 
-async def synthesize_chunk(text: str, *, api_key: str, voice_id: str,
-                           client: Optional[httpx.AsyncClient] = None,
-                           latency: str = "balanced", timeout: float = 15.0) -> Optional[SynthResult]:
-    text = (text or "").strip()
-    if not text or not api_key:
-        return None
-    own = client is None
-    client = client or httpx.AsyncClient(timeout=timeout)
-    t0 = time.monotonic()
-    first: Optional[float] = None
-    buf = bytearray()
+async def _run_say(text: str, path: str, voice: Optional[str], timeout: float) -> bool:
+    args = ["say"]
+    if voice:
+        args += ["-v", voice]
+    if MAC_VOICE_RATE:
+        args += ["-r", MAC_VOICE_RATE]
+    args += ["-o", path, "--file-format=WAVE", "--data-format=LEI16@22050", "--", text]
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     try:
-        async with client.stream(
-            "POST", FISH_TTS_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"text": text, "reference_id": voice_id, "format": "mp3", "mp3_bitrate": 128, "latency": latency},
-            timeout=timeout,
-        ) as resp:
-            if resp.status_code != 200:
-                log.error(f"TTS {resp.status_code} for {text[:40]!r}")
-                return None
-            async for part in resp.aiter_bytes():
-                if first is None:
-                    first = time.monotonic() - t0
-                buf.extend(part)
-    except (httpx.HTTPError, OSError) as e:
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.error(f"TTS timed out for {text[:40]!r}")
+        return False
+    if proc.returncode != 0:
+        log.error(f"say failed ({proc.returncode}): {err.decode(errors='replace').strip()[:200]}")
+        return False
+    return True
+
+
+async def synthesize_chunk(text: str, *, api_key: str = "", voice_id: str = "",
+                           client=None, latency: str = "balanced",
+                           timeout: float = 15.0) -> Optional[SynthResult]:
+    """Same signature as the old Fish Audio version; api_key/voice_id/client are ignored."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    t0 = time.monotonic()
+    fd, path = tempfile.mkstemp(suffix=".wav", prefix="jarvis-tts-")
+    os.close(fd)
+    try:
+        ok = await _run_say(text, path, MAC_VOICE, timeout)
+        if not ok and MAC_VOICE:
+            log.warning(f"Voice {MAC_VOICE!r} failed; falling back to the system default voice")
+            ok = await _run_say(text, path, None, timeout)
+        if not ok:
+            return None
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
         log.error(f"TTS error: {e}")
         return None
     finally:
-        if own:
-            try:
-                await client.aclose()
-            except Exception as e:      # never turn a clean None into an exception
-                log.debug(f"TTS client close failed: {e}")
-    if not buf:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if not data:
         return None
-    return SynthResult(bytes(buf), first if first is not None else 0.0, time.monotonic() - t0)
+    elapsed = time.monotonic() - t0
+    return SynthResult(data, elapsed, elapsed)
