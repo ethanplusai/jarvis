@@ -92,19 +92,22 @@ does not follow the app there. Move it to `/Applications` and relaunch.
 error `-1728` / "not allowed assistive access") without ever triggering the
 permission prompt itself, and its remedy text carries this same guidance.
 
-## `FISH_API_KEY` is genuinely required — there is no fallback voice
+## The voice is macOS `say`, with no key and no setup
 
-`tts.py` calls the Fish Audio API directly; if the key is missing or empty,
-`synthesize_chunk` simply returns `None` — no error, no local TTS, no
-built-in voice of any kind. Without a real key from
-[fish.audio](https://fish.audio/), JARVIS has no voice at all, which reads
-to a new user as "it's just broken." This is the one piece of setup that
-cannot be skipped or worked around.
+`tts.py` no longer uses Fish Audio. It runs `say -o <tmp>.wav` for each
+sentence chunk with `MAC_VOICE` (default Daniel). If that voice fails, it
+falls back to the system default voice. `FISH_API_KEY` is still read by
+`server.py` but ignored, so a missing key is harmless. If JARVIS is silent,
+check `jarvis.log` for `say failed` or `TTS timed out`. The page also opens
+muted until a double clap unmutes it (`clap_listener.py`), which can look
+like a broken voice.
 
 ## Connecting a service: one file, and it is not the one you'd guess
 
-JARVIS ships connected to nothing — no calendar, no mail, no notes. He
-connects to whatever the user brings, through MCP, and the whole of that is
+JARVIS ships with two local MCP servers of his own: `mac_mcp.py` (Mac
+control, Notes, Reminders, Calendar events, timers) and `briefing_mcp.py`
+(Calendar, Reminders, weather, headlines). Beyond those he connects to
+whatever the user brings, through MCP, and the whole of that is
 one file:
 
 ```

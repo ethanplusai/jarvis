@@ -14,35 +14,48 @@ When a user clones this repo and starts Claude Code, help them:
 2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
    newer) and log in with `claude` — JARVIS's brain runs on your Claude
    subscription, not on an API key
-3. Get a Fish Audio API key from fish.audio (required — there is no fallback
-   voice)
+3. Nothing to do for the voice: it is the Mac's built-in `say` (`tts.py`),
+   free and offline. Pick a voice with `MAC_VOICE` (default Daniel)
 4. Install Python dependencies: pip install -r requirements.txt
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
-7. Generate the SSL certs — see below, they are NOT optional:
-   `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'`
+7. SSL certs: `server.py` creates `cert.pem` / `key.pem` itself on first
+   start (`dev_certs.py`, using the system `openssl`). See below for why
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
 11. Click to enable audio, speak to JARVIS
 
-**The certs are required for the dev-server workflow**, despite `server.py`
-treating them as optional. `server.py` serves HTTPS only when `cert.pem` and
-`key.pem` are both beside it, but `frontend/vite.config.ts` hard-codes its
-proxy target as `https://localhost:8340`. Measured with a stand-in backend on
+For everyday use rather than development, `start-jarvis.sh` runs the server,
+Vite and the clap listener together and restarts them when the server crashes
+(backing off from 10 s to 2 min). `macos-app/build.sh` builds
+`~/Applications/Jarvis.app`, a windowless launcher that runs `start-jarvis.sh`
+and stays its parent process, so the Microphone, Accessibility and Screen
+Recording permissions granted to the app also reach JARVIS. The log goes to
+`data/jarvis/jarvis.log`.
+
+**The certs are required for the dev-server workflow**, which is why
+`server.py` now generates them instead of falling back to HTTP (`--no-ssl`
+still forces plain HTTP, and a failed `openssl` prints a loud warning).
+`frontend/vite.config.ts` hard-codes its proxy target as
+`https://localhost:8340`, and `clap_listener.py` posts there too. Measured with a stand-in backend on
 8340 and `npx vite`: with a plain-HTTP backend the Vite dev server itself
 answers 200 while every proxied `/api` request returns **500**; with an HTTPS
 backend the same request returns 200. The page loads either way, which is why
 this presents as "the UI is up but nothing works" rather than as an error.
 
 ## Architecture
-- **Backend**: FastAPI + Python (server.py, ~5800 lines)
+- **Backend**: FastAPI + Python (server.py, ~7100 lines)
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
 - **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
   the user's subscription; no Anthropic API calls on the voice path
-- **TTS**: Fish Audio with JARVIS voice model
+- **TTS**: the Mac's built-in `say`, one WAV per sentence chunk (Fish Audio
+  was removed; `synthesize_chunk` still accepts and ignores its old
+  `api_key` / `voice_id` arguments)
+- **Wake**: `clap_listener.py`, a double clap (0.2–0.8 s apart). The page
+  opens muted and a clap unmutes it
 - **System**: AppleScript for Terminal and Chrome integration
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
   `run_store.py` (SQLite) + `run_executor.py`, surfaced at `/api/runs`,
@@ -88,7 +101,14 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
-- `tts.py` — Fish Audio synthesis, one request per sentence chunk
+- `tts.py` — Speech with macOS `say`, one call per sentence chunk
+- `mac_mcp.py` — Stdio MCP server for operating the Mac through each app's
+  scripting interface. Every action reports what actually happened. Sending
+  anything off the Mac takes two calls, a preview and then `confirmed=true`.
+  Destructive AppleScript is refused
+- `briefing_mcp.py` — Stdio MCP server for the day's briefing: Calendar,
+  Reminders, weather (wttr.in) and RSS headlines, with no API keys
+- `clap_listener.py` — Double-clap wake listener, started by `start-jarvis.sh`
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
@@ -119,10 +139,9 @@ arbitrary LLM and file content, so everything goes through
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
 - `actions.py` — System actions (Terminal, Chrome) via AppleScript
-- `browser.py` — Playwright. Only the headless half is live (`read_page`,
-  `capture_page`, behind `read_page` / `look_at_page`); the headful
-  `JarvisBrowser` search/research class is reachable from nothing but
-  `tests/test_browser_integration.py`
+- `browser.py` — Headless Playwright: `read_page` and `capture_page`,
+  behind the `read_page` / `look_at_page` tools. One throwaway browser per
+  call
 - `screen.py` — Seeing the Mac itself: the window list (`osascript`) and one
   downscaled `screencapture` the brain sees as an MCP image block. Captured
   only on a turn the user drove, never persisted, never on a timer
@@ -130,10 +149,8 @@ arbitrary LLM and file content, so everything goes through
   subprocess)
 - `project_maker.py` — Creates a new project directory from a spoken name,
   path-validated against the projects root
-- `work_mode.py` — Vestigial. `is_casual_question` is imported by `server.py`
-  and called by nothing; the Haiku-vs-`claude -p` routing it classified for is
-  gone. Left in place only because a test pins it
 - `data_paths.py` — Single source of truth for where data is written
+- `dev_certs.py` — Creates the self-signed localhost cert pair on first start
 
 ## Where the author's own notes live
 This repository ships nothing personal. Research notes, milestone
@@ -160,8 +177,13 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
   rejection is not enough with a given microphone
-- `FISH_API_KEY` (required) — Fish Audio TTS
-- `FISH_VOICE_ID` (optional) — Voice model ID
+- `MAC_VOICE` (optional, default `Daniel`) — macOS voice for `say`;
+  `say -v '?'` lists the ones installed
+- `MAC_VOICE_RATE` (optional) — speaking rate in words per minute
+- `BRIEFING_LOCATION` / `BRIEFING_NEWS_FEED` (optional) — weather location
+  and RSS feed for `briefing_mcp.py`
+- `FISH_API_KEY` / `FISH_VOICE_ID` — leftovers from Fish Audio. `server.py`
+  still reads and passes them, but `tts.py` ignores them
 - `USER_NAME` (optional) — Your name for JARVIS to use
 - `JARVIS_DATA_DIR` (optional) — Where JARVIS writes everything: the SQLite
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`
@@ -194,10 +216,12 @@ pytest
 No flags. `pytest.ini` sets `testpaths` and deselects `-m "not browser"`, so a
 bare run is the whole suite and touches neither the network nor the screen.
 
-`tests/test_browser_integration.py` is marked `browser` (one `pytestmark` for
-the file) because it drives `browser.py`, which launches Chromium with
-`headless=False` on purpose and runs live searches. Run those with
-`pytest -m browser`; they skip themselves if there is no network.
+A test that needs a real browser window or the network is marked `browser`
+and deselected by default; run those with `pytest -m browser`
+(`tests/test_screen_sight.py` has one).
+
+`tests/conftest.py` points `JARVIS_ENV_FILE` at an empty path before anything
+imports `server.py`, so your own `.env` never leaks into the tests.
 
 Everything else uses fakes at the subprocess seam — `screencapture`, `sips`,
 `osascript` and `claude` are never really invoked. If you add a test that
