@@ -25,7 +25,7 @@ import stream_parser
 
 log = logging.getLogger("jarvis.run_executor")
 
-# Same default and env var as work_mode.py and server.py.
+# Same default and env var as server.py.
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() \
     not in ("0", "false", "no")
 

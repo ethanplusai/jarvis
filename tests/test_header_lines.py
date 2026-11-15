@@ -451,6 +451,30 @@ EXEMPT = {
         "the same: the `session_id` is the one the CLI just gave this "
         "process for itself, and it goes to `log.info`. A log is not the "
         "brain's context and is not spoken"),
+    "brain._restart": (
+        "the same as `_spawn_locked`: `session_id` is JARVIS's own brain "
+        "session, the one a crash restart reopens with `--resume`, and it "
+        "reaches `log.info` only"),
+    "briefing_mcp.main": (
+        "`id` is the JSON-RPC request id, echoed back in the response "
+        "envelope as the protocol requires. It is never text the brain reads"),
+    "mac_mcp.main": (
+        "the same JSON-RPC request id as `briefing_mcp.main`, echoed in "
+        "the response envelope and never read by the brain as text"),
+    "briefing_mcp._nws_point": (
+        "`state` is a US state code out of api.weather.gov's "
+        "`relativeLocation`, not a session or run field. It is cached, not "
+        "printed here"),
+    "briefing_mcp.weather": (
+        "the same api.weather.gov `state` code, printed in the weather "
+        "header. A government weather API is the source, not another "
+        "conversation"),
+    "mac_mcp.ui_inspect": (
+        "a FALSE MATCH on the field name: `title` here is `str.title()` "
+        "capitalising the APP/WINDOW tag. Recorded honestly, though: the "
+        "labels this returns are whatever is on screen, a web page included, "
+        "and mac_mcp hands them to the brain without `_wrap_untrusted`. That "
+        "is a known gap in mac_mcp, separate from session fields"),
     "brain.result": (
         "`origin` is one of this repository's own four literals (\"voice\", "
         "\"api\", \"system\", \"work\"), set by the caller that started the "
@@ -465,17 +489,6 @@ EXEMPT = {
     "browser.capture_page": (
         "the same as `read_page`: it returns a Capture with a title field, "
         "and the one caller wraps it"),
-    "browser.search": (
-        "the headful `JarvisBrowser` class, which is reachable from nothing "
-        "but tests/test_browser_integration.py — CLAUDE.md records that the "
-        "search/research half is dead code. If it is ever revived the "
-        "titles it collects go inside a block like every other page's"),
-    "browser.visit": (
-        "the same dead headful half as `search`; the title lands in a "
-        "`VisitResult` that no live caller reads"),
-    "browser.research": (
-        "the same dead headful half as `search`; it joins page titles into "
-        "a report no live caller reads"),
     "builds.__repr__": (
         "a `__repr__`. It exists for a traceback and a debugger, is never "
         "returned to the brain and is never spoken"),

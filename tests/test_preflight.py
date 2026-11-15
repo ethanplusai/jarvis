@@ -381,16 +381,19 @@ def test_the_startup_check_never_takes_a_picture(monkeypatch):
     assert preflight._check_screen_recording_sync().status == STATUS_OK
 
 
-# --- FISH_API_KEY -------------------------------------------------------------
+# --- voice (macOS `say`; the check keeps its old name, fish_api_key) ---------
 
-def test_fish_api_key_present(monkeypatch):
-    monkeypatch.setenv("FISH_API_KEY", "sk-fish-abc123")
+def test_voice_ok_when_say_exists(monkeypatch):
+    import shutil
+    monkeypatch.delenv("FISH_API_KEY", raising=False)     # no key needed any more
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/say" if name == "say" else None)
     check = preflight._check_fish_api_key_sync()
     assert check.status == STATUS_OK
 
 
-def test_fish_api_key_absent(monkeypatch):
-    monkeypatch.delenv("FISH_API_KEY", raising=False)
+def test_voice_fails_without_say(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     check = preflight._check_fish_api_key_sync()
     assert check.status == STATUS_FAIL
     assert check.remedy

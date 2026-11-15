@@ -34,8 +34,9 @@ class FakeBrain:
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
-    monkeypatch.setenv("FISH_API_KEY", "fish-test")
+    # No ANTHROPIC_* here: preflight warns about a leftover key, and that
+    # warning is spoken over the greeting.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     import data_paths
     importlib.reload(data_paths)
     import run_store
@@ -48,6 +49,16 @@ def client(monkeypatch, tmp_path):
         return b"MP3:" + text.encode()
 
     monkeypatch.setattr(server, "_synth_for_speech", fake_synth)
+
+    async def no_checks():
+        return []
+
+    # The real checks look at this machine (CLI login, steering, Accessibility)
+    # and speak any failure at startup, over the greeting under test.
+    monkeypatch.setattr(server.preflight, "run_checks", no_checks)
+    # Turns are stamped with the wall clock; the flow tests compare exact
+    # text, so the stamp is checked once on its own below.
+    monkeypatch.setattr(server, "_with_time", lambda text: text)
     server._last_greeting_time = time.time()          # suppress the greeting by default
     # The voice page's own Origin. /ws/voice refuses any other, because a
     # socket that reaches _handle_utterance speaks with origin="user".
@@ -74,14 +85,38 @@ def test_connect_sends_config_and_idle(client):
         assert ws.receive_json() == {"type": "status", "state": "idle"}
 
 
-def test_greeting_is_spoken_through_the_scheduler(client):
+def test_connect_alone_is_silent(client):
+    """The page opens muted and JARVIS does not speak first: only a double
+    clap (POST /api/wake) or the user talking starts him."""
     c, server = client
     server._last_greeting_time = 0
+    server._wake_state["pending"] = 0.0
+    with c.websocket_connect("/ws/voice") as ws:
+        assert ws.receive_json()["type"] == "config"
+        assert ws.receive_json() == {"type": "status", "state": "idle"}
+        # Nothing else is queued: a greeting would already be on its way.
+        ws.send_json({"type": "transcript", "text": "hello there", "isFinal": True})
+        seen = _drain_until(ws, lambda m: m["type"] == "audio")
+        assert seen[-1]["text"] == "Echo: hello there."
+
+
+def test_a_clap_opened_tab_is_unmuted_and_greeted_through_the_scheduler(client, monkeypatch):
+    c, server = client
+    import briefing_mcp
+    monkeypatch.setattr(briefing_mcp, "weather_brief", lambda: "Clear skies.")
+    monkeypatch.setattr(server, "_briefing_due", lambda: False)
+    server._last_greeting_time = 0
+    server._wake_state["pending"] = time.time()      # the listener just clapped
     with c.websocket_connect("/ws/voice") as ws:
         seen = _drain_until(ws, lambda m: m["type"] == "audio")
-        audio = seen[-1]
-        assert audio["idx"] == 0 and audio["text"].startswith("Good ")
-        assert audio["text"].endswith(".") and "sir" not in audio["text"]
+        assert {"type": "unmute"} in seen
+        first = seen[-1]
+        # One utterance, split by sentence: the greeting, then the weather.
+        assert first["idx"] == 0 and first["text"].startswith("Good ")
+        assert "sir" not in first["text"]
+        ws.send_json({"type": "played", "utt": first["utt"], "idx": 0})
+        second = _drain_until(ws, lambda m: m["type"] == "audio")[-1]
+        assert second["utt"] == first["utt"] and second["text"] == "Clear skies."
 
 
 def test_transcript_streams_chunks_and_acks_return_to_idle(client):
@@ -280,3 +315,11 @@ def test_fmt_reset_names_the_day_when_it_is_not_today(client):
     assert far.endswith(" at 10 AM") and any(ch.isdigit() for ch in far.split(" at ")[0])
     assert server._fmt_reset(None) == "later"
     assert server._fmt_reset("not a time") == "later"
+
+
+def test_a_user_turn_is_stamped_with_the_local_time():
+    import importlib
+    import server
+    importlib.reload(server)
+    stamped = server._with_time("hello there")
+    assert stamped.startswith("[") and "local time] hello there" in stamped

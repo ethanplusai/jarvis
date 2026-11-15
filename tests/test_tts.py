@@ -1,62 +1,102 @@
-import json
+"""tts.synthesize_chunk on the Mac's built-in `say`.
+
+`say` is faked at the subprocess seam: the fake writes the WAV file `say -o`
+would have written, so no audio is ever really synthesised.
+"""
+import asyncio
 import sys
 from pathlib import Path
 
-import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def _client(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+class _Proc:
+    def __init__(self, rc=0, err=b"", hang=False):
+        self.returncode = rc
+        self._err = err
+        self._hang = hang
+        self.killed = False
+
+    async def communicate(self):
+        if self._hang:
+            await asyncio.sleep(10)
+        return b"", self._err
+
+    def kill(self):
+        self.killed = True
 
 
-@pytest.mark.asyncio
-async def test_sends_balanced_latency_and_assembles_stream():
-    import tts
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        seen["auth"] = request.headers.get("authorization")
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, content=b"ID3" + b"\x00" * 100)
-
-    async with _client(handler) as c:
-        r = await tts.synthesize_chunk("Good evening, sir.", api_key="k", voice_id="v", client=c)
-    assert seen["url"] == tts.FISH_TTS_URL
-    assert seen["auth"] == "Bearer k"
-    assert seen["body"] == {"text": "Good evening, sir.", "reference_id": "v",
-                            "format": "mp3", "mp3_bitrate": 128, "latency": "balanced"}
-    assert r is not None and r.audio.startswith(b"ID3") and len(r.audio) == 103
-    assert r.first_byte_sec >= 0 and r.total_sec >= r.first_byte_sec
-
-
-@pytest.mark.asyncio
-async def test_non_200_returns_none():
-    import tts
-    async with _client(lambda req: httpx.Response(401, content=b"nope")) as c:
-        assert await tts.synthesize_chunk("x", api_key="k", voice_id="v", client=c) is None
-
-
-@pytest.mark.asyncio
-async def test_transport_error_returns_none():
-    import tts
-
-    def boom(request):
-        raise httpx.ConnectError("down")
-
-    async with _client(boom) as c:
-        assert await tts.synthesize_chunk("x", api_key="k", voice_id="v", client=c) is None
-
-
-@pytest.mark.asyncio
-async def test_empty_text_or_missing_key_short_circuits():
+def _fake_say(monkeypatch, *, results, audio=b"RIFF....WAVEfmt "):
+    """Each call pops the next (rc, err, hang) from `results`; returns the argv log."""
     import tts
     calls = []
 
-    async with _client(lambda req: calls.append(1) or httpx.Response(200, content=b"x")) as c:
-        assert await tts.synthesize_chunk("   ", api_key="k", voice_id="v", client=c) is None
-        assert await tts.synthesize_chunk("hi", api_key="", voice_id="v", client=c) is None
+    async def exec_(*args, **kwargs):
+        calls.append(list(args))
+        rc, err, hang = results.pop(0)
+        if rc == 0 and not hang:
+            out = args[args.index("-o") + 1]
+            Path(out).write_bytes(audio)
+        return _Proc(rc, err, hang)
+
+    monkeypatch.setattr(tts.asyncio, "create_subprocess_exec", exec_)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_say_writes_a_wav_with_the_configured_voice(monkeypatch):
+    import tts
+    monkeypatch.setattr(tts, "MAC_VOICE", "Daniel")
+    calls = _fake_say(monkeypatch, results=[(0, b"", False)])
+    r = await tts.synthesize_chunk("Good evening.")
+    assert r is not None and r.audio.startswith(b"RIFF")
+    argv = calls[0]
+    assert argv[0] == "say"
+    assert argv[argv.index("-v") + 1] == "Daniel"
+    assert "--file-format=WAVE" in argv
+    assert argv[-2:] == ["--", "Good evening."]   # text after --, never parsed as a flag
+    assert r.total_sec >= 0
+
+
+@pytest.mark.asyncio
+async def test_a_failing_voice_falls_back_to_the_system_default(monkeypatch):
+    import tts
+    monkeypatch.setattr(tts, "MAC_VOICE", "NoSuchVoice")
+    calls = _fake_say(monkeypatch, results=[(1, b"voice not found", False), (0, b"", False)])
+    r = await tts.synthesize_chunk("Hello")
+    assert r is not None
+    assert "-v" in calls[0] and "-v" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_say_failing_outright_returns_none(monkeypatch):
+    import tts
+    _fake_say(monkeypatch, results=[(1, b"x", False), (1, b"x", False)])
+    assert await tts.synthesize_chunk("x") is None
+
+
+@pytest.mark.asyncio
+async def test_a_hung_say_is_killed_and_returns_none(monkeypatch):
+    import tts
+    monkeypatch.setattr(tts, "MAC_VOICE", "")
+    _fake_say(monkeypatch, results=[(0, b"", True)])
+    assert await tts.synthesize_chunk("x", timeout=0.05) is None
+
+
+@pytest.mark.asyncio
+async def test_empty_text_short_circuits(monkeypatch):
+    import tts
+    calls = _fake_say(monkeypatch, results=[])
+    assert await tts.synthesize_chunk("   ") is None
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_temp_file_is_left_behind(monkeypatch, tmp_path):
+    import tts
+    monkeypatch.setattr(tts.tempfile, "tempdir", str(tmp_path))
+    _fake_say(monkeypatch, results=[(0, b"", False)])
+    assert await tts.synthesize_chunk("Hello") is not None
+    assert list(tmp_path.iterdir()) == []

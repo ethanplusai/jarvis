@@ -65,18 +65,11 @@ def test_monitor_build_gone():
     assert not hasattr(actions, "open_claude_in_project")
 
 
-def test_work_session_gone():
-    import work_mode
-    importlib.reload(work_mode)
-    assert not hasattr(work_mode, "WorkSession")
-    assert not hasattr(work_mode, "SESSION_FILE")
-
-
-def test_is_casual_question_survives():
-    import work_mode
-    importlib.reload(work_mode)
-    assert work_mode.is_casual_question("what time is it") is True
-    assert work_mode.is_casual_question("build me a dashboard") is False
+def test_work_mode_gone():
+    """The Haiku-vs-run classifier lost its last caller with the voice
+    dispatch chain; the module went with it."""
+    assert not (ROOT / "work_mode.py").exists()
+    assert "work_mode" not in (ROOT / "server.py").read_text()
 
 
 def test_no_sentinel_string_remains():
@@ -86,8 +79,7 @@ def test_no_sentinel_string_remains():
 
 
 def test_active_session_json_not_referenced():
-    for name in ("server.py", "work_mode.py"):
-        assert "active_session.json" not in (ROOT / name).read_text()
+    assert "active_session.json" not in (ROOT / "server.py").read_text()
 
 
 # ---------------------------------------------------------------------------

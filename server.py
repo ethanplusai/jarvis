@@ -47,8 +47,10 @@ def _parse_env_lines(text: str) -> list[tuple[str, str]]:
     return out
 
 
-# Load .env file if present
-_env_path = Path(__file__).parent / ".env"
+# Load .env file if present. JARVIS_ENV_FILE is the same override the
+# settings endpoints use; the test suite points it at an empty file so a
+# developer's own .env can never leak into the tests.
+_env_path = Path(os.environ.get("JARVIS_ENV_FILE") or Path(__file__).parent / ".env")
 if _env_path.exists():
     for _k, _v in _parse_env_lines(_env_path.read_text()):
         os.environ.setdefault(_k, _v)
@@ -66,7 +68,6 @@ from pydantic import BaseModel
 
 import actions
 import builds
-from work_mode import is_casual_question
 import preflight
 import project_maker
 import projects_view
@@ -7092,13 +7093,24 @@ if __name__ == "__main__":
                         help="Bind host (default: loopback only)")
     parser.add_argument("--port", type=int, default=8340, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload on changes")
-    parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem")
+    parser.add_argument("--ssl", action="store_true", help="Enable HTTPS with key.pem/cert.pem (the default)")
+    parser.add_argument("--no-ssl", action="store_true",
+                        help="Serve plain HTTP. The Vite proxy and clap listener expect HTTPS")
     args = parser.parse_args()
 
-    # Auto-detect SSL certs
+    # HTTPS is not optional in practice: vite.config.ts proxies to
+    # https://localhost:8340 and clap_listener.py posts there, so a plain-HTTP
+    # backend leaves the page loading while every request 500s. Create the
+    # self-signed pair on first start rather than fall back silently.
+    from dev_certs import ensure_dev_certs
     cert_file = Path(__file__).parent / "cert.pem"
     key_file = Path(__file__).parent / "key.pem"
-    use_ssl = args.ssl or (cert_file.exists() and key_file.exists())
+    use_ssl = not args.no_ssl and ensure_dev_certs(cert_file, key_file)
+    if not use_ssl and not args.no_ssl:
+        print("\n  WARNING: no cert.pem/key.pem and openssl could not make them.")
+        print("  Serving plain HTTP: the UI at :5173 will load but every request will fail.")
+        print("  Create them by hand:  openssl req -x509 -newkey rsa:2048 -keyout key.pem "
+              "-out cert.pem -days 365 -nodes -subj '/CN=localhost'\n")
 
     proto = "https" if use_ssl else "http"
     ws_proto = "wss" if use_ssl else "ws"

@@ -1,6 +1,13 @@
 import asyncio
+import os
+import tempfile
 
 import pytest
+
+# Before any test imports server.py: its import loads `.env` into os.environ,
+# and a developer's own settings (JARVIS_BRAIN_MODEL=opus, a muted mic) then
+# leaked into tests that check defaults. Point it at a file that is not there.
+os.environ["JARVIS_ENV_FILE"] = os.path.join(tempfile.mkdtemp(prefix="jarvis-test-env-"), ".env")
 import pytest_asyncio
 
 

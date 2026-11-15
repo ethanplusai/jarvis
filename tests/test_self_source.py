@@ -136,7 +136,7 @@ async def test_the_refusal_is_not_simply_everything_failing(ready):
     answer = await server.tool_read_file({"project": "jarvis",
                                           "path": ".env.example"})
     assert answer != server.REPO_SENSITIVE_REFUSAL
-    assert "FISH_API_KEY" in answer, "the documented template should read fine"
+    assert "MAC_VOICE" in answer, "the documented template should read fine"
 
 
 @pytest.mark.asyncio

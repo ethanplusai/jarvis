@@ -387,8 +387,8 @@ async def test_a_screenshot_that_cannot_be_had_is_said_plainly(ready):
 # --- browser.py's own guarantees ------------------------------------------
 
 def test_the_look_functions_are_headless(ready):
-    """`JarvisBrowser` is visible on purpose — that is the watch-me-browse
-    path. These are for JARVIS's own eyes and must not steal the screen."""
+    """These are for JARVIS's own eyes and must never open a visible window
+    or steal the user's focus."""
     import inspect
     source = inspect.getsource(real_browser._Headless.__aenter__)
     assert "headless=True" in source

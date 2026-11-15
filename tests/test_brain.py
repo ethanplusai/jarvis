@@ -84,6 +84,9 @@ def test_command_has_exact_flags(tmp_path):
 
 def test_model_defaults_to_sonnet_and_env_overrides(tmp_path, monkeypatch):
     import brain
+    # A developer's own .env (loaded into os.environ by an earlier import) may
+    # set this; the default is what is under test.
+    monkeypatch.delenv("JARVIS_BRAIN_MODEL", raising=False)
     assert brain.BrainConfig.from_env(tmp_path).model == "sonnet"
     monkeypatch.setenv("JARVIS_BRAIN_MODEL", "haiku")
     assert brain.BrainConfig.from_env(tmp_path).model == "haiku"
