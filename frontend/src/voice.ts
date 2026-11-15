@@ -96,12 +96,18 @@ declare const webkitSpeechRecognition: any;
 export function createMicMonitor(
   onLevel: (level: number) => void,
   onEvent: (event: string) => void
-): { sawSpeech(): void } {
+): { sawSpeech(): void; pause(): void; resume(): void } {
   let lastLoudAt = 0;
   let lastResultAt = Date.now();
   let complainedAt = 0;
+  // Muted means the microphone is released, not just ignored: pause() stops
+  // the stream's tracks (Chrome's mic indicator goes out), resume() reopens.
+  let wanted = true;
+  let stop: (() => void) | null = null;
 
+  function open() {
   navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    if (!wanted) { stream.getTracks().forEach((t) => t.stop()); return; }
     const ctx = new AudioContext();
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
@@ -110,7 +116,7 @@ export function createMicMonitor(
     const buf = new Uint8Array(analyser.fftSize);
     onEvent("mic monitor attached");
 
-    setInterval(() => {
+    const timer = setInterval(() => {
       analyser.getByteTimeDomainData(buf);
       let sum = 0;
       for (let i = 0; i < buf.length; i++) {
@@ -133,12 +139,28 @@ export function createMicMonitor(
                 `recogniser has returned nothing for ${Math.round((now - lastResultAt) / 1000)}s`);
       }
     }, 200);
+    stop = () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      ctx.close();
+      onLevel(0);
+      stop = null;
+    };
   }).catch((e) => {
     onEvent(`mic monitor could not open the microphone: ${e && e.name}`);
   });
+  }
+  open();
 
   return {
     sawSpeech() { lastResultAt = Date.now(); },
+    pause() { wanted = false; if (stop) stop(); },
+    resume() {
+      if (wanted) return;
+      wanted = true;
+      lastResultAt = Date.now();   // do not report "deaf" for the muted stretch
+      if (!stop) open();
+    },
   };
 }
 

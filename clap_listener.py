@@ -9,8 +9,8 @@ Listens to the Mac's microphone for two sharp claps in quick succession, then:
     weather (POST /api/wake, authorised with JARVIS's own tool token).
 
 Tuning (in .env or the environment):
-  CLAP_SENSITIVITY  how far above room noise a clap must be (default 7; lower = more sensitive)
-  CLAP_MIN_LEVEL    absolute peak floor, 0..1 (default 0.25)
+  CLAP_SENSITIVITY  how far above room noise a clap must be (default 8; lower = more sensitive)
+  CLAP_MIN_LEVEL    absolute peak floor, 0..1 (default 0.5)
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ SERVER = "https://127.0.0.1:8340"
 FRONTEND = "http://localhost:5173"
 RATE, BLOCK = 44100, 512                 # ~11.6 ms blocks
 SENSITIVITY = float(os.getenv("CLAP_SENSITIVITY", "8"))
-MIN_LEVEL = float(os.getenv("CLAP_MIN_LEVEL", "0.3"))
+MIN_LEVEL = float(os.getenv("CLAP_MIN_LEVEL", "0.5"))   # 0.3 let desk taps and keystrokes (peaks 0.30-0.44) wake him
 GAP_MIN, GAP_MAX = 0.2, 0.8              # seconds between the two claps (under 0.2 s is one bump plus its echo)
 MAX_CLAP_LEN = 0.15                      # a clap is a short spike, not a sustained sound
 COOLDOWN = 20.0
@@ -124,9 +124,21 @@ def main() -> None:
             noise.append(max(peak, 0.002))
 
     log(f"listening for two claps (sensitivity {SENSITIVITY}, floor {MIN_LEVEL})")
-    with sd.InputStream(channels=1, samplerate=RATE, blocksize=BLOCK, callback=on_audio):
-        while True:
-            time.sleep(1)
+    # Muted with JARVIS's button: the server drops this file, and the Mac's
+    # microphone is closed outright until it is gone — not merely ignored.
+    held_flag = HERE / "data" / "jarvis" / "mic-held"
+    stream = None
+    while True:
+        held = held_flag.exists()
+        if held and stream is not None:
+            stream.stop(); stream.close(); stream = None
+            log("muted in JARVIS: microphone closed")
+        elif not held and stream is None:
+            state["in_spike"], state["last_clap"] = False, 0.0
+            stream = sd.InputStream(channels=1, samplerate=RATE, blocksize=BLOCK, callback=on_audio)
+            stream.start()
+            log("microphone open")
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":

@@ -733,7 +733,24 @@ async def _morning_briefing() -> None:
     await _handle_utterance(_BRIEFING_PROMPT)
 
 
-_wake_state = {"user_audio": 0.0, "weather": 0.0, "pending": 0.0}
+# "held": the user muted with the button; a clap must not undo that.
+_wake_state = {"user_audio": 0.0, "weather": 0.0, "pending": 0.0, "held": False}
+
+
+def _set_mic_held(held: bool) -> None:
+    """Record a button mute. While held, /api/wake ignores claps, and the
+    flag file tells clap_listener.py to close the Mac's microphone entirely —
+    muted means nothing is listening, not merely that nothing acts on it."""
+    _wake_state["held"] = held
+    flag = data_paths.brain_home() / "mic-held"
+    try:
+        if held:
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.touch()
+        else:
+            flag.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning(f"mic-held flag not updated: {e}")
 WEATHER_GREETING_EVERY = 45 * 60      # seconds: the weather once in a while, not on every wake
 
 
@@ -1913,6 +1930,8 @@ async def api_wake():
         return {"ok": True, "voice_client": True, "ignored": "speaking"}
     if now - _wake_state["user_audio"] < 4:      # that "clap" was you talking
         return {"ok": True, "voice_client": True, "ignored": "user talking"}
+    if _wake_state["held"]:                      # muted on purpose: only the button unmutes
+        return {"ok": True, "voice_client": True, "ignored": "muted by user"}
     _last_greeting_time = now
     await _voice_emit({"type": "unmute"})
     if _briefing_due():
@@ -6662,6 +6681,7 @@ async def voice_handler(ws: WebSocket):
     await ws.accept()
     queue = _add_voice_client(ws)
     log.info("Voice WebSocket connected")
+    _set_mic_held(False)             # a fresh tab opens muted, but not held: a clap may wake it
     try:
         # Through this client's own queue, not straight down the socket, so
         # the opening frames cannot be overtaken by a broadcast that lands
@@ -6704,6 +6724,12 @@ async def voice_handler(ws: WebSocket):
                 # back rather than guessed at. Text only, length-capped, and
                 # it drives nothing.
                 log.info("mic: %s", str(msg.get("text", ""))[:120])
+                continue
+            if kind == "muted":
+                # The mute button. While held, /api/wake ignores claps, so a
+                # stray noise cannot reopen a microphone muted on purpose.
+                _set_mic_held(bool(msg.get("value")))
+                log.info("mic %s by the user", "muted" if _wake_state["held"] else "unmuted")
                 continue
             if kind == "hush":
                 # The user pressed the key, or the button. Deliberately NOT a
@@ -6771,6 +6797,8 @@ async def voice_handler(ws: WebSocket):
         log.error(f"WebSocket error: {e}", exc_info=True)
     finally:
         _drop_voice_client(ws)
+        if not _voice_queues:
+            _set_mic_held(False)     # tab gone: let a clap reopen it
 
 
 # ---------------------------------------------------------------------------

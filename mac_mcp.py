@@ -574,6 +574,76 @@ def run_applescript(script: str) -> str:
     return f"OK. Result: {out[:1500]}" if out else "OK (no result returned)."
 
 
+# --------------------------------------------------------------------------- timers
+
+_TIMERS = os.path.join(os.environ.get("JARVIS_DATA_DIR") or
+                       os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "jarvis"),
+                       "timers.json")
+
+# Runs detached so the timer outlives this MCP child (and any brain restart).
+# The label arrives as argv, never spliced into the shell or AppleScript source.
+_TIMER_SH = ('sleep "$1"; osascript -e "on run argv" '
+             '-e "display notification (item 1 of argv) with title \\"Timer done\\" sound name \\"Glass\\"" '
+             '-e "end run" "$2"; for i in 1 2 3; do afplay /System/Library/Sounds/Glass.aiff; done')
+
+
+def _load_timers() -> list[dict]:
+    try:
+        with open(_TIMERS) as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        return []
+    now = time.time()
+    return [t for t in items if t.get("ends", 0) > now]
+
+
+def _save_timers(items: list[dict]) -> None:
+    os.makedirs(os.path.dirname(_TIMERS), exist_ok=True)
+    with open(_TIMERS, "w") as f:
+        json.dump(items, f)
+
+
+def _left(t: dict) -> str:
+    s = max(0, int(t["ends"] - time.time()))
+    m, s = divmod(s, 60)
+    return f"{m} min {s} s" if m else f"{s} s"
+
+
+def timer(action: str = "set", minutes: float = 0, seconds: float = 0, label: str = "") -> str:
+    items = _load_timers()
+    if action == "set":
+        total = int(round(float(minutes or 0) * 60 + float(seconds or 0)))
+        if total <= 0:
+            return "How long should the timer be?"
+        if total > 24 * 3600:
+            return "Timers max out at 24 hours; use reminder_add for anything longer."
+        name = label.strip() or (f"{total // 60} minute timer" if total % 60 == 0 else f"{total} second timer")
+        proc = subprocess.Popen(["/bin/sh", "-c", _TIMER_SH, "sh", str(total), name],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        items.append({"label": name, "ends": time.time() + total, "pid": proc.pid})
+        _save_timers(items)
+        return f"Timer “{name}” set; it goes off at {datetime.fromtimestamp(items[-1]['ends']).strftime('%-I:%M:%S %p')} with a chime and a notification."
+    if action == "list":
+        if not items:
+            return "No timers running."
+        return "; ".join(f"“{t['label']}”: {_left(t)} left" for t in items)
+    if action == "cancel":
+        if not items:
+            return "No timers running."
+        hit = [t for t in items if label and label.lower() in t["label"].lower()] or (items if not label else [])
+        if not hit:
+            return f"No timer matching “{label}”. Running: " + ", ".join(t["label"] for t in items)
+        for t in hit:
+            try:
+                os.killpg(t["pid"], 15)
+            except OSError:
+                pass
+        _save_timers([t for t in items if t not in hit])
+        return "Cancelled " + ", ".join(f"“{t['label']}”" for t in hit) + "."
+    return "action must be set, list or cancel."
+
+
 # --------------------------------------------------------------------------- MCP plumbing
 
 S = lambda **p: {"type": "object", "properties": p}
@@ -588,6 +658,8 @@ TOOLS = {
                S(action=STR("see description"), value={"type": "integer"})),
     "notes": (notes, "Apple Notes: create (title, body), search (query), read (title), append (title, body).",
               S(action=STR("create | search | read | append"), title=STR("note title"), body=STR("text"), query=STR("search text"))),
+    "timer": (timer, "Countdown timers. ALWAYS use this for 'set a timer' / 'X minutes' requests — never the Clock app or UI automation. set (minutes and/or seconds, optional label) returns instantly; list reports time left; cancel (label, or all if none).",
+              S(action=STR("set | list | cancel"), minutes={"type": "number"}, seconds={"type": "number"}, label=STR("optional name, e.g. pasta"))),
     "reminder_add": (reminder_add, "Add an Apple Reminder, optionally due at an ISO local time (work it out from the current time you were given).",
                      S(title=STR("what to remember"), due=STR("ISO local time, e.g. 2026-11-14T09:00 (optional)"), list_name=STR("Reminders list (optional)"))),
     "calendar_add": (calendar_add, "Create an Apple Calendar event. Times are ISO local; end defaults to one hour after start.",

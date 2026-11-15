@@ -162,6 +162,16 @@ BLOCKING_RATE_LIMIT_STATUSES = {"rejected", "blocked", "exceeded", "throttled"}
 
 WARMUP_TEXT = "(system) Warm-up. Reply with exactly: OK"
 
+# The warm-up for a brain brought back with `--resume` after its process was
+# killed (a turn ran past the time limit) or died. The conversation is still
+# there; the turn that was cut off is not to be picked up again on its own —
+# a model told only "Warm-up" can read the unfinished request above it and
+# start acting on it inside the warm-up's budget.
+RESUME_WARMUP_TEXT = ("(system) You were restarted: your last turn was cut off "
+                      "before it finished, but the conversation so far is intact. "
+                      "Do not retry or continue that turn now; the user will ask "
+                      "again if they still want it. Reply with exactly: OK")
+
 # A warm-up failure whose text matches this is PERMANENT: no restart heals an
 # expired login, so retrying just burns the whole restart budget in seconds
 # (as happened live: 3 restarts in 5s on an expired OAuth session). Matched
@@ -412,6 +422,10 @@ class Brain:
         self._bg_tasks: set[asyncio.Task] = set()
         self._state_cbs: list[StateCallback] = []
         self.session_id: Optional[str] = None
+        # The session a crash restart last resumed, and when. A session that
+        # kills the brain again straight after being resumed is not resumed a
+        # second time: starting fresh is what gets JARVIS talking again.
+        self._last_resume: Optional[tuple[str, float]] = None
         self.model_in_use: Optional[str] = None
         self.context_tokens = 0
         # What the CLI actually started, straight out of its init event, and
@@ -740,7 +754,7 @@ class Brain:
                      + ", ".join(sorted(set(projects))) + ".")
         return base
 
-    def command(self) -> list[str]:
+    def command(self, resume: Optional[str] = None) -> list[str]:
         c = self.config
         cmd = shlex.split(self._claude) + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -754,6 +768,8 @@ class Brain:
         ]
         if c.mcp_config:
             cmd += ["--mcp-config", str(c.mcp_config)]
+        if resume:
+            cmd += ["--resume", resume]
         cmd += list(c.extra_args)
         return cmd
 
@@ -786,11 +802,12 @@ class Brain:
             except Exception as e:
                 log.warning(f"brain: restart task ended with {e}")
 
-    async def _spawn(self) -> bool:
+    async def _spawn(self, resume: Optional[str] = None) -> bool:
         async with self._spawn_lock:
-            return await self._spawn_locked()
+            return await self._spawn_locked(resume=resume)
 
-    async def _spawn_locked(self, rotating: bool = False) -> bool:
+    async def _spawn_locked(self, rotating: bool = False,
+                            resume: Optional[str] = None) -> bool:
         """Spawn a process and warm it up; True once it is serving.
 
         `rotating` means rotate() is the caller: it already holds the turn lock
@@ -806,7 +823,7 @@ class Brain:
         self.generation += 1
         try:
             proc = await asyncio.create_subprocess_exec(
-                *self.command(), cwd=str(self.config.home), env=self.child_env(),
+                *self.command(resume), cwd=str(self.config.home), env=self.child_env(),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 # Without this the brain's readers keep asyncio's 64 KiB line
@@ -828,7 +845,8 @@ class Brain:
         self._reader = asyncio.create_task(self._read_stdout(proc))
         self._stderr_task = asyncio.create_task(self._drain_stderr(proc))
         run_warmup = self._turn_locked if rotating else self._turn
-        warm = await run_warmup(WARMUP_TEXT, "system", None,
+        warm = await run_warmup(RESUME_WARMUP_TEXT if resume else WARMUP_TEXT,
+                                "system", None,
                                 timeout=self.config.warmup_timeout, warmup=True)
         if warm.stop_reason != "result" or proc is not self._proc or self._stopping:
             # A stop() that landed while we were still inside the spawn syscall
@@ -1051,6 +1069,10 @@ class Brain:
                 self._inflight = None
         if t.stop_reason == "result":
             self.context_tokens = t.context_tokens()
+            if not warmup:
+                # A real answer out of a resumed session clears it: the next
+                # crash, however soon, may resume again.
+                self._last_resume = None
             if warmup:
                 # The one turn that carries no conversation: whatever it cost
                 # is the resident floor — the system prompt, CLAUDE.md, and
@@ -1264,6 +1286,23 @@ class Brain:
                 await asyncio.sleep(backoff)
                 if self._stopping or self.ready:
                     return              # stopped, or an explicit start() already won
+                # The first attempt reopens the conversation the dead process
+                # was in, so a turn that ran long costs that one answer and not
+                # everything said before it. If that attempt fails, the next
+                # one starts fresh: `_resume_candidate` never offers the same
+                # session twice before it has answered.
+                resume = self._resume_candidate()
+                if resume:
+                    self._last_resume = (resume, time.monotonic())
+                    if await self._spawn(resume=resume):
+                        # Keyed on the id the resumed process reports, in case
+                        # the CLI gave the reopened conversation a new one.
+                        self._last_resume = (self.session_id or resume, time.monotonic())
+                        log.info(f"brain: resumed session {resume} after {reason}")
+                        return
+                    log.warning(f"brain: could not resume {resume}; next attempt starts fresh")
+                    reason = "resume failed"
+                    continue
                 if await self._spawn():
                     return
                 reason = "start failed"
@@ -1273,6 +1312,16 @@ class Brain:
             self._failed = True
             log.error(f"brain: restart crashed: {e}", exc_info=True)
             await self._emit("failed", reason=f"restart crashed: {e}")
+
+    def _resume_candidate(self) -> Optional[str]:
+        """The session a crash restart should reopen, or None for a fresh one."""
+        sid = self.session_id
+        if not sid:
+            return None
+        last = self._last_resume
+        if last and last[0] == sid and time.monotonic() - last[1] < self.config.restart_window:
+            return None
+        return sid
 
     def _rate_limited(self) -> bool:
         info = self.rate_limit

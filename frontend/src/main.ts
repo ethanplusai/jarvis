@@ -19,6 +19,8 @@ type State = "idle" | "listening" | "thinking" | "speaking" | "compacting";
 let currentState: State = "idle";
 let isMuted = true;
 let unmuteRequested = false;
+// Muted with the button: a clap wake ("unmute" from the server) must not undo it.
+let heldMute = false;
 
 const statusEl = document.getElementById("status-text")!;
 const errorEl = document.getElementById("error-text")!;
@@ -179,10 +181,13 @@ socket.onMessage((msg) => {
   const type = msg.type as string;
 
   if (type === "unmute") {
+    if (heldMute) return;
     unmuteRequested = true;
     if (isMuted) setMuted(false);
   } else if (type === "config") {
     muteMicDuringSpeech = Boolean(msg.muteMicDuringSpeech);
+    // Sent on every (re)connect; the server forgets the hold when the socket drops.
+    if (heldMute) socket.send({ type: "muted", value: true });
     shareLocation();
   } else if (type === "audio") {
     const data = msg.data as string;
@@ -257,8 +262,10 @@ function setMuted(m: boolean) {
   btnMute.classList.toggle("muted", isMuted);
   if (isMuted) {
     voiceInput.pause();
+    micMonitor.pause();
     transition("idle");
   } else {
+    micMonitor.resume();
     voiceInput.resume();
     transition("listening");
   }
@@ -267,6 +274,8 @@ function setMuted(m: boolean) {
 btnMute.addEventListener("click", (e) => {
   e.stopPropagation();
   setMuted(!isMuted);
+  heldMute = isMuted;
+  socket.send({ type: "muted", value: heldMute });
 });
 
 btnMenu.addEventListener("click", (e) => {
