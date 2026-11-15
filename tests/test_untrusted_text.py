@@ -54,6 +54,7 @@ def test_note_read_is_wrapped(monkeypatch):
 
 def test_applescript_result_is_wrapped(monkeypatch):
     monkeypatch.setattr(mac_mcp, "osa", lambda *a, **k: EVIL)
+    monkeypatch.setattr(mac_mcp, "_refusal", lambda tool: None)   # the gate is tests/test_mac_gate.py's
     out = mac_mcp.run_applescript('tell application "Mail" to get subject of message 1 of inbox')
     assert out.startswith("OK. Result:\n<session-output")
 

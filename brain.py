@@ -524,12 +524,29 @@ class Brain:
         The label is said out loud in the refusal, so the user hears which
         thing JARVIS declined to act on rather than a generic no.
         """
+        return self.turn_untrusted_source_besides()
+
+    def turn_untrusted_source_besides(self, caller: str = "") -> Optional[str]:
+        """`turn_untrusted_source`, not counting the call asking.
+
+        A connected server's tool (`mac_mcp`'s `email`) asks the gate from
+        INSIDE its own call, and the CLI's tool_use for that call is already
+        on `t.tools` — so it would taint itself and always be refused. The
+        last tool named `mcp__<server>__<caller>` is that call; its result
+        has not come back yet, so it has put no text in the turn.
+        """
         t = self._inflight
         if t is None:
             return None
         if t.untrusted_label:
             return t.untrusted_label
-        for name in t.tools:
+        tools = list(t.tools)
+        if caller:
+            for i in range(len(tools) - 1, -1, -1):
+                if tools[i].endswith(f"__{caller}") and not tools[i].startswith("mcp__jarvis__"):
+                    del tools[i]
+                    break
+        for name in tools:
             source = untrusted_tool_source(name)
             if source:
                 return source

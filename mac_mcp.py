@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
+from jarvis_mcp import _forward
 from untrusted_text import wrap
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
@@ -72,6 +73,19 @@ def as_date_script(var: str, dt: datetime) -> str:
             f"set month of {var} to {dt.month}\n"
             f"set day of {var} to {dt.day}\n"
             f"set time of {var} to {dt.hour * 3600 + dt.minute * 60}\n")
+
+
+def _refusal(tool: str) -> str | None:
+    """JARVIS's acting-tool gate, or None to go ahead.
+
+    The CLI calls this server directly, so server.py never sees these calls;
+    `may_act` puts them through the same check (the user asked, and nothing
+    foreign was read this turn). Closed when JARVIS can't be asked.
+    """
+    if not os.getenv("JARVIS_TOOL_URL"):
+        return "Refused: JARVIS isn't there to check this is safe to do."
+    ok, text, _ = _forward("may_act", {"tool": tool})
+    return None if ok else text
 
 
 # --------------------------------------------------------------------------- apps
@@ -360,6 +374,8 @@ def message_send(to: str, text: str, confirmed: bool = False) -> str:
     if not confirmed:
         return (f"PREVIEW — not sent. To {name} ({handle}): “{text}”. Read this back to him and send only "
                 f"if he says yes, by calling again with confirmed=true and the same to/text.")
+    if refused := _refusal("message_send"):
+        return refused
     osa('''on run argv
 tell application "Messages"
   set svc to 1st account whose service type = iMessage
@@ -381,6 +397,8 @@ def email(to: str, subject: str, body: str, confirmed: bool = False) -> str:
     if not confirmed:
         return (f"PREVIEW — not sent. To {name} <{addr}>, subject “{subject}”: “{body}”. Read it back and send "
                 f"only if he says yes (call again with confirmed=true).")
+    if refused := _refusal("email"):
+        return refused
     osa('''on run argv
 tell application "Mail"
   set m to make new outgoing message with properties {subject:(item 2 of argv), content:(item 3 of argv), visible:false}
@@ -522,6 +540,8 @@ _MODS = {"cmd": "command down", "command": "command down", "shift": "shift down"
 
 def ui_act(action: str, app_name: str = "", target: str = "", text: str = "", keys: str = "") -> str:
     a = (action or "").lower()
+    if refused := _refusal("ui_act"):
+        return refused
     if app_name:
         subprocess.run(["open", "-a", app_name], capture_output=True)
         time.sleep(0.6)
@@ -563,7 +583,9 @@ def ui_act(action: str, app_name: str = "", target: str = "", text: str = "", ke
 
 
 _BLOCKED = re.compile(r"do\s+shell\s+script|\bdelete\b|empty\s+(the\s+)?trash|\berase\b|\bformat\b|password|keychain|"
-                      r"\bsudo\b|administrator privileges|\brm\s|move\s.+\sto\s+trash|\bpurchase\b|\bbuy\b", re.I)
+                      r"\bsudo\b|administrator privileges|\brm\s|move\s.+\sto\s+trash|\bpurchase\b|\bbuy\b|"
+                      # other ways to run code: Terminal, nested scripts, raw Apple events, ObjC bridge
+                      r"do\s+script|run\s+script|do\s+javascript|«|use\s+framework|NSTask|NSAppleScript", re.I)
 
 
 def run_applescript(script: str) -> str:
@@ -572,6 +594,8 @@ def run_applescript(script: str) -> str:
     if _BLOCKED.search(script):
         return ("Refused: that script deletes, erases, buys, touches passwords or runs shell commands. "
                 "Tell him what you would need to do and let him do it himself.")
+    if refused := _refusal("run_applescript"):
+        return refused
     try:
         out = osa(script, timeout=60)
     except Exception as e:

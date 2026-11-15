@@ -105,7 +105,10 @@ arbitrary LLM and file content, so everything goes through
 - `mac_mcp.py` — Stdio MCP server for operating the Mac through each app's
   scripting interface. Every action reports what actually happened. Sending
   anything off the Mac takes two calls, a preview and then `confirmed=true`.
-  Destructive AppleScript is refused
+  Destructive AppleScript is refused. The CLI calls this server directly, so
+  sending, AppleScript and window actions first ask `/internal/tool` for
+  `may_act`: the same origin and untrusted-text gate JARVIS's own acting tools
+  get. `server.py` gives only this file the tool channel's env
 - `briefing_mcp.py` — Stdio MCP server for the day's briefing: Calendar,
   Reminders, weather (wttr.in) and RSS headlines, with no API keys
 - `untrusted_text.py` — The untrusted-text wrapper for `mac_mcp.py` and

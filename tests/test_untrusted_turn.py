@@ -143,6 +143,18 @@ def test_every_tool_decides_whether_it_taints(wired):
         "a name here that is not a registered tool gates nothing and is a typo"
 
 
+def test_may_act_answers_for_the_gate(call):
+    """What mac_mcp.py asks before it sends, emails or runs anything."""
+    _call, brain, _, _ = call
+    ask = lambda: _call("may_act")   # `tool=` would clash with _call's own; the stand-in brain ignores it
+    assert ask()["ok"]
+    brain.label = "mac"                         # a note it read this turn
+    refused = ask()
+    assert not refused["ok"] and "mac" in refused["text"]
+    brain.label, brain.current_origin = None, "event"
+    assert not ask()["ok"]
+
+
 def test_every_exemption_is_justified_in_words(wired):
     server, _ = wired
     for tool, reason in server.TAINT_EXEMPT_TOOLS.items():
