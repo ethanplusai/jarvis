@@ -28,6 +28,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
+from untrusted_text import wrap
+
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
 
 
@@ -249,7 +251,7 @@ on min(a, b)
   if a < b then return a
   return b
 end min''', query or title)
-        return ("Notes:\n" + out) if out else f"No notes matching “{query or title}”."
+        return ("Notes:\n" + wrap("notes", out)) if out else f"No notes matching “{query or title}”."
     if a == "read":
         out = osa('''on run argv
 tell application "Notes"
@@ -258,7 +260,7 @@ tell application "Notes"
   return plaintext of item 1 of ns
 end tell
 end run''', title or query)
-        return out[:3000] if out else f"No note matching “{title or query}”."
+        return wrap("note", out) if out else f"No note matching “{title or query}”."
     if a == "append":
         out = osa('''on run argv
 tell application "Notes"
@@ -454,7 +456,10 @@ def ui_inspect(app_name: str = "") -> str:
         role, nm, ds, v = (parts + ["", "", "", ""])[:4]
         label = nm or ds
         lines.append(f"- {role[2:]}: “{label}”" + (f" = {v}" if v and v != label else ""))
-    return "\n".join(lines) if lines else "Nothing readable in that window."
+    if not lines:
+        return "Nothing readable in that window."
+    # Whatever is on screen (a web page, an email) was written by someone else.
+    return "Window contents:\n" + wrap("screen", "\n".join(lines))
 
 
 _ACT = '''on run argv
@@ -571,7 +576,7 @@ def run_applescript(script: str) -> str:
         out = osa(script, timeout=60)
     except Exception as e:
         return f"Script error: {e}"
-    return f"OK. Result: {out[:1500]}" if out else "OK (no result returned)."
+    return ("OK. Result:\n" + wrap("script result", out, cap=1500)) if out else "OK (no result returned)."
 
 
 # --------------------------------------------------------------------------- timers

@@ -22,6 +22,8 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from untrusted_text import wrap
+
 LOCATION = os.getenv("BRIEFING_LOCATION", "")
 NEWS_FEED = os.getenv("BRIEFING_NEWS_FEED", "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en")
 UA = {"User-Agent": "jarvis-briefing/1.0"}
@@ -80,7 +82,8 @@ return out'''
     for dt, allday, title, cal in rows:
         when = dt.strftime("%a %b %d") + (" (all day)" if allday else dt.strftime(" %-I:%M %p"))
         out.append(f"- {when}: {title} [{cal}]")
-    return "Calendar:\n" + "\n".join(out)
+    # Event titles come from whoever sent the invitation.
+    return "Calendar:\n" + wrap("calendar", "\n".join(out))
 
 
 def reminders() -> str:
@@ -130,7 +133,8 @@ return out'''
     out = "Reminders due today or overdue:\n" + ("\n".join(lines) if lines else "- none")
     if undated:
         out += f"\nOpen reminders with no date ({len(undated)}):\n" + "\n".join(undated[:8])
-    return out
+    # Shared lists hold other people's words.
+    return wrap("reminders", out)
 
 
 def open_app(name: str) -> str:
@@ -265,7 +269,7 @@ def news_headlines(count: int = 5) -> str:
             root = ET.fromstring(r.read())
         titles = [i.findtext("title", "").strip() for i in root.iter("item")]
         titles = [t for t in titles if t][:count]
-        return "Top headlines:\n" + "\n".join(f"- {t}" for t in titles) if titles else "No headlines found."
+        return ("Top headlines:\n" + wrap("headlines", "\n".join(f"- {t}" for t in titles))) if titles else "No headlines found."
     except Exception as e:
         return f"Headlines unavailable: {e}"
 

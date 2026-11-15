@@ -108,6 +108,9 @@ arbitrary LLM and file content, so everything goes through
   Destructive AppleScript is refused
 - `briefing_mcp.py` — Stdio MCP server for the day's briefing: Calendar,
   Reminders, weather (wttr.in) and RSS headlines, with no API keys
+- `untrusted_text.py` — The untrusted-text wrapper for `mac_mcp.py` and
+  `briefing_mcp.py`: screen text, notes, calendar titles and headlines
+  arrive in the same block `server._wrap_untrusted` writes
 - `clap_listener.py` — Double-clap wake listener, started by `start-jarvis.sh`
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback

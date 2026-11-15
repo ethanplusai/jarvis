@@ -471,10 +471,9 @@ EXEMPT = {
         "conversation"),
     "mac_mcp.ui_inspect": (
         "a FALSE MATCH on the field name: `title` here is `str.title()` "
-        "capitalising the APP/WINDOW tag. Recorded honestly, though: the "
-        "labels this returns are whatever is on screen, a web page included, "
-        "and mac_mcp hands them to the brain without `_wrap_untrusted`. That "
-        "is a known gap in mac_mcp, separate from session fields"),
+        "capitalising the APP/WINDOW tag. The on-screen labels it returns "
+        "(a web page included) go inside `untrusted_text.wrap`, the same "
+        "block `_wrap_untrusted` writes, so nothing foreign is a header"),
     "brain.result": (
         "`origin` is one of this repository's own four literals (\"voice\", "
         "\"api\", \"system\", \"work\"), set by the caller that started the "
