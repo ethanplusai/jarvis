@@ -940,12 +940,14 @@ def _write_mcp_config(home: Path) -> Path:
     # gets the channel too. Only it: any other server is the user's third-party
     # code and never sees the token's path.
     mac_mcp = (Path(__file__).parent / "mac_mcp.py").resolve()
+    MAC_SERVERS.clear()
     for name, spec in servers.items():
         args = spec.get("args") if isinstance(spec, dict) else None
         if isinstance(args, list) and any(
                 isinstance(a, str) and Path(a).expanduser().resolve() == mac_mcp
                 for a in args):
             servers[name] = {**spec, "env": {**(spec.get("env") or {}), **tool_env}}
+            MAC_SERVERS.add(name)
     # Written LAST so it cannot be displaced whatever the file says. The
     # reserved-name check above is the message; this is the guarantee.
     servers[RESERVED_SERVER_NAME] = {
@@ -2407,6 +2409,9 @@ ACTING_TOOLS = {"steer_session"}
 # that server directly, so the acting-tool gate never saw those calls. An "ok"
 # from it means the gate passed.
 MAY_ACT = "may_act"
+# The names the user gave mac_mcp.py in connections.json, set by
+# _write_mcp_config. Only `mcp__<one of these>__<tool>` may ask may_act.
+MAC_SERVERS: set[str] = set()
 
 # The acting tools JARVIS says out loud BEFORE they happen: each one stages
 # its work, `_perform_staged_steers`/`_perform_staged_dialogs` reads it back
@@ -2550,7 +2555,7 @@ TAINT_EXEMPT_ACTING = {"answer_dialog"}
 MEMORY_WRITERS = {"remember", "project_note", "write_journal"}
 
 
-def _writer_untrusted_source(tool: str, caller: str = "") -> str | None:
+def _writer_untrusted_source(tool: str, callers=()) -> str | None:
     """What foreign text stands between this tool and a write, or None.
 
     For every acting tool but the memory writers this is the TURN's taint:
@@ -2578,8 +2583,8 @@ def _writer_untrusted_source(tool: str, caller: str = "") -> str | None:
     it is named as coming from a tainted generation when it does.
     """
     besides = getattr(brain_instance, "turn_untrusted_source_besides", None)
-    if caller and callable(besides):
-        source = besides(caller)
+    if callers and callable(besides):
+        source = besides(callers)
     else:
         source = getattr(brain_instance, "turn_untrusted_source", None)
     if source is None and (
@@ -2712,8 +2717,9 @@ async def internal_tool(request: Request):
         # origin is "user". And for a memory writer the TURN is not enough
         # either — see `_writer_untrusted_source` and
         # `_untrusted_content_refusal`.
-        caller = str(args.get("tool", "")) if tool == MAY_ACT else ""
-        source = _writer_untrusted_source(tool, caller)
+        callers = ({f"mcp__{s}__{args.get('tool')}" for s in MAC_SERVERS}
+                   if tool == MAY_ACT else set())
+        source = _writer_untrusted_source(tool, callers)
         refusal = _untrusted_content_refusal(
             tool, source is not None, source=source or "something I read")
         if refusal:

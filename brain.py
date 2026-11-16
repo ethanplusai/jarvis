@@ -125,6 +125,13 @@ def granted_tools(connections: list[str]) -> list[str]:
 WEB_CONTENT_TOOLS = {"WebSearch", "WebFetch"}
 
 
+# mac_mcp.py tools whose result carries nobody else's words (app names, the
+# volume, the user's own timer/reminder/event echoed back). Ignored ONLY when
+# that same server asks `may_act`; every other gate still counts them.
+# Not `media` (track titles), `notes`, `ui_inspect` or anything that reads.
+MAC_QUIET_TOOLS = {"app", "system", "timer", "reminder_add", "calendar_add"}
+
+
 def untrusted_tool_source(name: str) -> Optional[str]:
     """What a tool result came FROM, if it came from outside JARVIS — a short
     label to say out loud — or None if the turn stays clean.
@@ -526,14 +533,19 @@ class Brain:
         """
         return self.turn_untrusted_source_besides()
 
-    def turn_untrusted_source_besides(self, caller: str = "") -> Optional[str]:
+    def turn_untrusted_source_besides(self, callers=()) -> Optional[str]:
         """`turn_untrusted_source`, not counting the call asking.
 
         A connected server's tool (`mac_mcp`'s `email`) asks the gate from
         INSIDE its own call, and the CLI's tool_use for that call is already
         on `t.tools` — so it would taint itself and always be refused. The
-        last tool named `mcp__<server>__<caller>` is that call; its result
-        has not come back yet, so it has put no text in the turn.
+        last tool, if it is one of `callers` (full names, from server.py,
+        which knows which server is mac_mcp.py), is that call; its result has not
+        come back yet, so it has put no text in the turn. Only the LAST: if
+        it is not there yet, nothing is skipped and the answer is no.
+
+        That server's MAC_QUIET_TOOLS are skipped too: "open Mail, then click
+        Send" must not be refused because opening Mail tainted the turn.
         """
         t = self._inflight
         if t is None:
@@ -541,11 +553,11 @@ class Brain:
         if t.untrusted_label:
             return t.untrusted_label
         tools = list(t.tools)
-        if caller:
-            for i in range(len(tools) - 1, -1, -1):
-                if tools[i].endswith(f"__{caller}") and not tools[i].startswith("mcp__jarvis__"):
-                    del tools[i]
-                    break
+        last = tools[-1] if tools else ""
+        if last in callers:
+            server = last[:last.index("__", 5) + 2]     # "mcp__mac__"
+            tools = [n for n in tools[:-1]
+                     if not (n.startswith(server) and n[len(server):] in MAC_QUIET_TOOLS)]
         for name in tools:
             source = untrusted_tool_source(name)
             if source:

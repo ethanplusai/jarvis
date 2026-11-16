@@ -24,17 +24,38 @@ def _brain_with(*tools):
 def test_the_asking_call_does_not_taint_its_own_turn():
     b = _brain_with("mcp__mac__email")
     assert b.turn_untrusted_source == "mac"       # the CLI's view: tainted
-    assert b.turn_untrusted_source_besides("email") is None
+    assert b.turn_untrusted_source_besides({"mcp__mac__email"}) is None
 
 
 def test_an_earlier_read_in_the_turn_still_taints():
     b = _brain_with("mcp__mac__notes", "mcp__mac__email")
-    assert b.turn_untrusted_source_besides("email") == "mac"
+    assert b.turn_untrusted_source_besides({"mcp__mac__email"}) == "mac"
+
+
+def test_opening_an_app_first_does_not_block_the_click():
+    b = _brain_with("mcp__mac__app", "mcp__mac__timer", "mcp__mac__ui_act")
+    assert b.turn_untrusted_source_besides({"mcp__mac__ui_act"}) is None
+
+
+def test_quiet_names_on_another_server_still_taint():
+    b = _brain_with("mcp__notion__app", "mcp__mac__ui_act")
+    assert b.turn_untrusted_source_besides({"mcp__mac__ui_act"}) == "notion"
+
+
+def test_reading_the_screen_first_still_blocks_the_click():
+    b = _brain_with("mcp__mac__app", "mcp__mac__ui_inspect", "mcp__mac__ui_act")
+    assert b.turn_untrusted_source_besides({"mcp__mac__ui_act"}) == "mac"
+
+
+def test_an_unlogged_caller_skips_nothing():
+    """The brain has not seen this call's tool_use yet: refuse, never guess."""
+    b = _brain_with("mcp__gmail__email")
+    assert b.turn_untrusted_source_besides({"mcp__mac__email"}) == "gmail"
 
 
 def test_a_jarvis_tool_of_the_same_name_is_not_the_caller():
     b = _brain_with("mcp__jarvis__email", "mcp__mac__notes")
-    assert b.turn_untrusted_source_besides("email") == "mac"
+    assert b.turn_untrusted_source_besides({"mcp__mac__email"}) == "mac"
 
 
 # --- mac_mcp: asks before it acts, refuses when told no ---------------------
@@ -131,3 +152,4 @@ def test_only_this_repos_mac_server_gets_the_tool_channel(monkeypatch, tmp_path)
     assert servers["mac"]["env"]["X"] == "1"
     assert servers["mac"]["env"]["JARVIS_TOOL_TOKEN_FILE"] == servers["jarvis"]["env"]["JARVIS_TOOL_TOKEN_FILE"]
     assert "env" not in servers["notion"] or "JARVIS_TOOL_URL" not in servers["notion"]["env"]
+    assert server.MAC_SERVERS == {"mac"}            # whose calls may_act may skip
