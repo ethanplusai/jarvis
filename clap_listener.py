@@ -29,6 +29,8 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
+import data_paths   # honours JARVIS_DATA_DIR, like the server
+
 HERE = Path(__file__).resolve().parent
 SERVER = "https://127.0.0.1:8340"
 FRONTEND = "http://localhost:5173"
@@ -49,12 +51,10 @@ def log(msg: str) -> None:
 
 
 def _token() -> str:
-    for p in (HERE / "data" / "jarvis" / "tool-token",):
-        try:
-            return p.read_text().strip()
-        except OSError:
-            pass
-    return ""
+    try:
+        return data_paths.tool_token_path().read_text().strip()
+    except OSError:
+        return ""
 
 
 def _server_up() -> bool:
